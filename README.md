@@ -165,7 +165,7 @@ uv sync --all-extras --dev
 
 # Run linting and type checking
 uv run ruff check .
-uv run mypy app
+uv run mypy src
 uv run pytest
 
 ```

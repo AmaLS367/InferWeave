@@ -5,8 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models.deployment import DeploymentRequest
-from app.models.profile import ModelProfile
+from inferweave.models.deployment import DeploymentRequest
+from inferweave.models.profile import ModelProfile
 
 
 class RuntimeSpec(BaseModel):

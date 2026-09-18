@@ -2,10 +2,10 @@
 
 from abc import ABC, abstractmethod
 
-from app.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
-from app.models.enums import ProviderType
-from app.models.profile import ModelProfile
-from app.runtimes.base import RuntimeSpec
+from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
+from inferweave.models.enums import ProviderType
+from inferweave.models.profile import ModelProfile
+from inferweave.runtimes.base import RuntimeSpec
 
 
 class ComputeProvider(ABC):

@@ -2,11 +2,11 @@
 
 from typing import Any
 
-from app.models.deployment import Deployment, DeploymentRequest
-from app.models.profile import ModelProfile
-from app.providers.router import ProviderRouter
-from app.registry.base import ModelRegistry
-from app.runtimes.templates import get_runtime_template
+from inferweave.models.deployment import Deployment, DeploymentRequest
+from inferweave.models.profile import ModelProfile
+from inferweave.providers.router import ProviderRouter
+from inferweave.registry.base import ModelRegistry
+from inferweave.runtimes.templates import get_runtime_template
 
 
 class InferWeave:

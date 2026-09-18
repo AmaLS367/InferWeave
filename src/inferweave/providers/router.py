@@ -1,10 +1,10 @@
 """Provider router resolving provider names and selection strategies."""
 
-from app.core.exceptions import ProviderNotFoundError
-from app.models.profile import ModelProfile
-from app.providers.base import ComputeProvider
-from app.providers.modal_provider import ModalProvider
-from app.providers.skypilot import SkyPilotProvider
+from inferweave.core.exceptions import ProviderNotFoundError
+from inferweave.models.profile import ModelProfile
+from inferweave.providers.base import ComputeProvider
+from inferweave.providers.modal_provider import ModalProvider
+from inferweave.providers.skypilot import SkyPilotProvider
 
 
 class ProviderRouter:

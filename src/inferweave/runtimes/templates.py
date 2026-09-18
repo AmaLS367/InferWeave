@@ -1,8 +1,8 @@
 """Built-in runtime templates for Audio, LLM, Image, and Video workloads."""
 
-from app.models.deployment import DeploymentRequest
-from app.models.profile import ModelProfile
-from app.runtimes.base import RuntimeSpec, RuntimeTemplate
+from inferweave.models.deployment import DeploymentRequest
+from inferweave.models.profile import ModelProfile
+from inferweave.runtimes.base import RuntimeSpec, RuntimeTemplate
 
 
 class VLLMTemplate(RuntimeTemplate):

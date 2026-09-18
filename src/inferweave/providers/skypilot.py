@@ -3,12 +3,12 @@
 import sys
 import uuid
 
-from app.core.exceptions import ProviderPlatformError
-from app.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
-from app.models.enums import DeploymentState, ProviderType
-from app.models.profile import ModelProfile
-from app.providers.base import ComputeProvider
-from app.runtimes.base import RuntimeSpec
+from inferweave.core.exceptions import ProviderPlatformError
+from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
+from inferweave.models.enums import DeploymentState, ProviderType
+from inferweave.models.profile import ModelProfile
+from inferweave.providers.base import ComputeProvider
+from inferweave.runtimes.base import RuntimeSpec
 
 
 class SkyPilotProvider(ComputeProvider):

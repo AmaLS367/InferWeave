@@ -1,8 +1,12 @@
 """Model registry managing hardware profiles, default runtimes, and health specs."""
 
-from app.core.exceptions import ModelNotFoundError
-from app.models.enums import WorkloadType
-from app.models.profile import HardwareRequirements, HealthcheckConfig, ModelProfile
+from inferweave.core.exceptions import ModelNotFoundError
+from inferweave.models.enums import WorkloadType
+from inferweave.models.profile import (
+    HardwareRequirements,
+    HealthcheckConfig,
+    ModelProfile,
+)
 
 
 class ModelRegistry:

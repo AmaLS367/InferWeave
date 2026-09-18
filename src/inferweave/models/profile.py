@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import WorkloadType
+from inferweave.models.enums import WorkloadType
 
 
 class HardwareRequirements(BaseModel):

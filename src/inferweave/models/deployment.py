@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import DeploymentState
+from inferweave.models.enums import DeploymentState
 
 
 class DeploymentRequest(BaseModel):

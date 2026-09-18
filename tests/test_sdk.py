@@ -2,8 +2,8 @@
 
 import pytest
 
-from app import InferWeave, WorkloadType
-from app.core.exceptions import ModelNotFoundError, ProviderNotFoundError
+from inferweave import InferWeave, WorkloadType
+from inferweave.core.exceptions import ModelNotFoundError, ProviderNotFoundError
 
 
 def test_registry_builtins():
