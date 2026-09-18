@@ -58,6 +58,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 from inferweave.models import DeploymentRequest, DeploymentStatus
 
+
 class ComputeProvider(ABC):
     @abstractmethod
     async def deploy(self, request: DeploymentRequest) -> DeploymentStatus:

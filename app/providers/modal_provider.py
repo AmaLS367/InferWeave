@@ -11,7 +11,7 @@ from app.runtimes.base import RuntimeSpec
 
 class ModalProvider(ComputeProvider):
     """Serverless GPU provider adapter using Modal.
-    
+
     Since Modal is serverless and not covered by SkyPilot, this provider executes
     deployments directly via the Modal Python SDK with native container definition.
     """
@@ -31,6 +31,7 @@ class ModalProvider(ComputeProvider):
         """Lazy loads the modal SDK module."""
         try:
             import modal  # type: ignore
+
             return modal
         except ImportError as e:
             raise ImportError(
@@ -46,11 +47,20 @@ class ModalProvider(ComputeProvider):
         """Configures and launches a serverless deployment on Modal."""
         modal = self._get_modal_module()
 
-        deployment_id = f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+        deployment_id = (
+            f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+        )
 
         # Map hardware to Modal GPU specification
-        _gpu_name = (request.gpu_type or (profile.hardware.recommended_gpus[0] if profile.hardware.recommended_gpus else "A10G")).lower()
-        
+        _gpu_name = (
+            request.gpu_type
+            or (
+                profile.hardware.recommended_gpus[0]
+                if profile.hardware.recommended_gpus
+                else "A10G"
+            )
+        ).lower()
+
         # Build container image dynamically from runtime template spec
         image = modal.Image.from_registry(runtime.docker_image)
         if runtime.setup_commands:
@@ -94,4 +104,3 @@ class ModalProvider(ComputeProvider):
             provider=self.name,
             state=DeploymentState.HEALTHY,
         )
-

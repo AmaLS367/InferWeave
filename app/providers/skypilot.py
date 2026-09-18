@@ -13,7 +13,7 @@ from app.runtimes.base import RuntimeSpec
 
 class SkyPilotProvider(ComputeProvider):
     """Compute provider delegating GPU provisioning and execution to SkyPilot.
-    
+
     Supports: RunPod, AWS, GCP, Azure, Lambda Labs, Nebius, Vast.ai, OCI, Kubernetes, etc.
     """
 
@@ -44,6 +44,7 @@ class SkyPilotProvider(ComputeProvider):
         self._ensure_supported_platform()
         try:
             import sky  # type: ignore
+
             return sky
         except ImportError as e:
             raise ImportError(
@@ -62,16 +63,24 @@ class SkyPilotProvider(ComputeProvider):
         self._ensure_supported_platform()
         sky = self._get_sky_module()
 
-        deployment_id = f"iw-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+        deployment_id = (
+            f"iw-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+        )
 
         # Map hardware requirements to SkyPilot resources
-        gpu_spec = request.gpu_type or (profile.hardware.recommended_gpus[0] if profile.hardware.recommended_gpus else "A10G")
+        gpu_spec = request.gpu_type or (
+            profile.hardware.recommended_gpus[0]
+            if profile.hardware.recommended_gpus
+            else "A10G"
+        )
         gpu_count = request.num_gpus or profile.hardware.gpu_count
         accelerators = f"{gpu_spec}:{gpu_count}"
 
         # Construct task definition
-        setup_script = "\n".join(runtime.setup_commands) if runtime.setup_commands else None
-        
+        setup_script = (
+            "\n".join(runtime.setup_commands) if runtime.setup_commands else None
+        )
+
         # Build SkyPilot task
         task = sky.Task(
             name=deployment_id,
@@ -81,7 +90,9 @@ class SkyPilotProvider(ComputeProvider):
         )
 
         resources = sky.Resources(
-            cloud=sky.clouds.CLOUD_REGISTRY.from_str(self.name) if hasattr(sky.clouds, "CLOUD_REGISTRY") else None,
+            cloud=sky.clouds.CLOUD_REGISTRY.from_str(self.name)
+            if hasattr(sky.clouds, "CLOUD_REGISTRY")
+            else None,
             accelerators=accelerators,
             ports=[runtime.port],
         )

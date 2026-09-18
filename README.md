@@ -33,6 +33,7 @@ Deploying open-weight AI models into production is notoriously complex:
 import asyncio
 from inferweave import InferWeave
 
+
 async def main():
     weave = InferWeave()
 
@@ -43,6 +44,7 @@ async def main():
     )
 
     print(f"Endpoint live at: {deployment.endpoint_url}")
+
 
 asyncio.run(main())
 ```

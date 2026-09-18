@@ -33,7 +33,7 @@ class InferWeave:
         custom_args: dict[str, Any] | None = None,
     ) -> Deployment:
         """Deploys a model to the requested compute provider.
-        
+
         Args:
             model: Model identifier from registry (e.g. 'fish-s2-pro', 'meta-llama/Meta-Llama-3-8B-Instruct')
             provider: Target provider ('runpod', 'aws', 'modal', or 'auto')
@@ -43,7 +43,7 @@ class InferWeave:
             env: Custom environment variables
             autostop_mins: Idle shutdown timer in minutes
             custom_args: Provider-specific extra configurations
-            
+
         Returns:
             Deployment: Live deployment handle with lifecycle controls and endpoint details.
         """

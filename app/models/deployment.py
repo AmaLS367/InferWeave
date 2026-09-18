@@ -11,23 +11,42 @@ from app.models.enums import DeploymentState
 
 class DeploymentRequest(BaseModel):
     """User request specification for deploying a model."""
+
     model: str = Field(..., description="Target model name or HuggingFace ID")
-    provider: str = Field(default="auto", description="Compute provider name (e.g. 'runpod', 'aws', 'modal')")
-    strategy: str | None = Field(default="cheapest", description="Routing strategy when provider='auto'")
-    gpu_type: str | None = Field(default=None, description="Explicit GPU override, e.g. 'A100'")
-    num_gpus: int | None = Field(default=None, description="Explicit GPU count override")
-    env: dict[str, str] = Field(default_factory=dict, description="Custom environment variable overrides")
-    autostop_mins: int | None = Field(default=30, description="Auto-terminate after idle minutes")
-    custom_args: dict[str, Any] = Field(default_factory=dict, description="Provider or runtime specific arguments")
+    provider: str = Field(
+        default="auto",
+        description="Compute provider name (e.g. 'runpod', 'aws', 'modal')",
+    )
+    strategy: str | None = Field(
+        default="cheapest", description="Routing strategy when provider='auto'"
+    )
+    gpu_type: str | None = Field(
+        default=None, description="Explicit GPU override, e.g. 'A100'"
+    )
+    num_gpus: int | None = Field(
+        default=None, description="Explicit GPU count override"
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict, description="Custom environment variable overrides"
+    )
+    autostop_mins: int | None = Field(
+        default=30, description="Auto-terminate after idle minutes"
+    )
+    custom_args: dict[str, Any] = Field(
+        default_factory=dict, description="Provider or runtime specific arguments"
+    )
 
 
 class DeploymentStatus(BaseModel):
     """Snapshot of a deployment's current operational state."""
+
     id: str = Field(..., description="Unique deployment identifier")
     model: str = Field(..., description="Model identifier")
     provider: str = Field(..., description="Provider hosting the deployment")
     state: DeploymentState = Field(default=DeploymentState.PENDING)
-    endpoint_url: str | None = Field(default=None, description="Live HTTP/HTTPS inference URL")
+    endpoint_url: str | None = Field(
+        default=None, description="Live HTTP/HTTPS inference URL"
+    )
     error_message: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ready_at: datetime | None = Field(default=None)

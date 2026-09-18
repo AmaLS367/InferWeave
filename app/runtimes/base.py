@@ -11,13 +11,20 @@ from app.models.profile import ModelProfile
 
 class RuntimeSpec(BaseModel):
     """Concrete container configuration produced by a runtime template."""
+
     name: str = Field(..., description="Runtime template identifier, e.g. 'vllm'")
     docker_image: str = Field(..., description="Container image repository and tag")
-    setup_commands: list[str] = Field(default_factory=list, description="Commands executed before starting the server")
+    setup_commands: list[str] = Field(
+        default_factory=list, description="Commands executed before starting the server"
+    )
     run_command: str = Field(..., description="Primary server launch command")
     port: int = Field(default=8000, description="Exposed port for inference requests")
-    env_vars: dict[str, str] = Field(default_factory=dict, description="Environment variables injected into runtime")
-    healthcheck_path: str = Field(default="/health", description="HTTP endpoint for health monitoring")
+    env_vars: dict[str, str] = Field(
+        default_factory=dict, description="Environment variables injected into runtime"
+    )
+    healthcheck_path: str = Field(
+        default="/health", description="HTTP endpoint for health monitoring"
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

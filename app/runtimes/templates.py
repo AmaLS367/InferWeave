@@ -1,6 +1,5 @@
 """Built-in runtime templates for Audio, LLM, Image, and Video workloads."""
 
-
 from app.models.deployment import DeploymentRequest
 from app.models.profile import ModelProfile
 from app.runtimes.base import RuntimeSpec, RuntimeTemplate
@@ -121,5 +120,7 @@ _BUILTIN_TEMPLATES: dict[str, RuntimeTemplate] = {
 def get_runtime_template(name: str) -> RuntimeTemplate:
     """Retrieves a runtime template by identifier."""
     if name not in _BUILTIN_TEMPLATES:
-        raise ValueError(f"Runtime template '{name}' not found. Available: {list(_BUILTIN_TEMPLATES.keys())}")
+        raise ValueError(
+            f"Runtime template '{name}' not found. Available: {list(_BUILTIN_TEMPLATES.keys())}"
+        )
     return _BUILTIN_TEMPLATES[name]

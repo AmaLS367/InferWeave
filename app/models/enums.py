@@ -5,6 +5,7 @@ from enum import Enum
 
 class WorkloadType(str, Enum):
     """Supported AI workload domains."""
+
     AUDIO = "audio"
     LLM = "llm"
     IMAGE = "image"
@@ -14,6 +15,7 @@ class WorkloadType(str, Enum):
 
 class ProviderType(str, Enum):
     """Underlying infrastructure provider backends."""
+
     SKYPILOT = "skypilot"
     MODAL = "modal"
     LOCAL_DOCKER = "docker"
@@ -22,6 +24,7 @@ class ProviderType(str, Enum):
 
 class DeploymentState(str, Enum):
     """Lifecycle states of a deployment."""
+
     PENDING = "pending"
     PROVISIONING = "provisioning"
     STARTING = "starting"

@@ -1,7 +1,6 @@
 """InferWeave core exception hierarchy."""
 
 
-
 class InferWeaveError(Exception):
     """Base exception for all InferWeave errors."""
 

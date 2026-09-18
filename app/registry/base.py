@@ -1,6 +1,5 @@
 """Model registry managing hardware profiles, default runtimes, and health specs."""
 
-
 from app.core.exceptions import ModelNotFoundError
 from app.models.enums import WorkloadType
 from app.models.profile import HardwareRequirements, HealthcheckConfig, ModelProfile
@@ -23,7 +22,9 @@ class ModelRegistry:
             raise ModelNotFoundError(model_id)
         return self._models[model_id]
 
-    def list_models(self, workload_type: WorkloadType | None = None) -> list[ModelProfile]:
+    def list_models(
+        self, workload_type: WorkloadType | None = None
+    ) -> list[ModelProfile]:
         """Lists registered models, optionally filtered by workload category."""
         if workload_type is None:
             return list(self._models.values())
