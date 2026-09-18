@@ -1,5 +1,7 @@
 """Unit tests for InferWeave core abstractions, registry, and provider routing."""
 
+from unittest.mock import patch
+
 import pytest
 
 from inferweave import InferWeave, WorkloadType
@@ -39,14 +41,47 @@ def test_router_unknown_provider():
 
 
 @pytest.mark.asyncio
-async def test_modal_deployment_flow():
+async def test_modal_dry_run_deployment_flow():
     weave = InferWeave()
     deployment = await weave.deploy(
         model="fish-s2-pro",
         provider="modal",
+        dry_run=True,
     )
     assert deployment.id.startswith("iw-modal-")
     assert deployment.provider == "modal"
     assert deployment.model == "fish-s2-pro"
     assert deployment.endpoint_url is not None
-    assert deployment.is_healthy
+    assert "dryrun" in deployment.endpoint_url
+
+
+@pytest.mark.asyncio
+async def test_modal_deployment_flow_with_deploy_call():
+    weave = InferWeave()
+    with patch("modal.App.deploy") as mock_deploy:
+        mock_deploy.return_value = None
+        with patch("modal.Function.get_web_url", return_value="https://my-app--serve.modal.run"):
+            deployment = await weave.deploy(
+                model="fish-s2-pro",
+                provider="modal",
+            )
+            mock_deploy.assert_called_once()
+            assert deployment.id.startswith("iw-modal-")
+            assert deployment.provider == "modal"
+            assert deployment.model == "fish-s2-pro"
+            assert deployment.endpoint_url == "https://my-app--serve.modal.run"
+            assert deployment.is_healthy
+
+
+@pytest.mark.asyncio
+async def test_skypilot_dry_run_deployment_flow():
+    weave = InferWeave()
+    deployment = await weave.deploy(
+        model="fish-s2-pro",
+        provider="runpod",
+        dry_run=True,
+    )
+    assert deployment.id.startswith("iw-fish-speech-") or deployment.id.startswith("iw-fish-s2-pro-")
+    assert deployment.provider == "runpod"
+    assert deployment.endpoint_url is not None
+    assert "dryrun" in deployment.endpoint_url

@@ -35,6 +35,10 @@ class DeploymentRequest(BaseModel):
     custom_args: dict[str, Any] = Field(
         default_factory=dict, description="Provider or runtime specific arguments"
     )
+    dry_run: bool = Field(
+        default=False,
+        description="When True, validates and builds deployment specs without provisioning remote cloud resources",
+    )
 
 
 class DeploymentStatus(BaseModel):

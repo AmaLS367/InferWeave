@@ -31,6 +31,7 @@ class InferWeave:
         env: dict[str, str] | None = None,
         autostop_mins: int = 30,
         custom_args: dict[str, Any] | None = None,
+        dry_run: bool = False,
     ) -> Deployment:
         """Deploys a model to the requested compute provider.
 
@@ -43,6 +44,7 @@ class InferWeave:
             env: Custom environment variables
             autostop_mins: Idle shutdown timer in minutes
             custom_args: Provider-specific extra configurations
+            dry_run: When True, constructs the configuration without launching live cloud resources
 
         Returns:
             Deployment: Live deployment handle with lifecycle controls and endpoint details.
@@ -56,6 +58,7 @@ class InferWeave:
             env=env or {},
             autostop_mins=autostop_mins,
             custom_args=custom_args or {},
+            dry_run=dry_run,
         )
 
         # 1. Resolve model profile
