@@ -1,7 +1,19 @@
-# InferWeave 🪢
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/inferweave_banner.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/inferweave_banner_light.png">
+    <img alt="InferWeave Logo" src="assets/inferweave_banner.png" width="580">
+  </picture>
+</p>
 
-[![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+<p align="center">
+  <em>Unified AI inference deployment SDK across cloud GPU providers</em>
+</p>
+
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%20%7C%203.12-blue" alt="Python Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License"></a>
+</p>
 
 > **Unified AI inference deployment SDK across cloud GPU providers.**  
 > Choose your model or workload (Audio, LLM, Image, Video) — InferWeave provisions the GPU infrastructure, sets up the container environment, manages CUDA/VRAM requirements, and exposes a ready-to-use endpoint.
