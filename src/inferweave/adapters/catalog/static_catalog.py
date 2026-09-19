@@ -1,17 +1,38 @@
-"""Static catalog adapter providing built-in hardware specs, pricing, and latency defaults."""
-
+from inferweave.adapters.catalog.static_gpu_catalog import StaticGpuCatalogAdapter
 from inferweave.models.routing import GpuSpec, InstanceOffer
 from inferweave.ports.catalog import ProviderCatalogPort
+from inferweave.ports.gpu_catalog import GpuCatalogPort
 
 
-class StaticCatalogAdapter(ProviderCatalogPort):
+class StaticCatalogAdapter(ProviderCatalogPort, GpuCatalogPort):
     """Provides curated, offline-compatible GPU cloud instance offerings and pricing.
 
     Ensures robust, instant (<1ms) routing without requiring network calls or cloud credentials.
     """
 
-    def __init__(self, custom_offers: list[InstanceOffer] | None = None) -> None:
-        self._offers: list[InstanceOffer] = custom_offers if custom_offers is not None else self._build_default_offers()
+    def __init__(
+        self,
+        custom_offers: list[InstanceOffer] | None = None,
+        gpu_catalog: GpuCatalogPort | None = None,
+    ) -> None:
+        self._gpu_catalog = gpu_catalog or StaticGpuCatalogAdapter()
+        self._offers: list[InstanceOffer] = (
+            custom_offers if custom_offers is not None else self._build_default_offers()
+        )
+
+    def get_gpu(self, name: str) -> GpuSpec | None:
+        """Retrieves GPU specification by name via the GPU catalog port."""
+        return self._gpu_catalog.get_gpu(name)
+
+    def list_gpus(self) -> list[GpuSpec]:
+        """Lists all known GPU hardware specifications."""
+        return self._gpu_catalog.list_gpus()
+
+    def find_sufficient_gpus(
+        self, min_vram_gb: float, gpu_count: int = 1
+    ) -> list[GpuSpec]:
+        """Finds all GPU models satisfying minimum VRAM requirement."""
+        return self._gpu_catalog.find_sufficient_gpus(min_vram_gb, gpu_count)
 
     async def get_offers(self, provider_name: str | None = None) -> list[InstanceOffer]:
         if provider_name is None:
@@ -20,19 +41,9 @@ class StaticCatalogAdapter(ProviderCatalogPort):
         return [o for o in self._offers if o.provider.lower() == p_name]
 
     def _build_default_offers(self) -> list[InstanceOffer]:
-        gpu_specs = {
-            "T4": GpuSpec(name="T4", vram_gb=16.0, architecture="Turing", compute_capability=7.5),
-            "L4": GpuSpec(name="L4", vram_gb=24.0, architecture="Ada Lovelace", compute_capability=8.9),
-            "A10G": GpuSpec(name="A10G", vram_gb=24.0, architecture="Ampere", compute_capability=8.6),
-            "A10": GpuSpec(name="A10", vram_gb=24.0, architecture="Ampere", compute_capability=8.6),
-            "RTX3090": GpuSpec(name="RTX3090", vram_gb=24.0, architecture="Ampere", compute_capability=8.6),
-            "RTX4090": GpuSpec(name="RTX4090", vram_gb=24.0, architecture="Ada Lovelace", compute_capability=8.9),
-            "L40S": GpuSpec(name="L40S", vram_gb=48.0, architecture="Ada Lovelace", compute_capability=8.9),
-            "A100-40GB": GpuSpec(name="A100-40GB", vram_gb=40.0, architecture="Ampere", compute_capability=8.0),
-            "A100": GpuSpec(name="A100", vram_gb=80.0, architecture="Ampere", compute_capability=8.0),
-            "A100-80GB": GpuSpec(name="A100-80GB", vram_gb=80.0, architecture="Ampere", compute_capability=8.0),
-            "H100": GpuSpec(name="H100", vram_gb=80.0, architecture="Hopper", compute_capability=9.0),
-        }
+        gpu_specs = {g.name: g for g in self._gpu_catalog.list_gpus()}
+        if "A100" not in gpu_specs and "A100-80GB" in gpu_specs:
+            gpu_specs["A100"] = gpu_specs["A100-80GB"]
 
         offers: list[InstanceOffer] = [
             # --- Modal (Serverless, ultra-fast cold start, per-second billing) ---
@@ -84,7 +95,6 @@ class StaticCatalogAdapter(ProviderCatalogPort):
                 estimated_cold_start_sec=18.0,
                 billing_granularity_sec=1,
             ),
-
             # --- RunPod (Dedicated IaaS, cheap spot instances) ---
             InstanceOffer(
                 provider="runpod",
@@ -140,7 +150,6 @@ class StaticCatalogAdapter(ProviderCatalogPort):
                 estimated_cold_start_sec=110.0,
                 billing_granularity_sec=1,
             ),
-
             # --- Lambda Labs ---
             InstanceOffer(
                 provider="lambda",
@@ -174,7 +183,6 @@ class StaticCatalogAdapter(ProviderCatalogPort):
                 spot_price_per_hour=None,
                 estimated_cold_start_sec=90.0,
             ),
-
             # --- AWS ---
             InstanceOffer(
                 provider="aws",
@@ -200,7 +208,6 @@ class StaticCatalogAdapter(ProviderCatalogPort):
                 spot_price_per_hour=0.322,
                 estimated_cold_start_sec=120.0,
             ),
-
             # --- Nebius ---
             InstanceOffer(
                 provider="nebius",
@@ -218,7 +225,6 @@ class StaticCatalogAdapter(ProviderCatalogPort):
                 spot_price_per_hour=1.40,
                 estimated_cold_start_sec=90.0,
             ),
-
             # --- Vast.ai ---
             InstanceOffer(
                 provider="vast",

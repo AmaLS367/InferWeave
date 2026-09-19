@@ -25,6 +25,8 @@ class CompositeCatalogAdapter(ProviderCatalogPort):
             if offers:
                 return offers
         except Exception as err:  # noqa: BLE001
-            logger.debug("Primary catalog failed (%s), falling back to secondary catalog", err)
+            logger.debug(
+                "Primary catalog failed (%s), falling back to secondary catalog", err
+            )
 
         return await self._fallback.get_offers(provider_name=provider_name)

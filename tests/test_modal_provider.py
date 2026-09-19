@@ -56,12 +56,17 @@ async def test_modal_provider_deploy_success(sample_profile, sample_runtime):
 
     with patch("modal.App.deploy") as mock_deploy:
         mock_deploy.return_value = None
-        with patch("modal.Function.get_web_url", return_value="https://workspace--iw-modal-test.modal.run"):
+        with patch(
+            "modal.Function.get_web_url",
+            return_value="https://workspace--iw-modal-test.modal.run",
+        ):
             deployment = await provider.deploy(request, sample_profile, sample_runtime)
 
             assert mock_deploy.called
             assert deployment.id.startswith("iw-modal-")
-            assert deployment.endpoint_url == "https://workspace--iw-modal-test.modal.run"
+            assert (
+                deployment.endpoint_url == "https://workspace--iw-modal-test.modal.run"
+            )
             assert deployment.state == DeploymentState.HEALTHY
 
 

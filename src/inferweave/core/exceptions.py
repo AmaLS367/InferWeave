@@ -46,3 +46,47 @@ class NoFeasibleProviderError(InferWeaveError):
         super().__init__(message)
         self.reasons = reasons or []
 
+
+class InsufficientVramError(InferWeaveError):
+    """Raised when requested or selected hardware does not have enough VRAM to run the model."""
+
+    def __init__(
+        self,
+        model_id: str,
+        required_vram_gb: float,
+        provided_vram_gb: float,
+        gpu_type: str,
+        gpu_count: int = 1,
+        suggested_gpus: list[str] | None = None,
+    ) -> None:
+        self.model_id = model_id
+        self.required_vram_gb = required_vram_gb
+        self.provided_vram_gb = provided_vram_gb
+        self.gpu_type = gpu_type
+        self.gpu_count = gpu_count
+        self.deficit_gb = max(0.0, required_vram_gb - provided_vram_gb)
+        self.suggested_gpus = suggested_gpus or []
+
+        alt_text = (
+            f" Suggested alternative GPUs: {', '.join(self.suggested_gpus)}."
+            if self.suggested_gpus
+            else ""
+        )
+        count_text = (
+            f" ({gpu_count}x {gpu_type})" if gpu_count > 1 else f" ({gpu_type})"
+        )
+
+        super().__init__(
+            f"Model '{model_id}' requires at least {required_vram_gb:.1f}GB VRAM, but requested hardware{count_text} "
+            f"provides only {provided_vram_gb:.1f}GB (deficit: {self.deficit_gb:.1f}GB).{alt_text}"
+        )
+
+
+class UnknownGpuError(InferWeaveError):
+    """Raised when an unknown GPU specification is encountered and strict validation is required."""
+
+    def __init__(self, gpu_name: str) -> None:
+        super().__init__(
+            f"Unknown GPU specification: '{gpu_name}'. Could not determine VRAM capacity."
+        )
+        self.gpu_name = gpu_name

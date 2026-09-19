@@ -54,7 +54,11 @@ class CheapestStrategy(RoutingStrategy):
             # Rank-decay total score to preserve strict sort order in results
             total_score = max(0.0, 1.0 - (rank_idx * 0.05))
 
-            spot_note = " (Spot)" if constraints.allow_spot and offer.spot_price_per_hour is not None else " (On-Demand)"
+            spot_note = (
+                " (Spot)"
+                if constraints.allow_spot and offer.spot_price_per_hour is not None
+                else " (On-Demand)"
+            )
             reasoning = f"${price:.2f}/hr{spot_note}, {offer.total_vram_gb:.0f}GB VRAM, cold start ~{offer.estimated_cold_start_sec:.0f}s"
 
             ranked.append(

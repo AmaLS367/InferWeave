@@ -34,18 +34,31 @@ class SmartRoutingService:
         self,
         profile: ModelProfile,
         request: DeploymentRequest,
+        target_provider: str | None = None,
     ) -> RoutingDecision:
         """Asynchronously selects the best provider and instance offer for the deployment request."""
         constraints = self._build_constraints(profile, request)
-        all_offers = await self._catalog.get_offers()
+        provider_filter = target_provider or (
+            request.provider
+            if request.provider and request.provider.lower() != "auto"
+            else None
+        )
+        all_offers = await self._catalog.get_offers(provider_name=provider_filter)
 
         # Step 1: Filter candidates based on hard requirements
-        feasible_offers, rejection_reasons = self._filter_offers(all_offers, constraints, request)
+        feasible_offers, rejection_reasons = self._filter_offers(
+            all_offers, constraints, request, provider_filter=provider_filter
+        )
 
         if not feasible_offers:
-            reasons_summary = "\n  - " + "\n  - ".join(rejection_reasons)
+            reasons_summary = (
+                "\n  - " + "\n  - ".join(rejection_reasons) if rejection_reasons else ""
+            )
+            provider_ctx = (
+                f" on provider '{provider_filter}'" if provider_filter else ""
+            )
             raise NoFeasibleProviderError(
-                f"No compute provider satisfies requirements for model '{profile.id}' "
+                f"No compute provider satisfies requirements for model '{profile.id}'{provider_ctx} "
                 f"(min VRAM: {constraints.min_vram_gb}GB, requested GPU: {constraints.gpu_type or 'any'})."
                 f"{reasons_summary}",
                 reasons=rejection_reasons,
@@ -62,7 +75,7 @@ class SmartRoutingService:
 
         best = ranked[0]
         logger.info(
-            "Auto-routing selected provider '%s' (%s, %s) using '%s' strategy for '%s'",
+            "Routing selected provider '%s' (%s, %s) using '%s' strategy for '%s'",
             best.offer.provider,
             best.offer.instance_type,
             best.reasoning,
@@ -81,6 +94,7 @@ class SmartRoutingService:
         self,
         profile: ModelProfile,
         request: DeploymentRequest,
+        target_provider: str | None = None,
     ) -> RoutingDecision:
         """Synchronous wrapper for aresolve."""
         try:
@@ -93,9 +107,13 @@ class SmartRoutingService:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                return executor.submit(lambda: asyncio.run(self.aresolve(profile, request))).result()
+                return executor.submit(
+                    lambda: asyncio.run(
+                        self.aresolve(profile, request, target_provider)
+                    )
+                ).result()
 
-        return asyncio.run(self.aresolve(profile, request))
+        return asyncio.run(self.aresolve(profile, request, target_provider))
 
     def _build_constraints(
         self,
@@ -121,6 +139,7 @@ class SmartRoutingService:
         offers: list[InstanceOffer],
         constraints: RoutingConstraints,
         request: DeploymentRequest,
+        provider_filter: str | None = None,
     ) -> tuple[list[InstanceOffer], list[str]]:
         feasible: list[InstanceOffer] = []
         reasons: list[str] = []
@@ -129,9 +148,15 @@ class SmartRoutingService:
         is_windows = sys.platform == "win32" and not request.dry_run
 
         for offer in offers:
+            # 0. Provider scope filter
+            if provider_filter and offer.provider.lower() != provider_filter.lower():
+                continue
+
             # 1. Platform compatibility: On native Windows, non-Modal providers (SkyPilot) cannot launch live clusters
             if is_windows and offer.provider != "modal":
-                reasons.append(f"Provider '{offer.provider}' requires POSIX system calls (SkyPilot) on native Windows")
+                reasons.append(
+                    f"Provider '{offer.provider}' requires POSIX system calls (SkyPilot) on native Windows"
+                )
                 continue
 
             # 2. Strict GPU model filter if specified
@@ -139,29 +164,39 @@ class SmartRoutingService:
                 target_gpu = constraints.gpu_type.lower()
                 offer_gpu = offer.gpu_spec.name.lower()
                 if target_gpu not in offer_gpu and offer_gpu not in target_gpu:
-                    reasons.append(f"Instance '{offer.instance_type}' GPU '{offer.gpu_spec.name}' does not match requested '{constraints.gpu_type}'")
+                    reasons.append(
+                        f"Instance '{offer.instance_type}' GPU '{offer.gpu_spec.name}' does not match requested '{constraints.gpu_type}'"
+                    )
                     continue
 
             # 3. Total VRAM capacity check
             if offer.total_vram_gb < constraints.min_vram_gb:
-                reasons.append(f"Instance '{offer.instance_type}' VRAM {offer.total_vram_gb:.0f}GB is below required {constraints.min_vram_gb:.0f}GB")
+                reasons.append(
+                    f"Instance '{offer.instance_type}' VRAM {offer.total_vram_gb:.0f}GB is below required {constraints.min_vram_gb:.0f}GB"
+                )
                 continue
 
             # 4. GPU count check
             if offer.gpu_count < constraints.gpu_count:
-                reasons.append(f"Instance '{offer.instance_type}' has {offer.gpu_count} GPU(s), needed {constraints.gpu_count}")
+                reasons.append(
+                    f"Instance '{offer.instance_type}' has {offer.gpu_count} GPU(s), needed {constraints.gpu_count}"
+                )
                 continue
 
             # 5. Availability check
             if not offer.is_available:
-                reasons.append(f"Instance '{offer.instance_type}' on '{offer.provider}' is currently out of stock")
+                reasons.append(
+                    f"Instance '{offer.instance_type}' on '{offer.provider}' is currently out of stock"
+                )
                 continue
 
             # 6. Max price check if configured
             if constraints.max_price_per_hour is not None:
                 eff_price = offer.effective_price(allow_spot=constraints.allow_spot)
                 if eff_price > constraints.max_price_per_hour:
-                    reasons.append(f"Instance '{offer.instance_type}' price ${eff_price:.2f}/hr exceeds limit ${constraints.max_price_per_hour:.2f}/hr")
+                    reasons.append(
+                        f"Instance '{offer.instance_type}' price ${eff_price:.2f}/hr exceeds limit ${constraints.max_price_per_hour:.2f}/hr"
+                    )
                     continue
 
             feasible.append(offer)

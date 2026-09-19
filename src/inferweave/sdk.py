@@ -64,11 +64,11 @@ class InferWeave:
         # 1. Resolve model profile
         profile = self.registry.get(model)
 
-        # 2. Render runtime specification
-        runtime_template = get_runtime_template(profile.default_runtime)
-        runtime_spec = runtime_template.render(profile, request)
+        # 2. Pre-flight hardware validation if explicit GPU is requested
+        if request.gpu_type:
+            self.router.hardware_service.validate_deployment_hardware(profile, request)
 
-        # 3. Resolve target compute provider (SkyPilot clouds or Modal)
+        # 3. Resolve target compute provider (SkyPilot clouds or Modal) with VRAM-aware routing
         compute_provider = self.router.resolve(
             provider_name=request.provider,
             profile=profile,
@@ -76,8 +76,11 @@ class InferWeave:
             request=request,
         )
 
+        # 4. Render runtime specification
+        runtime_template = get_runtime_template(profile.default_runtime)
+        runtime_spec = runtime_template.render(profile, request)
 
-        # 4. Provision and launch deployment
+        # 5. Provision and launch deployment
         deployment = await compute_provider.deploy(
             request=request,
             profile=profile,

@@ -167,10 +167,16 @@ class SkyPilotProvider(ComputeProvider):
                     return ep if str(ep).startswith("http") else f"http://{ep}"
                 return None
             except (RuntimeError, ValueError, OSError) as err:
-                logger.debug("Endpoints for cluster '%s' not yet ready: %s", cluster_name, err)
+                logger.debug(
+                    "Endpoints for cluster '%s' not yet ready: %s", cluster_name, err
+                )
                 return None
             except Exception as err:  # noqa: BLE001
-                logger.debug("Unexpected error fetching endpoints for '%s': %s", cluster_name, err)
+                logger.debug(
+                    "Unexpected error fetching endpoints for '%s': %s",
+                    cluster_name,
+                    err,
+                )
                 return None
 
         return await asyncio.to_thread(_fetch)
@@ -220,16 +226,24 @@ class SkyPilotProvider(ComputeProvider):
                                     ep if str(ep).startswith("http") else f"http://{ep}"
                                 )
                     except (RuntimeError, ValueError, OSError) as err:
-                        logger.debug("Endpoint query failed for healthy cluster: %s", err)
+                        logger.debug(
+                            "Endpoint query failed for healthy cluster: %s", err
+                        )
                     except Exception as err:  # noqa: BLE001
                         logger.debug("Unexpected endpoint query error: %s", err)
 
                 return state, endpoint
             except (RuntimeError, ValueError, OSError) as err:
-                logger.warning("Failed to fetch SkyPilot status for '%s': %s", deployment_id, err)
+                logger.warning(
+                    "Failed to fetch SkyPilot status for '%s': %s", deployment_id, err
+                )
                 return DeploymentState.PENDING, None
             except Exception as err:  # noqa: BLE001
-                logger.warning("Unexpected error fetching SkyPilot status for '%s': %s", deployment_id, err)
+                logger.warning(
+                    "Unexpected error fetching SkyPilot status for '%s': %s",
+                    deployment_id,
+                    err,
+                )
                 return DeploymentState.PENDING, None
 
         state, endpoint = await asyncio.to_thread(_fetch_status)

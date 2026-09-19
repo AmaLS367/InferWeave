@@ -150,7 +150,9 @@ class ModalProvider(ComputeProvider):
         except (RuntimeError, ValueError, OSError) as err:
             logger.warning("Failed to stop Modal app '%s': %s", deployment_id, err)
         except Exception as err:  # noqa: BLE001
-            logger.warning("Unexpected error stopping Modal app '%s': %s", deployment_id, err)
+            logger.warning(
+                "Unexpected error stopping Modal app '%s': %s", deployment_id, err
+            )
 
     async def get_status(self, deployment_id: str) -> DeploymentStatus:
         """Retrieves deployment state from Modal."""
@@ -161,9 +163,7 @@ class ModalProvider(ComputeProvider):
             from modal_proto import api_pb2
 
             client = await _Client.from_env()
-            _, _, lifecycle = await resolve_app_identifier(
-                deployment_id, None, client
-            )
+            _, _, lifecycle = await resolve_app_identifier(deployment_id, None, client)
             state_map = {
                 api_pb2.APP_STATE_DEPLOYED: DeploymentState.HEALTHY,
                 api_pb2.APP_STATE_EPHEMERAL: DeploymentState.HEALTHY,
@@ -180,7 +180,9 @@ class ModalProvider(ComputeProvider):
                 state=state,
             )
         except (RuntimeError, ValueError, OSError) as err:
-            logger.warning("Failed to get Modal status for '%s': %s", deployment_id, err)
+            logger.warning(
+                "Failed to get Modal status for '%s': %s", deployment_id, err
+            )
             return DeploymentStatus(
                 id=deployment_id,
                 model="unknown",
@@ -188,7 +190,9 @@ class ModalProvider(ComputeProvider):
                 state=DeploymentState.PENDING,
             )
         except Exception as err:  # noqa: BLE001
-            logger.warning("Unexpected error getting Modal status for '%s': %s", deployment_id, err)
+            logger.warning(
+                "Unexpected error getting Modal status for '%s': %s", deployment_id, err
+            )
             return DeploymentStatus(
                 id=deployment_id,
                 model="unknown",

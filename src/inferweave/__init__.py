@@ -3,11 +3,14 @@
 from inferweave.core.exceptions import (
     DeploymentError,
     InferWeaveError,
+    InsufficientVramError,
     ModelNotFoundError,
     NoFeasibleProviderError,
     ProviderNotFoundError,
     ProviderPlatformError,
+    UnknownGpuError,
 )
+from inferweave.domain.hardware_validator import HardwareValidator
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState, ProviderType, WorkloadType
 from inferweave.models.profile import (
@@ -21,6 +24,7 @@ from inferweave.models.routing import (
     RankedOffer,
     RoutingConstraints,
     RoutingDecision,
+    VramCheckResult,
 )
 from inferweave.registry.base import ModelRegistry
 from inferweave.sdk import InferWeave
@@ -35,10 +39,12 @@ __all__ = [
     "DeploymentStatus",
     "GpuSpec",
     "HardwareRequirements",
+    "HardwareValidator",
     "HealthcheckConfig",
     "InferWeave",
     "InferWeaveError",
     "InstanceOffer",
+    "InsufficientVramError",
     "ModelNotFoundError",
     "ModelProfile",
     "ModelRegistry",
@@ -49,6 +55,7 @@ __all__ = [
     "RankedOffer",
     "RoutingConstraints",
     "RoutingDecision",
+    "UnknownGpuError",
+    "VramCheckResult",
     "WorkloadType",
 ]
-
