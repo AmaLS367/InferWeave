@@ -28,18 +28,47 @@ class HardwareRequirements(BaseModel):
 class HealthcheckConfig(BaseModel):
     """Parameters for monitoring endpoint readiness."""
 
+    enabled: bool = Field(
+        default=True, description="Whether readiness healthcheck polling is enabled"
+    )
     path: str = Field(
         default="/health", description="HTTP endpoint path for readiness probe"
     )
     port: int = Field(default=8000, description="Exposed service port")
-    initial_delay_seconds: int = Field(
-        default=10, description="Delay before first probe check"
+    initial_delay_seconds: float = Field(
+        default=10.0, ge=0.0, description="Delay before first probe check in seconds"
     )
-    timeout_seconds: int = Field(
-        default=300, description="Total timeout waiting for model readiness"
+    timeout_seconds: float = Field(
+        default=300.0,
+        ge=0.01,
+        description="Total timeout waiting for model readiness in seconds",
     )
-    probe_interval_seconds: int = Field(
-        default=3, description="Interval between subsequent health checks"
+    probe_interval_seconds: float = Field(
+        default=3.0,
+        ge=0.0,
+        description="Interval between subsequent health checks in seconds",
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0.5,
+        description="Timeout for an individual HTTP probe request in seconds",
+    )
+    expected_status_codes: list[int] = Field(
+        default_factory=lambda: [200],
+        description="HTTP status codes considered healthy",
+    )
+    consecutive_successes: int = Field(
+        default=1,
+        ge=1,
+        description="Consecutive successful probes required for readiness",
+    )
+    method: str = Field(
+        default="GET",
+        description="HTTP method for probe, e.g. 'GET' or 'HEAD'",
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Custom HTTP headers sent with probe requests",
     )
 
 

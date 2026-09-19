@@ -1,12 +1,17 @@
 """Main InferWeave SDK client entrypoint."""
 
+from datetime import UTC, datetime
 from typing import Any
 
-from inferweave.models.deployment import Deployment, DeploymentRequest
+from inferweave.core.exceptions import HealthcheckError, HealthcheckTimeoutError
+from inferweave.domain.healthcheck import ProbeResult
+from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
+from inferweave.models.enums import DeploymentState
 from inferweave.models.profile import ModelProfile
 from inferweave.providers.router import ProviderRouter
 from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.templates import get_runtime_template
+from inferweave.services.healthcheck_service import HealthcheckService
 
 
 class InferWeave:
@@ -16,9 +21,11 @@ class InferWeave:
         self,
         registry: ModelRegistry | None = None,
         router: ProviderRouter | None = None,
+        healthcheck_service: HealthcheckService | None = None,
     ) -> None:
         self.registry = registry or ModelRegistry()
         self.router = router or ProviderRouter()
+        self.healthcheck_service = healthcheck_service or HealthcheckService()
         self._active_deployments: dict[str, Deployment] = {}
 
     async def deploy(
@@ -32,6 +39,7 @@ class InferWeave:
         autostop_mins: int = 30,
         custom_args: dict[str, Any] | None = None,
         dry_run: bool = False,
+        wait_for_ready: bool = True,
     ) -> Deployment:
         """Deploys a model to the requested compute provider.
 
@@ -45,6 +53,7 @@ class InferWeave:
             autostop_mins: Idle shutdown timer in minutes
             custom_args: Provider-specific extra configurations
             dry_run: When True, constructs the configuration without launching live cloud resources
+            wait_for_ready: When True, actively polls endpoint until readiness healthcheck passes
 
         Returns:
             Deployment: Live deployment handle with lifecycle controls and endpoint details.
@@ -59,6 +68,7 @@ class InferWeave:
             autostop_mins=autostop_mins,
             custom_args=custom_args or {},
             dry_run=dry_run,
+            wait_for_ready=wait_for_ready,
         )
 
         # 1. Resolve model profile
@@ -87,8 +97,44 @@ class InferWeave:
             runtime=runtime_spec,
         )
 
-        # 5. Track active deployment
+        # 6. Wire healthcheck and readiness polling closures to the Deployment
+        async def _check_health() -> ProbeResult:
+            if not deployment.endpoint_url:
+                raise HealthcheckError(
+                    f"Deployment '{deployment.id}' has no endpoint URL available.",
+                    deployment_id=deployment.id,
+                )
+            return await self.healthcheck_service.check_health(
+                endpoint_url=deployment.endpoint_url,
+                config=profile.healthcheck,
+            )
+
+        async def _wait_for_ready(timeout_secs: int | None = None) -> DeploymentStatus:
+            try:
+                await self.healthcheck_service.wait_for_ready(
+                    endpoint_url=deployment.endpoint_url,
+                    config=profile.healthcheck,
+                    deployment_id=deployment.id,
+                    timeout_override=float(timeout_secs) if timeout_secs is not None else None,
+                )
+                deployment._status.state = DeploymentState.HEALTHY
+                deployment._status.ready_at = datetime.now(UTC)
+            except HealthcheckTimeoutError as err:
+                deployment._status.state = DeploymentState.FAILED
+                deployment._status.error_message = str(err)
+                raise
+            return deployment._status
+
+        deployment._healthcheck_fn = _check_health
+        deployment._wait_ready_fn = _wait_for_ready
+
+        # 7. Track active deployment
         self._active_deployments[deployment.id] = deployment
+
+        # 8. Actively poll for readiness if wait_for_ready is enabled
+        if request.wait_for_ready and not request.dry_run and profile.healthcheck.enabled:
+            await _wait_for_ready()
+
         return deployment
 
     def register_model(self, profile: ModelProfile) -> None:

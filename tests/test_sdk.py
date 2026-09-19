@@ -1,6 +1,6 @@
 """Unit tests for InferWeave core abstractions, registry, and provider routing."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -62,11 +62,14 @@ async def test_modal_deployment_flow_with_deploy_call():
         mock_deploy.return_value = None
         with patch(
             "modal.Function.get_web_url", return_value="https://my-app--serve.modal.run"
-        ):
+        ), patch.object(
+            weave.healthcheck_service, "wait_for_ready", AsyncMock()
+        ) as mock_wait:
             deployment = await weave.deploy(
                 model="fish-s2-pro",
                 provider="modal",
             )
+            mock_wait.assert_called_once()
             mock_deploy.assert_called_once()
             assert deployment.id.startswith("iw-modal-")
             assert deployment.provider == "modal"

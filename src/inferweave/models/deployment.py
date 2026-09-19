@@ -39,6 +39,10 @@ class DeploymentRequest(BaseModel):
         default=False,
         description="When True, validates and builds deployment specs without provisioning remote cloud resources",
     )
+    wait_for_ready: bool = Field(
+        default=True,
+        description="When True, blocks until endpoint healthcheck readiness probe passes",
+    )
 
 
 class DeploymentStatus(BaseModel):
@@ -64,10 +68,14 @@ class Deployment:
         status: DeploymentStatus,
         stop_fn: Callable[[], Coroutine[Any, Any, None]] | None = None,
         refresh_fn: Callable[[], Coroutine[Any, Any, DeploymentStatus]] | None = None,
+        healthcheck_fn: Callable[[], Coroutine[Any, Any, Any]] | None = None,
+        wait_ready_fn: Callable[[int | None], Coroutine[Any, Any, DeploymentStatus]] | None = None,
     ) -> None:
         self._status = status
         self._stop_fn = stop_fn
         self._refresh_fn = refresh_fn
+        self._healthcheck_fn = healthcheck_fn
+        self._wait_ready_fn = wait_ready_fn
 
     @property
     def id(self) -> str:
@@ -93,6 +101,10 @@ class Deployment:
     def is_healthy(self) -> bool:
         return self._status.state == DeploymentState.HEALTHY
 
+    @property
+    def status(self) -> DeploymentStatus:
+        return self._status
+
     async def stop(self) -> None:
         """Terminates or shuts down this deployment."""
         if self._stop_fn:
@@ -103,6 +115,19 @@ class Deployment:
         """Refreshes and returns the latest deployment status."""
         if self._refresh_fn:
             self._status = await self._refresh_fn()
+        return self._status
+
+    async def check_health(self) -> Any:
+        """Executes an immediate health probe against this deployment endpoint."""
+        if self._healthcheck_fn:
+            return await self._healthcheck_fn()
+        raise RuntimeError("No healthcheck probe function configured for this deployment.")
+
+    async def wait_for_ready(self, timeout_seconds: int | None = None) -> DeploymentStatus:
+        """Blocks until the deployment passes its readiness healthcheck."""
+        if self._wait_ready_fn:
+            self._status = await self._wait_ready_fn(timeout_seconds)
+            return self._status
         return self._status
 
     def __repr__(self) -> str:

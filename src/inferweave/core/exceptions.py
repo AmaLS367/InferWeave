@@ -39,6 +39,50 @@ class DeploymentError(InferWeaveError):
         self.deployment_id = deployment_id
 
 
+class HealthcheckError(DeploymentError):
+    """Base exception for all healthcheck and readiness probing errors."""
+
+
+class HealthcheckTimeoutError(HealthcheckError):
+    """Raised when an endpoint fails to pass readiness healthchecks within the specified timeout."""
+
+    def __init__(
+        self,
+        endpoint_url: str,
+        timeout_seconds: float,
+        total_probes: int = 0,
+        last_error: str | None = None,
+        deployment_id: str | None = None,
+    ) -> None:
+        last_err_msg = f" Last error: {last_error}." if last_error else ""
+        dep_msg = f" for deployment '{deployment_id}'" if deployment_id else ""
+        msg = (
+            f"Readiness probe{dep_msg} at '{endpoint_url}' timed out after {timeout_seconds:.1f}s "
+            f"({total_probes} probes executed).{last_err_msg}"
+        )
+        super().__init__(msg, deployment_id=deployment_id)
+        self.endpoint_url = endpoint_url
+        self.timeout_seconds = timeout_seconds
+        self.total_probes = total_probes
+        self.last_error = last_error
+
+
+class HealthcheckFailedError(HealthcheckError):
+    """Raised when an endpoint probe returns an unrecoverable failure status."""
+
+    def __init__(
+        self,
+        endpoint_url: str,
+        message: str,
+        deployment_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            f"Readiness probe failed at '{endpoint_url}': {message}",
+            deployment_id=deployment_id,
+        )
+        self.endpoint_url = endpoint_url
+
+
 class NoFeasibleProviderError(InferWeaveError):
     """Raised when no compute provider meets the model requirements or routing constraints."""
 
