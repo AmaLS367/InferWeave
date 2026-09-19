@@ -192,3 +192,51 @@ async def test_sdk_weave_stop_and_get_status():
         assert record.state == DeploymentState.STOPPED
         assert record.model == "fish-s2-pro"
         assert record.stopped_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sdk_weave_stop_failure_does_not_mark_stopped():
+    from unittest.mock import AsyncMock
+
+    probe_adapter = MockHealthcheckProbeAdapter(default_healthy=True)
+    healthcheck_svc = HealthcheckService(probe_port=probe_adapter)
+    lifecycle_svc = LifecycleService(
+        watchdog_port=MockWatchdogAdapter(),
+        healthcheck_service=healthcheck_svc,
+    )
+
+    weave = InferWeave(
+        healthcheck_service=healthcheck_svc,
+        lifecycle_service=lifecycle_svc,
+    )
+
+    with (
+        patch("modal.App.deploy", return_value=None),
+        patch("modal.Function.get_web_url", return_value="https://test.modal.run"),
+    ):
+        deployment = await weave.deploy(
+            model="fish-s2-pro",
+            provider="modal",
+            wait_for_ready=False,
+        )
+
+        assert deployment.state == DeploymentState.HEALTHY
+
+        # Mock the modal provider's stop to raise RuntimeError (network/API error)
+        modal_provider = weave.router.get("modal")
+        with (
+            patch.object(modal_provider, "stop", AsyncMock(side_effect=RuntimeError("Cloud API Network Failure"))),
+            pytest.raises(RuntimeError, match="Cloud API Network Failure"),
+        ):
+            await weave.stop(deployment.id)
+
+
+
+        # Ensure deployment and repository record are NOT marked STOPPED
+        assert deployment.state != DeploymentState.STOPPED
+        record = await lifecycle_svc.get_record(deployment.id)
+        assert record is not None
+        assert record.state != DeploymentState.STOPPED
+        assert record.state == DeploymentState.HEALTHY
+        assert record.stopped_at is None
+

@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from inferweave import InferWeave, WorkloadType
+from inferweave import AutostopAction, InferWeave, WorkloadType
 from inferweave.core.exceptions import (
     DeploymentNotFoundError,
     InferWeaveError,
@@ -376,18 +376,19 @@ def stop(
         typer.Argument(help="Deployment ID to terminate"),
     ],
     action: Annotated[
-        str,
+        AutostopAction,
         typer.Option(
             "--action",
             help="Lifecycle action: 'stop' (pause/stop) or 'down' (terminate)",
+            case_sensitive=False,
         ),
-    ] = "stop",
+    ] = AutostopAction.STOP,
 ) -> None:
     """Terminates or pauses a deployment."""
     weave = InferWeave()
     try:
         with console.status(
-            f"[bold yellow]Stopping deployment '{deployment_id}'...[/bold yellow]",
+            f"[bold yellow]Stopping deployment '{deployment_id}' (action={action.value})...[/bold yellow]",
             spinner="line",
         ):
             asyncio.run(weave.stop(deployment_id, action=action))

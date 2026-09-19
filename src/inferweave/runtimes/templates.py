@@ -130,7 +130,7 @@ class FluxDiffusersTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             setup_commands=[
-                "pip install -U inferweave diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
+                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
             ],
             run_command=cmd,
             port=port,
@@ -164,7 +164,7 @@ class WanVideoTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             setup_commands=[
-                "pip install -U inferweave diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
+                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
             ],
             run_command=cmd,
             port=port,

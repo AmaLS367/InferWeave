@@ -9,6 +9,7 @@ from inferweave.adapters.lifecycle import (
     InMemoryDeploymentRepository,
     JsonDeploymentRepository,
     MockWatchdogAdapter,
+    SqliteDeploymentRepository,
 )
 from inferweave.core.exceptions import (
     DeploymentError,
@@ -124,6 +125,7 @@ __all__ = [
     "RoutingConstraints",
     "RoutingDecision",
     "RuntimeOptions",
+    "SqliteDeploymentRepository",
     "UnknownGpuError",
     "VramCheckResult",
     "WorkloadType",

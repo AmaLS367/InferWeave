@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
+from inferweave.adapters.lifecycle.sqlite_repository import SqliteDeploymentRepository
 from inferweave.adapters.lifecycle.watchdog import AsyncioWatchdogAdapter
 from inferweave.core.exceptions import DeploymentNotFoundError, ProviderNotFoundError
 from inferweave.domain.deployment_record import DeploymentRecord
@@ -35,7 +35,7 @@ class LifecycleService:
     ) -> None:
         self._watchdog = watchdog_port or AsyncioWatchdogAdapter()
         self._repository: DeploymentRepositoryPort = (
-            repository or JsonDeploymentRepository()
+            repository or SqliteDeploymentRepository()
         )
         self._healthcheck_service = healthcheck_service
         self._provider_resolver = provider_resolver
@@ -185,24 +185,27 @@ class LifecycleService:
         target_action = action or (
             state.policy.action if state else AutostopAction.STOP
         )
-
-        if state:
-            state.is_stopped = True
-            state.stopped_at = current_time
+        if isinstance(target_action, str):
+            target_action = AutostopAction(target_action.lower())
 
         try:
             if target_provider and hasattr(target_provider, "stop"):
                 await target_provider.stop(deployment_id, action=target_action)
-        except Exception as err:
-            logger.error("Failed to stop deployment '%s': %s", deployment_id, err)
-            raise
-        finally:
-            await self._watchdog.cancel_check(deployment_id)
+
+            # Transition to stopped only upon successful provider stop/down
+            if state:
+                state.is_stopped = True
+                state.stopped_at = current_time
             if deployment and hasattr(deployment, "_status"):
                 deployment._status.state = DeploymentState.STOPPED
             if record:
                 record.mark_stopped(now=current_time)
                 await self._repository.save(record)
+        except Exception as err:
+            logger.error("Failed to stop deployment '%s': %s", deployment_id, err)
+            raise
+        finally:
+            await self._watchdog.cancel_check(deployment_id)
 
     async def refresh_status(
         self,

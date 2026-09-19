@@ -254,9 +254,12 @@ class SkyPilotProvider(ComputeProvider):
     async def stop(
         self,
         deployment_id: str,
-        action: AutostopAction = AutostopAction.STOP,
+        action: AutostopAction | str = AutostopAction.STOP,
     ) -> None:
         """Terminates or pauses the SkyPilot cluster corresponding to this deployment."""
+        target_action = (
+            AutostopAction(action.lower()) if isinstance(action, str) else action
+        )
         is_dry_run = False
         if deployment_id in self._local_deployments:
             is_dry_run = self._local_deployments[deployment_id].get("dry_run", False)
@@ -278,7 +281,7 @@ class SkyPilotProvider(ComputeProvider):
 
         self._ensure_supported_platform()
         sky = self._get_sky_module()
-        if action == AutostopAction.DOWN:
+        if target_action == AutostopAction.DOWN:
             logger.info("Tearing down SkyPilot cluster '%s'...", deployment_id)
             await asyncio.to_thread(sky.down, cluster_name=deployment_id)
         else:

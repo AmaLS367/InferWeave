@@ -6,6 +6,7 @@ from inferweave.adapters.healthcheck.httpx_probe import HttpxHealthcheckProbeAda
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
 from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
 from inferweave.adapters.lifecycle.memory_repository import InMemoryDeploymentRepository
+from inferweave.adapters.lifecycle.sqlite_repository import SqliteDeploymentRepository
 from inferweave.adapters.lifecycle.watchdog import (
     AsyncioWatchdogAdapter,
     MockWatchdogAdapter,
@@ -19,5 +20,6 @@ __all__ = [
     "JsonDeploymentRepository",
     "MockHealthcheckProbeAdapter",
     "MockWatchdogAdapter",
+    "SqliteDeploymentRepository",
     "StaticCatalogAdapter",
 ]

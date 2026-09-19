@@ -152,6 +152,10 @@ async def test_skypilot_stop():
         await provider.stop(deployment_id, action=AutostopAction.DOWN)
         mock_sky.down.assert_called_once_with(cluster_name=deployment_id)
 
+        # String action "down"
+        await provider.stop(deployment_id, action="down")
+        assert mock_sky.down.call_count == 2
+
 
 @pytest.mark.asyncio
 async def test_skypilot_stop_dry_run(sample_profile, sample_runtime):
