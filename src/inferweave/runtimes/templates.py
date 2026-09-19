@@ -148,7 +148,7 @@ class WanVideoTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8000
-        cmd = f"python3 -m wan_server --model {profile.id} --port {port}"
+        cmd = f"python3 -m inferweave_worker.wan --model {profile.id} --port {port}"
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
             extra_cli = runtime_opts.to_cli_args()

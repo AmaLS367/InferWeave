@@ -3021,8 +3021,10 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "fastapi" },
     { name = "modal" },
     { name = "skypilot", extra = ["aws", "azure", "cudo", "fluidstack", "gcp", "ibm", "kubernetes", "lambda", "nebius", "oci", "paperspace", "runpod", "scp", "seeweb", "shadeform", "verda"] },
+    { name = "uvicorn" },
 ]
 aws = [
     { name = "skypilot", extra = ["aws"] },
@@ -3051,6 +3053,10 @@ nebius = [
 runpod = [
     { name = "skypilot", extra = ["runpod"] },
 ]
+workers = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -3062,8 +3068,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'workers'", specifier = ">=0.110.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "inferweave", extras = ["clouds", "modal"], marker = "extra == 'all'" },
+    { name = "inferweave", extras = ["clouds", "modal", "workers"], marker = "extra == 'all'" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.60.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
@@ -3078,8 +3085,9 @@ requires-dist = [
     { name = "skypilot", extras = ["nebius"], marker = "extra == 'nebius'", specifier = ">=0.13.0" },
     { name = "skypilot", extras = ["runpod"], marker = "extra == 'runpod'", specifier = ">=0.13.0" },
     { name = "typer", specifier = ">=0.12.0" },
+    { name = "uvicorn", marker = "extra == 'workers'", specifier = ">=0.28.0" },
 ]
-provides-extras = ["runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "modal", "clouds", "all"]
+provides-extras = ["runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "modal", "clouds", "workers", "all"]
 
 [package.metadata.requires-dev]
 dev = [

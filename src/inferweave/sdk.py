@@ -121,8 +121,8 @@ class InferWeave:
         )
         deployment._is_idle_fn = lambda: self.lifecycle_service.is_idle(deployment.id)
         deployment._last_activity_fn = lambda: (
-            self.lifecycle_service.get_state(deployment.id).last_activity_at
-            if self.lifecycle_service.get_state(deployment.id)
+            state.last_activity_at
+            if (state := self.lifecycle_service.get_state(deployment.id)) is not None
             else None
         )
         deployment._stop_fn = lambda action=None: (
