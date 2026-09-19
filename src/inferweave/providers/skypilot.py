@@ -135,14 +135,19 @@ class SkyPilotProvider(ComputeProvider):
             "\n".join(runtime.setup_commands) if runtime.setup_commands else None
         )
 
+        provider_opts = request.options.provider if request.options else None
+        workdir = None
+        if provider_opts and provider_opts.extra_provider_args:
+            workdir = provider_opts.extra_provider_args.get("workdir")
+
         task = sky.Task(
             name=deployment_id,
             setup=setup_script,
             run=runtime.run_command,
             envs=runtime.env_vars,
+            workdir=workdir,
         )
 
-        provider_opts = request.options.provider if request.options else None
         use_spot = provider_opts.allow_spot if provider_opts else True
         region = (
             provider_opts.preferred_regions[0]
@@ -162,6 +167,8 @@ class SkyPilotProvider(ComputeProvider):
             "ports": [runtime.port],
             "use_spot": use_spot,
         }
+        if runtime.docker_image:
+            resources_kwargs["image_id"] = f"docker:{runtime.docker_image}"
         if region:
             resources_kwargs["region"] = region
         if disk_size:

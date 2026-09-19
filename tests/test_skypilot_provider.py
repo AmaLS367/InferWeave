@@ -73,6 +73,46 @@ async def test_skypilot_deploy_success(sample_profile, sample_runtime):
         assert deployment.endpoint_url == "http://1.2.3.4:8000"
         assert deployment.state == DeploymentState.HEALTHY
 
+        # Validate docker image_id was passed to sky.Resources
+        mock_sky.Resources.assert_called_once()
+        _, res_kwargs = mock_sky.Resources.call_args
+        assert res_kwargs.get("image_id") == "docker:vllm/vllm-openai:latest"
+
+
+@pytest.mark.asyncio
+async def test_skypilot_docker_image_and_workdir(sample_profile, sample_runtime):
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="runpod",
+        custom_args={
+            "provider_args": {
+                "workdir": "/path/to/workdir",
+            }
+        },
+    )
+
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    mock_sky.Task = MagicMock()
+    mock_sky.Resources = MagicMock()
+    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        await provider.deploy(request, sample_profile, sample_runtime)
+        mock_sky.Task.assert_called_once()
+        _, task_kwargs = mock_sky.Task.call_args
+        assert task_kwargs.get("workdir") == "/path/to/workdir"
+
+        mock_sky.Resources.assert_called_once()
+        _, res_kwargs = mock_sky.Resources.call_args
+        assert res_kwargs.get("image_id") == "docker:vllm/vllm-openai:latest"
+
+
 
 @pytest.mark.asyncio
 async def test_skypilot_dry_run(sample_profile, sample_runtime):

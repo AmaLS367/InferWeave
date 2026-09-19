@@ -135,3 +135,67 @@ def test_cli_stop():
         result = runner.invoke(app, ["stop", "iw-modal-test-123456"])
         assert result.exit_code == 0
         assert "stopped successfully" in result.stdout
+
+
+def test_cli_cross_process_lifecycle(tmp_path):
+    import os
+    import re
+    env_file = tmp_path / "cli_deployments.json"
+    os.environ["INFERWEAVE_DEPLOYMENTS_PATH"] = str(env_file)
+    try:
+        # 1. Deploy dry-run
+        res_deploy = runner.invoke(app, ["deploy", "fish-s2-pro", "--provider", "modal", "--dry-run"])
+        assert res_deploy.exit_code == 0
+        assert "iw-modal-fish-s2-pro-" in res_deploy.stdout
+
+        # Extract deployment ID from output
+        match = re.search(r"iw-modal-fish-s2-pro-[a-f0-9]+", res_deploy.stdout)
+        assert match is not None
+        dep_id = match.group(0)
+
+        # 2. In a brand new command execution, run 'inferweave list'
+        res_list = runner.invoke(app, ["list"], env={"COLUMNS": "200"})
+        assert res_list.exit_code == 0
+        assert dep_id in res_list.stdout
+        assert "fish-s2-pro" in res_list.stdout
+
+        # 3. Run 'inferweave status <dep_id>' without mocks
+        res_status = runner.invoke(app, ["status", dep_id])
+        assert res_status.exit_code == 0
+        assert dep_id in res_status.stdout
+
+        # 4. Run 'inferweave stop <dep_id>' without mocks
+        res_stop = runner.invoke(app, ["stop", dep_id])
+        assert res_stop.exit_code == 0
+        assert "stopped successfully" in res_stop.stdout
+
+        # 5. Check status is now stopped
+        res_status_after = runner.invoke(app, ["status", dep_id])
+        assert res_status_after.exit_code == 0
+        assert "stopped" in res_status_after.stdout.lower()
+
+    finally:
+        del os.environ["INFERWEAVE_DEPLOYMENTS_PATH"]
+
+
+def test_cli_status_not_found(tmp_path):
+    import os
+    os.environ["INFERWEAVE_DEPLOYMENTS_PATH"] = str(tmp_path / "empty.json")
+    try:
+        res = runner.invoke(app, ["status", "iw-nonexistent-12345"])
+        assert res.exit_code != 0
+        assert "not found" in res.stdout.lower()
+    finally:
+        del os.environ["INFERWEAVE_DEPLOYMENTS_PATH"]
+
+
+def test_cli_stop_not_found(tmp_path):
+    import os
+    os.environ["INFERWEAVE_DEPLOYMENTS_PATH"] = str(tmp_path / "empty.json")
+    try:
+        res = runner.invoke(app, ["stop", "iw-nonexistent-12345"])
+        assert res.exit_code != 0
+        assert "not found" in res.stdout.lower()
+    finally:
+        del os.environ["INFERWEAVE_DEPLOYMENTS_PATH"]
+

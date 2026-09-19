@@ -11,7 +11,11 @@ from rich.console import Console
 from rich.table import Table
 
 from inferweave import InferWeave, WorkloadType
-from inferweave.core.exceptions import InferWeaveError
+from inferweave.core.exceptions import (
+    DeploymentNotFoundError,
+    InferWeaveError,
+    ProviderNotFoundError,
+)
 
 app = typer.Typer(
     name="inferweave",
@@ -286,6 +290,47 @@ def list_providers() -> None:
     console.print(table)
 
 
+@app.command(name="list", help="List all tracked inference deployments.")
+def list_deployments() -> None:
+    """Displays all deployments recorded in persistent storage."""
+    weave = InferWeave()
+    records = asyncio.run(weave.list_records())
+    if not records:
+        console.print("[dim]No active or recorded deployments found.[/dim]")
+        return
+
+    table = Table(title="InferWeave Deployments", border_style="cyan")
+    table.add_column("Deployment ID", style="bold cyan", no_wrap=True)
+    table.add_column("Model")
+    table.add_column("Provider", style="magenta")
+    table.add_column("State")
+    table.add_column("Endpoint URL")
+    table.add_column("Created At", style="dim")
+
+    for rec in records:
+        st_val = rec.state.value if hasattr(rec.state, "value") else str(rec.state)
+        state_style = (
+            "green"
+            if st_val == "healthy"
+            else ("yellow" if st_val in ("pending", "provisioning", "starting") else "red")
+        )
+        created_str = (
+            rec.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if rec.created_at
+            else "[dim]N/A[/dim]"
+        )
+        table.add_row(
+            rec.id,
+            rec.model,
+            rec.provider,
+            f"[{state_style}]{st_val}[/{state_style}]",
+            rec.endpoint_url or "[dim]None[/dim]",
+            created_str,
+        )
+
+    console.print(table)
+
+
 @app.command(name="status", help="Check the live status of an active deployment.")
 def get_status(
     deployment_id: Annotated[
@@ -312,6 +357,11 @@ def get_status(
         if status.error_message:
             table.add_row("Error", f"[bold red]{status.error_message}[/bold red]")
         console.print(table)
+    except DeploymentNotFoundError:
+        console.print(
+            f"[bold red]Deployment '{deployment_id}' was not found.[/bold red] Run 'inferweave list' to see all tracked deployments."
+        )
+        raise typer.Exit(code=1)
     except Exception as err:
         console.print(
             f"[bold red]Failed to retrieve status for '{deployment_id}':[/bold red] {err}"
@@ -344,6 +394,16 @@ def stop(
         console.print(
             f"[bold green][+][/bold green] Deployment '{deployment_id}' stopped successfully."
         )
+    except DeploymentNotFoundError:
+        console.print(
+            f"[bold red]Cannot stop deployment '{deployment_id}':[/bold red] Deployment not found."
+        )
+        raise typer.Exit(code=1)
+    except ProviderNotFoundError as err:
+        console.print(
+            f"[bold red]Provider error while stopping '{deployment_id}':[/bold red] {err}"
+        )
+        raise typer.Exit(code=1) from err
     except Exception as err:
         console.print(
             f"[bold red]Failed to stop deployment '{deployment_id}':[/bold red] {err}"

@@ -7,10 +7,12 @@ from inferweave.adapters.healthcheck import (
 from inferweave.adapters.lifecycle import (
     AsyncioWatchdogAdapter,
     InMemoryDeploymentRepository,
+    JsonDeploymentRepository,
     MockWatchdogAdapter,
 )
 from inferweave.core.exceptions import (
     DeploymentError,
+    DeploymentNotFoundError,
     HealthcheckError,
     HealthcheckFailedError,
     HealthcheckTimeoutError,
@@ -78,6 +80,7 @@ __all__ = [
     "Deployment",
     "DeploymentError",
     "DeploymentLifecycleEvaluator",
+    "DeploymentNotFoundError",
     "DeploymentOptions",
     "DeploymentRecord",
     "DeploymentRepositoryPort",
@@ -100,6 +103,7 @@ __all__ = [
     "InferWeaveError",
     "InstanceOffer",
     "InsufficientVramError",
+    "JsonDeploymentRepository",
     "LifecycleService",
     "LifecycleState",
     "MockHealthcheckProbeAdapter",

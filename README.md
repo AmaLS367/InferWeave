@@ -111,7 +111,7 @@ pip install "inferweave[modal]"
 # All cloud providers supported by SkyPilot
 pip install "inferweave[clouds]"
 
-# Complete suite (all clouds + Modal + dev tools)
+# Complete suite (all cloud engines + Modal + workers runtime)
 pip install "inferweave[all]"
 ```
 
@@ -134,7 +134,8 @@ inferweave models
 inferweave models --workload audio
 inferweave providers
 
-# 4. Check status or stop active deployments
+# 4. Inspect, monitor, and stop deployments across processes
+inferweave list
 inferweave status <deployment-id>
 inferweave stop <deployment-id>
 ```
@@ -160,18 +161,18 @@ SkyPilot’s underlying execution engine relies on POSIX system primitives (`ter
 
 ## 🛣️ Roadmap
 
-- [ ] **Core Model Registry:** Pre-configured specs for popular Audio, LLM, Image, and Video models.
-- [ ] **Runtime Templates:**
-  - LLM: `vLLM`, `SGLang`, `llama.cpp`
-  - Audio: `fish-speech` / `fish-s2-pro`, Whisper, Chatterbox
-  - Image: `FLUX`, `ComfyUI` headless, `Diffusers`
-  - Video: `WAN`, `HunyuanVideo`, `CogVideoX`
-- [ ] **Smart Compute Routing:**
+- [x] **Core Model Registry:** Pre-configured specs for popular Audio, LLM, Image, and Video models with separation of InferWeave IDs and external model repository artifacts.
+- [x] **Runtime Templates:**
+  - LLM: `vLLM`
+  - Audio: `fish-speech` / `fish-s2-pro`
+  - Image: `FLUX` via unified worker
+  - Video: `WAN` 2.1 via unified worker
+- [x] **Smart Compute Routing:**
   - `provider="auto"` with `strategy="cheapest"`
   - `strategy="free_first"` (spot instances / community compute)
-  - Latency and VRAM-aware GPU matching.
+  - Latency and VRAM-aware GPU matching and validation.
 - [ ] **Unified Client Protocol:** Standardized `.generate()`, `.synthesize()`, and `.render()` methods.
-- [ ] **Lifecycle Management:** Auto-shutdown on idle to prevent cloud overspending.
+- [x] **Lifecycle Management:** Auto-shutdown on idle, healthcheck polling, and persistent cross-process deployment state repository (`~/.inferweave/deployments.json`).
 
 ---
 
@@ -185,7 +186,7 @@ git clone https://github.com/your-org/inferweave.git
 cd inferweave
 
 # Setup virtual environment with all extras and dev dependencies
-uv sync --all-extras --dev
+uv sync --all-extras --group dev
 
 # Run linting and type checking
 uv run ruff check .

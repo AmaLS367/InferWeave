@@ -83,6 +83,14 @@ class ModelProfile(BaseModel):
     default_runtime: str = Field(
         ..., description="Identifier of the default runtime template, e.g. 'vllm'"
     )
+    source: str = Field(
+        default="huggingface",
+        description="Source model hub or repository (e.g. 'huggingface', 'local')",
+    )
+    artifact_id: str | None = Field(
+        default=None,
+        description="External repository or hub artifact identifier (e.g. 'fishaudio/s2-pro')",
+    )
     hardware: HardwareRequirements = Field(..., description="Hardware prerequisites")
     healthcheck: HealthcheckConfig = Field(default_factory=HealthcheckConfig)
     default_env: dict[str, str] = Field(
@@ -91,3 +99,9 @@ class ModelProfile(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict, description="Additional arbitrary metadata"
     )
+
+    @property
+    def target_artifact(self) -> str:
+        """Returns the external repository/artifact ID if defined, else falls back to model ID."""
+        return self.artifact_id or self.id
+

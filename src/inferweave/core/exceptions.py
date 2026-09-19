@@ -39,6 +39,16 @@ class DeploymentError(InferWeaveError):
         self.deployment_id = deployment_id
 
 
+class DeploymentNotFoundError(DeploymentError):
+    """Raised when a specified deployment identifier is not found in storage or runtime tracking."""
+
+    def __init__(self, deployment_id: str) -> None:
+        super().__init__(
+            f"Deployment '{deployment_id}' was not found in active tracking or persistent storage.",
+            deployment_id=deployment_id,
+        )
+
+
 class HealthcheckError(DeploymentError):
     """Base exception for all healthcheck and readiness probing errors."""
 

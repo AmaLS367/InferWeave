@@ -1,12 +1,13 @@
 """Application service orchestrating deployment lifecycle, activity tracking, and autostop."""
 
-import asyncio
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from inferweave.adapters.lifecycle.memory_repository import InMemoryDeploymentRepository
+from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
 from inferweave.adapters.lifecycle.watchdog import AsyncioWatchdogAdapter
+from inferweave.core.exceptions import DeploymentNotFoundError, ProviderNotFoundError
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.lifecycle import (
     AutostopAction,
@@ -30,12 +31,14 @@ class LifecycleService:
         watchdog_port: AutostopWatchdogPort | None = None,
         repository: DeploymentRepositoryPort | None = None,
         healthcheck_service: Any | None = None,
+        provider_resolver: Callable[[str], Any] | None = None,
     ) -> None:
         self._watchdog = watchdog_port or AsyncioWatchdogAdapter()
         self._repository: DeploymentRepositoryPort = (
-            repository or InMemoryDeploymentRepository()
+            repository or JsonDeploymentRepository()
         )
         self._healthcheck_service = healthcheck_service
+        self._provider_resolver = provider_resolver
         self._states: dict[str, LifecycleState] = {}
         self._deployments: dict[str, Any] = {}
         self._providers: dict[str, Any] = {}
@@ -45,7 +48,7 @@ class LifecycleService:
         """Returns the active deployment metadata repository."""
         return self._repository
 
-    def register_deployment(
+    async def register_deployment(
         self,
         deployment: Any,
         policy: AutostopPolicy,
@@ -82,11 +85,7 @@ class LifecycleService:
         if hasattr(self._repository, "_records"):
             self._repository._records[record.id] = record.model_copy(deep=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._repository.save(record))
-        except RuntimeError:
-            pass
+        await self._repository.save(record)
 
         if (
             schedule_watchdog
@@ -100,18 +99,11 @@ class LifecycleService:
             async def _watchdog_callback() -> None:
                 await self.check_and_autostop(deployment.id)
 
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    self._watchdog.schedule_check(
-                        deployment_id=deployment.id,
-                        interval_seconds=interval,
-                        callback=_watchdog_callback,
-                    )
-                )
-            except RuntimeError:
-                # No running event loop (e.g. sync creation); watchdog will be handled on async execution
-                pass
+            await self._watchdog.schedule_check(
+                deployment_id=deployment.id,
+                interval_seconds=interval,
+                callback=_watchdog_callback,
+            )
 
         return state
 
@@ -166,7 +158,29 @@ class LifecycleService:
         current_time = now or datetime.now(UTC)
         state = self._states.get(deployment_id)
         deployment = self._deployments.get(deployment_id)
+        record = await self._repository.get(deployment_id)
+
+        if not state and not deployment and not record:
+            raise DeploymentNotFoundError(deployment_id)
+
         target_provider = provider or self._providers.get(deployment_id)
+        if not target_provider and record and self._provider_resolver:
+            try:
+                target_provider = self._provider_resolver(record.provider)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(
+                    "Could not resolve provider '%s' for deployment '%s': %s",
+                    record.provider,
+                    deployment_id,
+                    err,
+                )
+
+        is_dry_run = (record.is_dry_run if record else False) or (
+            getattr(deployment, "is_dry_run", False) if deployment else False
+        )
+
+        if not target_provider and not is_dry_run:
+            raise ProviderNotFoundError(record.provider if record else "unknown")
 
         target_action = action or (
             state.policy.action if state else AutostopAction.STOP
@@ -179,13 +193,13 @@ class LifecycleService:
         try:
             if target_provider and hasattr(target_provider, "stop"):
                 await target_provider.stop(deployment_id, action=target_action)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             logger.error("Failed to stop deployment '%s': %s", deployment_id, err)
+            raise
         finally:
             await self._watchdog.cancel_check(deployment_id)
             if deployment and hasattr(deployment, "_status"):
                 deployment._status.state = DeploymentState.STOPPED
-            record = await self._repository.get(deployment_id)
             if record:
                 record.mark_stopped(now=current_time)
                 await self._repository.save(record)
@@ -201,7 +215,21 @@ class LifecycleService:
         record = await self._repository.get(deployment_id)
         deployment = self._deployments.get(deployment_id)
         state_obj = self._states.get(deployment_id)
+
+        if not record and not deployment and not state_obj:
+            raise DeploymentNotFoundError(deployment_id)
+
         target_provider = provider or self._providers.get(deployment_id)
+        if not target_provider and record and self._provider_resolver:
+            try:
+                target_provider = self._provider_resolver(record.provider)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(
+                    "Could not resolve provider '%s' for deployment '%s': %s",
+                    record.provider,
+                    deployment_id,
+                    err,
+                )
 
         # Early exit if deployment is already stopped
         is_already_stopped = (
@@ -336,6 +364,10 @@ class LifecycleService:
     async def get_record(self, deployment_id: str) -> DeploymentRecord | None:
         """Returns the persisted DeploymentRecord from the repository."""
         return await self._repository.get(deployment_id)
+
+    async def list_records(self) -> list[DeploymentRecord]:
+        """Returns all persisted DeploymentRecords from the repository."""
+        return await self._repository.list_all()
 
     async def unregister_deployment(self, deployment_id: str) -> None:
         """Unregisters deployment from lifecycle monitoring and cancels background watchdog tasks."""

@@ -87,6 +87,11 @@ class ModalProvider(ComputeProvider):
 
         # Build container image dynamically from runtime template spec
         image = modal.Image.from_registry(runtime.docker_image)
+        if hasattr(image, "add_local_python_source"):
+            try:
+                image = image.add_local_python_source("inferweave")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not add_local_python_source('inferweave'): %s", exc)
         if runtime.setup_commands:
             image = image.run_commands(*runtime.setup_commands)
         if runtime.env_vars:

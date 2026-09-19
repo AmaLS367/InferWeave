@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from inferweave.core.exceptions import HealthcheckError, HealthcheckTimeoutError
+from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.healthcheck import ProbeResult
 from inferweave.domain.lifecycle import AutostopPolicy
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
@@ -30,7 +31,8 @@ class InferWeave:
         self.router = router or ProviderRouter()
         self.healthcheck_service = healthcheck_service or HealthcheckService()
         self.lifecycle_service = lifecycle_service or LifecycleService(
-            healthcheck_service=self.healthcheck_service
+            healthcheck_service=self.healthcheck_service,
+            provider_resolver=self.router.get,
         )
         self._active_deployments: dict[str, Deployment] = {}
 
@@ -109,7 +111,7 @@ class InferWeave:
             if request.options
             else AutostopPolicy(idle_minutes=request.autostop_mins)
         )
-        self.lifecycle_service.register_deployment(
+        await self.lifecycle_service.register_deployment(
             deployment=deployment,
             policy=autostop_policy,
             is_dry_run=request.dry_run,
@@ -196,6 +198,10 @@ class InferWeave:
     def list_deployments(self) -> list[Deployment]:
         """Returns all actively tracked deployments in the local session."""
         return list(self._active_deployments.values())
+
+    async def list_records(self) -> list[DeploymentRecord]:
+        """Returns all persisted deployment records across sessions and CLI invocations."""
+        return await self.lifecycle_service.list_records()
 
     async def stop(
         self,

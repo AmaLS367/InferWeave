@@ -22,7 +22,7 @@ class VLLMTemplate(RuntimeTemplate):
             "-m",
             "vllm.entrypoints.openai.api_server",
             "--model",
-            profile.id,
+            profile.target_artifact,
             "--port",
             str(port),
             "--host",
@@ -96,7 +96,7 @@ class FishSpeechTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="fishaudio/fish-speech:latest-cu121",
             setup_commands=[
-                f"huggingface-cli download {profile.id} --local-dir checkpoints/{profile.id}"
+                f"huggingface-cli download {profile.target_artifact} --local-dir checkpoints/{profile.id}"
             ],
             run_command=cmd,
             port=port,
@@ -114,7 +114,7 @@ class FluxDiffusersTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8000
-        cmd = f"python3 -m inferweave_worker.flux --model {profile.id} --port {port}"
+        cmd = f"python3 -m inferweave.workers.flux --model {profile.target_artifact} --port {port}"
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
             extra_cli = runtime_opts.to_cli_args()
@@ -130,7 +130,7 @@ class FluxDiffusersTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             setup_commands=[
-                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
+                "pip install -U inferweave diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
             ],
             run_command=cmd,
             port=port,
@@ -148,7 +148,7 @@ class WanVideoTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8000
-        cmd = f"python3 -m inferweave_worker.wan --model {profile.id} --port {port}"
+        cmd = f"python3 -m inferweave.workers.wan --model {profile.target_artifact} --port {port}"
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
             extra_cli = runtime_opts.to_cli_args()
@@ -164,7 +164,7 @@ class WanVideoTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             setup_commands=[
-                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
+                "pip install -U inferweave diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
             ],
             run_command=cmd,
             port=port,

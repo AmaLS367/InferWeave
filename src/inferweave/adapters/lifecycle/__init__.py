@@ -1,5 +1,6 @@
 """Lifecycle watchdog adapter exports."""
 
+from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
 from inferweave.adapters.lifecycle.memory_repository import InMemoryDeploymentRepository
 from inferweave.adapters.lifecycle.watchdog import (
     AsyncioWatchdogAdapter,
@@ -9,5 +10,6 @@ from inferweave.adapters.lifecycle.watchdog import (
 __all__ = [
     "AsyncioWatchdogAdapter",
     "InMemoryDeploymentRepository",
+    "JsonDeploymentRepository",
     "MockWatchdogAdapter",
 ]

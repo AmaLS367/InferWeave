@@ -179,13 +179,21 @@ def test_runtime_templates_render_commands():
     wan_spec = wan_template.render(wan_profile, req)
 
     assert (
-        "python3 -m inferweave_worker.flux --model black-forest-labs/FLUX.1-schnell --port 8000"
+        "python3 -m inferweave.workers.flux --model black-forest-labs/FLUX.1-schnell --port 8000"
         in flux_spec.run_command
     )
     assert "--quantize-4bit" in flux_spec.run_command
 
+    # By default, without explicit artifact_id, target_artifact uses profile.id
     assert (
-        "python3 -m inferweave_worker.wan --model wan-video/wan-2.1 --port 8000"
+        "python3 -m inferweave.workers.wan --model wan-video/wan-2.1 --port 8000"
         in wan_spec.run_command
     )
-    assert "--quantize-4bit" in wan_spec.run_command
+
+    wan_profile.artifact_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+    wan_spec_with_artifact = wan_template.render(wan_profile, req)
+    assert (
+        "python3 -m inferweave.workers.wan --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers --port 8000"
+        in wan_spec_with_artifact.run_command
+    )
+    assert "--quantize-4bit" in wan_spec_with_artifact.run_command

@@ -41,6 +41,8 @@ class ModelRegistry:
             ModelProfile(
                 id="fish-s2-pro",
                 name="Fish Speech S2 Pro",
+                source="huggingface",
+                artifact_id="fishaudio/s2-pro",
                 workload_type=WorkloadType.AUDIO,
                 default_runtime="fish-speech",
                 hardware=HardwareRequirements(
@@ -57,6 +59,8 @@ class ModelRegistry:
             ModelProfile(
                 id="meta-llama/Meta-Llama-3-8B-Instruct",
                 name="Llama 3 8B Instruct",
+                source="huggingface",
+                artifact_id="meta-llama/Meta-Llama-3-8B-Instruct",
                 workload_type=WorkloadType.LLM,
                 default_runtime="vllm",
                 hardware=HardwareRequirements(
@@ -73,6 +77,8 @@ class ModelRegistry:
             ModelProfile(
                 id="black-forest-labs/FLUX.1-schnell",
                 name="FLUX.1 Schnell",
+                source="huggingface",
+                artifact_id="black-forest-labs/FLUX.1-schnell",
                 workload_type=WorkloadType.IMAGE,
                 default_runtime="flux-diffusers",
                 hardware=HardwareRequirements(
@@ -89,6 +95,8 @@ class ModelRegistry:
             ModelProfile(
                 id="wan-video/wan-2.1",
                 name="WAN 2.1 Video Generator",
+                source="huggingface",
+                artifact_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
                 workload_type=WorkloadType.VIDEO,
                 default_runtime="wan-video",
                 hardware=HardwareRequirements(
