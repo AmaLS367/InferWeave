@@ -197,3 +197,26 @@ def test_runtime_templates_render_commands():
         in wan_spec_with_artifact.run_command
     )
     assert "--quantize-4bit" in wan_spec_with_artifact.run_command
+
+
+def test_worker_module_import_does_not_load_control_plane_or_httpx():
+    """Validates that importing inferweave workers does not eagerly load control-plane or httpx."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import inferweave.workers.base\n"
+        "assert 'httpx' not in sys.modules, f'httpx leaked into worker: {sys.modules.keys()}'\n"
+        "assert 'inferweave.sdk' not in sys.modules, 'inferweave.sdk leaked into worker'\n"
+        "assert 'inferweave.adapters.healthcheck' not in sys.modules, 'healthcheck adapter leaked'\n"
+        "# Ensure public SDK imports work transparently via PEP 562 lazy loading\n"
+        "from inferweave import InferWeave, DeploymentStatus, AutostopAction\n"
+        "assert InferWeave is not None\n"
+        "assert DeploymentStatus is not None\n"
+        "assert AutostopAction is not None\n"
+        "print('ISOLATION_OK')\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert "ISOLATION_OK" in res.stdout
+
