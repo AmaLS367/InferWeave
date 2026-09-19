@@ -4,8 +4,9 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState
 
 
@@ -35,6 +36,10 @@ class DeploymentRequest(BaseModel):
     custom_args: dict[str, Any] = Field(
         default_factory=dict, description="Provider or runtime specific arguments"
     )
+    options: DeploymentOptions | None = Field(
+        default=None,
+        description="Structured domain options for runtime, provider, and lifecycle autostop",
+    )
     dry_run: bool = Field(
         default=False,
         description="When True, validates and builds deployment specs without provisioning remote cloud resources",
@@ -43,6 +48,15 @@ class DeploymentRequest(BaseModel):
         default=True,
         description="When True, blocks until endpoint healthcheck readiness probe passes",
     )
+
+    @model_validator(mode="after")
+    def _ensure_options(self) -> "DeploymentRequest":
+        if self.options is None:
+            self.options = DeploymentOptions.from_custom_args(
+                custom_args=self.custom_args,
+                autostop_mins=self.autostop_mins,
+            )
+        return self
 
 
 class DeploymentStatus(BaseModel):
@@ -70,12 +84,21 @@ class Deployment:
         refresh_fn: Callable[[], Coroutine[Any, Any, DeploymentStatus]] | None = None,
         healthcheck_fn: Callable[[], Coroutine[Any, Any, Any]] | None = None,
         wait_ready_fn: Callable[[int | None], Coroutine[Any, Any, DeploymentStatus]] | None = None,
+        autostop_mins: int | None = 30,
+        record_activity_fn: Callable[[], None] | None = None,
+        is_idle_fn: Callable[[], bool] | None = None,
+        last_activity_fn: Callable[[], datetime | None] | None = None,
     ) -> None:
         self._status = status
         self._stop_fn = stop_fn
         self._refresh_fn = refresh_fn
         self._healthcheck_fn = healthcheck_fn
         self._wait_ready_fn = wait_ready_fn
+        self._autostop_mins = autostop_mins
+        self._record_activity_fn = record_activity_fn
+        self._is_idle_fn = is_idle_fn
+        self._last_activity_fn = last_activity_fn
+
 
     @property
     def id(self) -> str:
@@ -123,6 +146,29 @@ class Deployment:
             return await self._healthcheck_fn()
         raise RuntimeError("No healthcheck probe function configured for this deployment.")
 
+    @property
+    def autostop_mins(self) -> int | None:
+        """Idle timeout limit in minutes before autostop is triggered."""
+        return self._autostop_mins
+
+    @property
+    def last_activity_at(self) -> datetime | None:
+        """Timestamp of the most recent recorded activity or probe."""
+        if self._last_activity_fn:
+            return self._last_activity_fn()
+        return None
+
+    def record_activity(self) -> None:
+        """Signals activity or incoming requests on this deployment, resetting idle timers."""
+        if self._record_activity_fn:
+            self._record_activity_fn()
+
+    def is_idle(self) -> bool:
+        """Returns True if the deployment has been inactive longer than its configured autostop threshold."""
+        if self._is_idle_fn:
+            return self._is_idle_fn()
+        return False
+
     async def wait_for_ready(self, timeout_seconds: int | None = None) -> DeploymentStatus:
         """Blocks until the deployment passes its readiness healthcheck."""
         if self._wait_ready_fn:
@@ -135,3 +181,4 @@ class Deployment:
             f"<Deployment id='{self.id}' model='{self.model}' "
             f"provider='{self.provider}' state='{self.state}' endpoint='{self.endpoint_url}'>"
         )
+

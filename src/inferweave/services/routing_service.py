@@ -120,9 +120,22 @@ class SmartRoutingService:
         profile: ModelProfile,
         request: DeploymentRequest,
     ) -> RoutingConstraints:
-        allow_spot = request.custom_args.get("allow_spot", True)
-        max_price = request.custom_args.get("max_price_per_hour", None)
-        regions = request.custom_args.get("preferred_regions", [])
+        provider_opts = request.options.provider if request.options else None
+        allow_spot = (
+            provider_opts.allow_spot
+            if provider_opts
+            else request.custom_args.get("allow_spot", True)
+        )
+        max_price = (
+            provider_opts.max_price_per_hour
+            if provider_opts
+            else request.custom_args.get("max_price_per_hour", None)
+        )
+        regions = (
+            provider_opts.preferred_regions
+            if provider_opts
+            else request.custom_args.get("preferred_regions", [])
+        )
 
         return RoutingConstraints(
             min_vram_gb=profile.hardware.min_vram_gb,
@@ -133,6 +146,7 @@ class SmartRoutingService:
             max_price_per_hour=max_price,
             preferred_regions=regions,
         )
+
 
     def _filter_offers(
         self,

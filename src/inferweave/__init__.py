@@ -25,6 +25,17 @@ from inferweave.domain.healthcheck import (
     ReadinessReport,
     ReadinessState,
 )
+from inferweave.domain.lifecycle import (
+    AutostopAction,
+    AutostopPolicy,
+    DeploymentLifecycleEvaluator,
+    LifecycleState,
+)
+from inferweave.domain.options import (
+    DeploymentOptions,
+    ProviderOptions,
+    RuntimeOptions,
+)
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState, ProviderType, WorkloadType
 from inferweave.models.profile import (
@@ -41,18 +52,27 @@ from inferweave.models.routing import (
     VramCheckResult,
 )
 from inferweave.ports.healthcheck import HealthcheckProbePort
+from inferweave.ports.lifecycle import AutostopWatchdogPort
 from inferweave.registry.base import ModelRegistry
 from inferweave.sdk import InferWeave
 from inferweave.services.healthcheck_service import HealthcheckService
+from inferweave.services.lifecycle_service import LifecycleService
 
 __version__ = "0.1.0"
 
+
 __all__ = [
+    "AutostopAction",
+    "AutostopPolicy",
+    "AutostopWatchdogPort",
     "Deployment",
     "DeploymentError",
+    "DeploymentLifecycleEvaluator",
+    "DeploymentOptions",
     "DeploymentRequest",
     "DeploymentState",
     "DeploymentStatus",
+
     "GpuSpec",
     "HardwareRequirements",
     "HardwareValidator",
@@ -68,7 +88,10 @@ __all__ = [
     "InferWeaveError",
     "InstanceOffer",
     "InsufficientVramError",
+    "LifecycleService",
+    "LifecycleState",
     "MockHealthcheckProbeAdapter",
+
     "ModelNotFoundError",
     "ModelProfile",
     "ModelRegistry",
@@ -76,6 +99,7 @@ __all__ = [
     "ProbeOutcome",
     "ProbeResult",
     "ProviderNotFoundError",
+    "ProviderOptions",
     "ProviderPlatformError",
     "ProviderType",
     "RankedOffer",
@@ -83,7 +107,9 @@ __all__ = [
     "ReadinessState",
     "RoutingConstraints",
     "RoutingDecision",
+    "RuntimeOptions",
     "UnknownGpuError",
     "VramCheckResult",
     "WorkloadType",
 ]
+

@@ -5,6 +5,7 @@ from typing import Any
 
 from inferweave.core.exceptions import HealthcheckError, HealthcheckTimeoutError
 from inferweave.domain.healthcheck import ProbeResult
+from inferweave.domain.lifecycle import AutostopPolicy
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState
 from inferweave.models.profile import ModelProfile
@@ -12,6 +13,7 @@ from inferweave.providers.router import ProviderRouter
 from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.templates import get_runtime_template
 from inferweave.services.healthcheck_service import HealthcheckService
+from inferweave.services.lifecycle_service import LifecycleService
 
 
 class InferWeave:
@@ -22,11 +24,14 @@ class InferWeave:
         registry: ModelRegistry | None = None,
         router: ProviderRouter | None = None,
         healthcheck_service: HealthcheckService | None = None,
+        lifecycle_service: LifecycleService | None = None,
     ) -> None:
         self.registry = registry or ModelRegistry()
         self.router = router or ProviderRouter()
         self.healthcheck_service = healthcheck_service or HealthcheckService()
+        self.lifecycle_service = lifecycle_service or LifecycleService()
         self._active_deployments: dict[str, Deployment] = {}
+
 
     async def deploy(
         self,
@@ -97,17 +102,41 @@ class InferWeave:
             runtime=runtime_spec,
         )
 
-        # 6. Wire healthcheck and readiness polling closures to the Deployment
+        # 6. Wire lifecycle management and autostop callbacks
+        autostop_policy = (
+            request.options.autostop
+            if request.options
+            else AutostopPolicy(idle_minutes=request.autostop_mins)
+        )
+        self.lifecycle_service.register_deployment(
+            deployment=deployment,
+            policy=autostop_policy,
+        )
+        deployment._autostop_mins = autostop_policy.idle_minutes
+        deployment._record_activity_fn = lambda: self.lifecycle_service.record_activity(
+            deployment.id
+        )
+        deployment._is_idle_fn = lambda: self.lifecycle_service.is_idle(deployment.id)
+        deployment._last_activity_fn = lambda: (
+            self.lifecycle_service.get_state(deployment.id).last_activity_at
+            if self.lifecycle_service.get_state(deployment.id)
+            else None
+        )
+
+        # 7. Wire healthcheck and readiness polling closures to the Deployment
         async def _check_health() -> ProbeResult:
             if not deployment.endpoint_url:
                 raise HealthcheckError(
                     f"Deployment '{deployment.id}' has no endpoint URL available.",
                     deployment_id=deployment.id,
                 )
-            return await self.healthcheck_service.check_health(
+            result = await self.healthcheck_service.check_health(
                 endpoint_url=deployment.endpoint_url,
                 config=profile.healthcheck,
             )
+            if result.is_healthy:
+                deployment.record_activity()
+            return result
 
         async def _wait_for_ready(timeout_secs: int | None = None) -> DeploymentStatus:
             try:
@@ -119,6 +148,7 @@ class InferWeave:
                 )
                 deployment._status.state = DeploymentState.HEALTHY
                 deployment._status.ready_at = datetime.now(UTC)
+                deployment.record_activity()
             except HealthcheckTimeoutError as err:
                 deployment._status.state = DeploymentState.FAILED
                 deployment._status.error_message = str(err)
@@ -128,14 +158,15 @@ class InferWeave:
         deployment._healthcheck_fn = _check_health
         deployment._wait_ready_fn = _wait_for_ready
 
-        # 7. Track active deployment
+        # 8. Track active deployment
         self._active_deployments[deployment.id] = deployment
 
-        # 8. Actively poll for readiness if wait_for_ready is enabled
+        # 9. Actively poll for readiness if wait_for_ready is enabled
         if request.wait_for_ready and not request.dry_run and profile.healthcheck.enabled:
             await _wait_for_ready()
 
         return deployment
+
 
     def register_model(self, profile: ModelProfile) -> None:
         """Registers a custom model profile in the registry."""

@@ -108,13 +108,37 @@ class SkyPilotProvider(ComputeProvider):
             envs=runtime.env_vars,
         )
 
-        resources = sky.Resources(
-            cloud=sky.clouds.CLOUD_REGISTRY.from_str(self.name)
-            if hasattr(sky.clouds, "CLOUD_REGISTRY")
-            else None,
-            accelerators=accelerators,
-            ports=[runtime.port],
+        provider_opts = request.options.provider if request.options else None
+        use_spot = provider_opts.allow_spot if provider_opts else True
+        region = (
+            provider_opts.preferred_regions[0]
+            if (provider_opts and provider_opts.preferred_regions)
+            else None
         )
+        disk_size = provider_opts.disk_size_gb if provider_opts else None
+        autodown = provider_opts.autodown if provider_opts else False
+
+        resources_kwargs: dict[str, Any] = {
+            "cloud": (
+                sky.clouds.CLOUD_REGISTRY.from_str(self.name)
+                if hasattr(sky.clouds, "CLOUD_REGISTRY")
+                else None
+            ),
+            "accelerators": accelerators,
+            "ports": [runtime.port],
+            "use_spot": use_spot,
+        }
+        if region:
+            resources_kwargs["region"] = region
+        if disk_size:
+            resources_kwargs["disk_size"] = disk_size
+
+        if provider_opts and provider_opts.extra_provider_args:
+            for k in ("zone", "image_id"):
+                if k in provider_opts.extra_provider_args:
+                    resources_kwargs[k] = provider_opts.extra_provider_args[k]
+
+        resources = sky.Resources(**resources_kwargs)
         task.set_resources(resources)
 
         # Launch the task asynchronously
@@ -123,10 +147,12 @@ class SkyPilotProvider(ComputeProvider):
                 task,
                 cluster_name=deployment_id,
                 idle_minutes_to_autostop=request.autostop_mins,
+                down=autodown,
                 stream_logs=False,
             )
 
         await asyncio.to_thread(_launch_sync)
+
 
         # Query live cluster endpoint if ready
         endpoint_url = await self._resolve_endpoint(sky, deployment_id, runtime.port)

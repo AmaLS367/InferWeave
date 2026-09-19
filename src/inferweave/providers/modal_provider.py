@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from typing import Any
 
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState, ProviderType
@@ -72,21 +73,42 @@ class ModalProvider(ComputeProvider):
         )
         gpu_count = request.num_gpus or profile.hardware.gpu_count
         gpu_spec = f"{gpu_type}:{gpu_count}" if gpu_count > 1 else gpu_type
-        timeout_secs = (request.autostop_mins * 60) if request.autostop_mins else 1800
+        
+        provider_opts = request.options.provider if request.options else None
+        scaledown_window = (
+            (request.autostop_mins * 60)
+            if request.autostop_mins
+            else (provider_opts.scaledown_window_seconds if provider_opts else 1800)
+        )
+        timeout_secs = (
+            provider_opts.timeout_seconds
+            if (provider_opts and provider_opts.timeout_seconds)
+            else 86400
+        )
         run_command = runtime.run_command
 
+        fn_kwargs: dict[str, Any] = {
+            "image": image,
+            "gpu": gpu_spec,
+            "timeout": timeout_secs,
+            "scaledown_window": scaledown_window,
+            "serialized": True,
+        }
+
+        if provider_opts and provider_opts.extra_provider_args:
+            if "cpu" in provider_opts.extra_provider_args:
+                fn_kwargs["cpu"] = provider_opts.extra_provider_args["cpu"]
+            if "memory" in provider_opts.extra_provider_args:
+                fn_kwargs["memory"] = provider_opts.extra_provider_args["memory"]
+
         # Register containerized web server function listening on runtime port
-        @app.function(
-            image=image,
-            gpu=gpu_spec,
-            timeout=timeout_secs,
-            serialized=True,
-        )
+        @app.function(**fn_kwargs)
         @modal.web_server(port=runtime.port, startup_timeout=300)
         def serve():
             import subprocess
 
             subprocess.Popen(run_command, shell=True)
+
 
         # Handle dry-run mode without provisioning live Modal workers
         if request.dry_run:
@@ -110,9 +132,10 @@ class ModalProvider(ComputeProvider):
         await asyncio.to_thread(_deploy_sync)
 
         # Retrieve live HTTPS web endpoint URL assigned by Modal
-        endpoint_url = serve.get_web_url()
+        endpoint_url = getattr(serve, "get_web_url", lambda: None)()
         if not endpoint_url:
             endpoint_url = f"https://{deployment_id}.modal.run"
+
 
         status = DeploymentStatus(
             id=deployment_id,
