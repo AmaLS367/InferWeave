@@ -4,6 +4,11 @@ from inferweave.adapters.healthcheck import (
     HttpxHealthcheckProbeAdapter,
     MockHealthcheckProbeAdapter,
 )
+from inferweave.adapters.lifecycle import (
+    AsyncioWatchdogAdapter,
+    InMemoryDeploymentRepository,
+    MockWatchdogAdapter,
+)
 from inferweave.core.exceptions import (
     DeploymentError,
     HealthcheckError,
@@ -17,6 +22,7 @@ from inferweave.core.exceptions import (
     ProviderPlatformError,
     UnknownGpuError,
 )
+from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.hardware_validator import HardwareValidator
 from inferweave.domain.healthcheck import (
     HealthEvaluator,
@@ -51,8 +57,10 @@ from inferweave.models.routing import (
     RoutingDecision,
     VramCheckResult,
 )
+from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 from inferweave.ports.healthcheck import HealthcheckProbePort
 from inferweave.ports.lifecycle import AutostopWatchdogPort
+from inferweave.ports.provider import ComputeProviderPort
 from inferweave.registry.base import ModelRegistry
 from inferweave.sdk import InferWeave
 from inferweave.services.healthcheck_service import HealthcheckService
@@ -62,17 +70,20 @@ __version__ = "0.1.0"
 
 
 __all__ = [
+    "AsyncioWatchdogAdapter",
     "AutostopAction",
     "AutostopPolicy",
     "AutostopWatchdogPort",
+    "ComputeProviderPort",
     "Deployment",
     "DeploymentError",
     "DeploymentLifecycleEvaluator",
     "DeploymentOptions",
+    "DeploymentRecord",
+    "DeploymentRepositoryPort",
     "DeploymentRequest",
     "DeploymentState",
     "DeploymentStatus",
-
     "GpuSpec",
     "HardwareRequirements",
     "HardwareValidator",
@@ -84,6 +95,7 @@ __all__ = [
     "HealthcheckService",
     "HealthcheckTimeoutError",
     "HttpxHealthcheckProbeAdapter",
+    "InMemoryDeploymentRepository",
     "InferWeave",
     "InferWeaveError",
     "InstanceOffer",
@@ -91,7 +103,7 @@ __all__ = [
     "LifecycleService",
     "LifecycleState",
     "MockHealthcheckProbeAdapter",
-
+    "MockWatchdogAdapter",
     "ModelNotFoundError",
     "ModelProfile",
     "ModelRegistry",
@@ -112,4 +124,3 @@ __all__ = [
     "VramCheckResult",
     "WorkloadType",
 ]
-

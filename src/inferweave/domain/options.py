@@ -106,22 +106,53 @@ class DeploymentOptions(BaseModel):
         runtime_data = dict(raw.pop("runtime_args", None) or {})
         engine_args = dict(raw.pop("engine_args", None) or {})
         provider_data = dict(raw.pop("provider_args", None) or {})
-        extra_cli_args = list(raw.pop("extra_cli_args", None) or raw.pop("extra_args", None) or [])
+        extra_cli_args = list(
+            raw.pop("extra_cli_args", None) or raw.pop("extra_args", None) or []
+        )
         extra_env = dict(raw.pop("extra_env", None) or {})
 
         # 1. Process Provider parameters
         allow_spot = raw.pop("allow_spot", provider_data.pop("allow_spot", True))
-        max_price = raw.pop("max_price_per_hour", provider_data.pop("max_price_per_hour", None))
-        regions = raw.pop("preferred_regions", provider_data.pop("preferred_regions", []))
-        disk_size = raw.pop("disk_size_gb", raw.pop("disk_size", provider_data.pop("disk_size_gb", provider_data.pop("disk_size", None))))
-        scaledown_window = raw.pop("scaledown_window_seconds", raw.pop("scaledown_window", provider_data.pop("scaledown_window_seconds", provider_data.pop("scaledown_window", None))))
-        timeout_seconds = raw.pop("timeout_seconds", raw.pop("timeout", provider_data.pop("timeout_seconds", provider_data.pop("timeout", None))))
+        max_price = raw.pop(
+            "max_price_per_hour", provider_data.pop("max_price_per_hour", None)
+        )
+        regions = raw.pop(
+            "preferred_regions", provider_data.pop("preferred_regions", [])
+        )
+        disk_size = raw.pop(
+            "disk_size_gb",
+            raw.pop(
+                "disk_size",
+                provider_data.pop("disk_size_gb", provider_data.pop("disk_size", None)),
+            ),
+        )
+        scaledown_window = raw.pop(
+            "scaledown_window_seconds",
+            raw.pop(
+                "scaledown_window",
+                provider_data.pop(
+                    "scaledown_window_seconds",
+                    provider_data.pop("scaledown_window", None),
+                ),
+            ),
+        )
+        timeout_seconds = raw.pop(
+            "timeout_seconds",
+            raw.pop(
+                "timeout",
+                provider_data.pop(
+                    "timeout_seconds", provider_data.pop("timeout", None)
+                ),
+            ),
+        )
         autodown = raw.pop("autodown", provider_data.pop("autodown", False))
 
         # 2. Process Autostop parameters
         mins = raw.pop("autostop_mins", autostop_mins)
         action_val = raw.pop("autostop_action", "down" if autodown else "stop")
-        action = AutostopAction(action_val) if isinstance(action_val, str) else action_val
+        action = (
+            AutostopAction(action_val) if isinstance(action_val, str) else action_val
+        )
         autostop_enabled = raw.pop("autostop_enabled", True)
 
         # 3. Process known runtime / engine keys

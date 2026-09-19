@@ -96,7 +96,9 @@ class HttpxHealthcheckProbeAdapter(HealthcheckProbePort):
             )
         except Exception as err:  # noqa: BLE001
             latency = (time.perf_counter() - start) * 1000.0
-            logger.debug("Probe to '%s' unexpected error (%.2fms): %s", url, latency, err)
+            logger.debug(
+                "Probe to '%s' unexpected error (%.2fms): %s", url, latency, err
+            )
             return self._evaluator.evaluate_probe(
                 latency_ms=latency,
                 error=err,

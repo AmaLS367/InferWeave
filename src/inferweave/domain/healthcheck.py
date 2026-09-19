@@ -32,11 +32,21 @@ class ReadinessState(str, Enum):
 class ProbeResult(BaseModel):
     """Immutable snapshot of a single health probe attempt."""
 
-    is_healthy: bool = Field(..., description="Whether the probe passed healthy criteria")
-    outcome: ProbeOutcome = Field(..., description="Categorical outcome of the probe attempt")
-    status_code: int | None = Field(default=None, description="HTTP status code if reachable")
-    latency_ms: float = Field(default=0.0, ge=0.0, description="Round-trip latency in milliseconds")
-    error_message: str | None = Field(default=None, description="Diagnostic error detail if probe failed")
+    is_healthy: bool = Field(
+        ..., description="Whether the probe passed healthy criteria"
+    )
+    outcome: ProbeOutcome = Field(
+        ..., description="Categorical outcome of the probe attempt"
+    )
+    status_code: int | None = Field(
+        default=None, description="HTTP status code if reachable"
+    )
+    latency_ms: float = Field(
+        default=0.0, ge=0.0, description="Round-trip latency in milliseconds"
+    )
+    error_message: str | None = Field(
+        default=None, description="Diagnostic error detail if probe failed"
+    )
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the probe completed",
@@ -49,7 +59,9 @@ class ReadinessReport(BaseModel):
     state: ReadinessState = Field(
         default=ReadinessState.PENDING, description="Current readiness evaluation state"
     )
-    total_probes: int = Field(default=0, ge=0, description="Total number of probes executed")
+    total_probes: int = Field(
+        default=0, ge=0, description="Total number of probes executed"
+    )
     consecutive_successes: int = Field(
         default=0, ge=0, description="Current number of consecutive successful probes"
     )

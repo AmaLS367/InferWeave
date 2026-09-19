@@ -74,23 +74,31 @@ def test_evaluator_probe_unknown_error():
 
 def test_evaluator_readiness_empty_history():
     evaluator = HealthEvaluator()
-    is_ready, consecutive = evaluator.evaluate_readiness([], required_consecutive_successes=1)
+    is_ready, consecutive = evaluator.evaluate_readiness(
+        [], required_consecutive_successes=1
+    )
     assert is_ready is False
     assert consecutive == 0
 
 
 def test_evaluator_readiness_consecutive_threshold():
     evaluator = HealthEvaluator()
-    success = ProbeResult(is_healthy=True, outcome=ProbeOutcome.SUCCESS, status_code=200)
+    success = ProbeResult(
+        is_healthy=True, outcome=ProbeOutcome.SUCCESS, status_code=200
+    )
     failure = ProbeResult(is_healthy=False, outcome=ProbeOutcome.CONNECTION_REFUSED)
 
     # 1 success, target 1 -> ready
-    is_ready, count = evaluator.evaluate_readiness([success], required_consecutive_successes=1)
+    is_ready, count = evaluator.evaluate_readiness(
+        [success], required_consecutive_successes=1
+    )
     assert is_ready is True
     assert count == 1
 
     # 1 success, target 2 -> not ready
-    is_ready, count = evaluator.evaluate_readiness([success], required_consecutive_successes=2)
+    is_ready, count = evaluator.evaluate_readiness(
+        [success], required_consecutive_successes=2
+    )
     assert is_ready is False
     assert count == 1
 

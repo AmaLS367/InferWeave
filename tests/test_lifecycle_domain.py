@@ -98,3 +98,61 @@ def test_evaluator_already_stopped():
 def test_autostop_action_enum():
     assert AutostopAction.STOP.value == "stop"
     assert AutostopAction.DOWN.value == "down"
+
+
+def test_evaluator_reconcile_state():
+    from inferweave.models.enums import DeploymentState
+
+    # 1. Stopped always returns STOPPED
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.HEALTHY,
+            is_stopped=True,
+        )
+        == DeploymentState.STOPPED
+    )
+
+    # 2. Infra Failed returns FAILED
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.FAILED,
+        )
+        == DeploymentState.FAILED
+    )
+
+    # 3. Infra Provisioning returns PROVISIONING
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.PROVISIONING,
+        )
+        == DeploymentState.PROVISIONING
+    )
+
+    # 4. Infra UP/HEALTHY + probe healthy -> HEALTHY
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.HEALTHY,
+            probe_is_healthy=True,
+        )
+        == DeploymentState.HEALTHY
+    )
+
+    # 5. Infra UP/HEALTHY + probe unhealthy -> UNHEALTHY
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.HEALTHY,
+            probe_is_healthy=False,
+            current_state=DeploymentState.HEALTHY,
+        )
+        == DeploymentState.UNHEALTHY
+    )
+
+    # 6. Infra UP/HEALTHY + probe unhealthy while still provisioning -> PROVISIONING
+    assert (
+        DeploymentLifecycleEvaluator.reconcile_state(
+            infra_state=DeploymentState.HEALTHY,
+            probe_is_healthy=False,
+            current_state=DeploymentState.PROVISIONING,
+        )
+        == DeploymentState.PROVISIONING
+    )

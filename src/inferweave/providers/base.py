@@ -1,39 +1,16 @@
-"""Compute provider abstract base class."""
+from abc import abstractmethod
 
-from abc import ABC, abstractmethod
-
-from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
-from inferweave.models.enums import ProviderType
-from inferweave.models.profile import ModelProfile
-from inferweave.runtimes.base import RuntimeSpec
+from inferweave.domain.lifecycle import AutostopAction
+from inferweave.ports.provider import ComputeProviderPort
 
 
-class ComputeProvider(ABC):
+class ComputeProvider(ComputeProviderPort):
     """Abstract interface implemented by all infrastructure backends (SkyPilot, Modal, Docker)."""
 
-    @property
     @abstractmethod
-    def name(self) -> str:
-        """Identifier for this provider instance (e.g. 'runpod', 'modal', 'aws')."""
-
-    @property
-    @abstractmethod
-    def provider_type(self) -> ProviderType:
-        """Category of this compute backend."""
-
-    @abstractmethod
-    async def deploy(
+    async def stop(
         self,
-        request: DeploymentRequest,
-        profile: ModelProfile,
-        runtime: RuntimeSpec,
-    ) -> Deployment:
-        """Provisions hardware, launches the containerized runtime, and returns an active Deployment."""
-
-    @abstractmethod
-    async def stop(self, deployment_id: str) -> None:
+        deployment_id: str,
+        action: AutostopAction = AutostopAction.STOP,
+    ) -> None:
         """Terminates or pauses the remote deployment."""
-
-    @abstractmethod
-    async def get_status(self, deployment_id: str) -> DeploymentStatus:
-        """Fetches the latest status and endpoint health for a given deployment ID."""

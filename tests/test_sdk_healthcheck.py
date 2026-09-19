@@ -110,7 +110,8 @@ async def test_sdk_deploy_timeout_transitions_to_failed():
     with patch("modal.App.deploy") as mock_deploy:
         mock_deploy.return_value = None
         with patch(
-            "modal.Function.get_web_url", return_value="https://crashing-model.modal.run"
+            "modal.Function.get_web_url",
+            return_value="https://crashing-model.modal.run",
         ):
             with pytest.raises(HealthcheckTimeoutError) as exc_info:
                 await weave.deploy(

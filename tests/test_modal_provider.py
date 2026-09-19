@@ -108,23 +108,33 @@ async def test_modal_provider_stop():
 
 
 @pytest.mark.asyncio
-async def test_modal_provider_get_status():
+async def test_modal_provider_stop_dry_run(sample_profile, sample_runtime):
     provider = ModalProvider()
-    deployment_id = "iw-modal-test-123456"
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="modal",
+        dry_run=True,
+    )
 
-    mock_client = MagicMock()
-    mock_lifecycle = MagicMock()
-    from modal_proto import api_pb2
+    deployment = await provider.deploy(request, sample_profile, sample_runtime)
+    await provider.stop(deployment.id)
+    status = await provider.get_status(deployment.id)
+    assert status.state == DeploymentState.STOPPED
+    assert status.model == sample_profile.id
 
-    mock_lifecycle.app_state = api_pb2.APP_STATE_DEPLOYED
 
-    with (
-        patch("modal.client._Client.from_env", AsyncMock(return_value=mock_client)),
-        patch(
-            "modal.cli.app.resolve_app_identifier",
-            AsyncMock(return_value=("ap-12345", "main", mock_lifecycle)),
-        ),
-    ):
-        status = await provider.get_status(deployment_id)
-        assert status.state == DeploymentState.HEALTHY
-        assert status.id == deployment_id
+@pytest.mark.asyncio
+async def test_modal_provider_get_status(sample_profile, sample_runtime):
+    provider = ModalProvider()
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="modal",
+        dry_run=True,
+    )
+    deployment = await provider.deploy(request, sample_profile, sample_runtime)
+
+    status = await provider.get_status(deployment.id)
+    assert status.state == DeploymentState.PROVISIONING
+    assert status.id == deployment.id
+    assert status.model == sample_profile.id
+    assert status.provider == "modal"

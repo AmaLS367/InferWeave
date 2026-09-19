@@ -5,6 +5,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from inferweave.models.enums import DeploymentState
+
 
 class AutostopAction(str, Enum):
     """Action taken when deployment idle threshold is exceeded."""
@@ -43,7 +45,7 @@ class LifecycleState(BaseModel):
 
 
 class DeploymentLifecycleEvaluator:
-    """Pure domain service evaluating deployment idle state and autostop eligibility."""
+    """Pure domain service evaluating deployment idle state, autostop eligibility, and state reconciliation."""
 
     @staticmethod
     def calculate_idle_seconds(
@@ -55,9 +57,7 @@ class DeploymentLifecycleEvaluator:
         return max(0.0, elapsed)
 
     @classmethod
-    def is_idle(
-        cls, state: LifecycleState, now: datetime | None = None
-    ) -> bool:
+    def is_idle(cls, state: LifecycleState, now: datetime | None = None) -> bool:
         """Determines if the deployment has been inactive longer than its policy threshold."""
         if not state.policy.enabled or state.policy.idle_minutes is None:
             return False
@@ -73,3 +73,45 @@ class DeploymentLifecycleEvaluator:
         if state.is_stopped or not state.policy.enabled:
             return False
         return cls.is_idle(state, now)
+
+    @classmethod
+    def reconcile_state(
+        cls,
+        infra_state: DeploymentState,
+        probe_is_healthy: bool | None = None,
+        is_stopped: bool = False,
+        current_state: DeploymentState | None = None,
+    ) -> DeploymentState:
+        """Reconciles raw compute infrastructure state with application-level healthcheck probe results.
+
+        Prevents false-positive 'HEALTHY' reports when cloud infrastructure is UP but the model server
+        inside the container is still provisioning, crashed, or failing readiness checks.
+        """
+        if is_stopped or infra_state == DeploymentState.STOPPED:
+            return DeploymentState.STOPPED
+
+        if infra_state == DeploymentState.FAILED:
+            return DeploymentState.FAILED
+
+        if infra_state in {
+            DeploymentState.PENDING,
+            DeploymentState.PROVISIONING,
+            DeploymentState.STARTING,
+        }:
+            return infra_state
+
+        # Infrastructure is reported UP / HEALTHY by the cloud provider
+        if probe_is_healthy is True:
+            return DeploymentState.HEALTHY
+        if probe_is_healthy is False:
+            # If it was previously provisioning or starting, it may still be warming up
+            if current_state in {
+                DeploymentState.PROVISIONING,
+                DeploymentState.STARTING,
+            }:
+                return DeploymentState.PROVISIONING
+            # Otherwise, the endpoint failed its health check
+            return DeploymentState.UNHEALTHY
+
+        # If probe was not executed or not configured, fall back to infra state
+        return infra_state

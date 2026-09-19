@@ -29,9 +29,10 @@ class InferWeave:
         self.registry = registry or ModelRegistry()
         self.router = router or ProviderRouter()
         self.healthcheck_service = healthcheck_service or HealthcheckService()
-        self.lifecycle_service = lifecycle_service or LifecycleService()
+        self.lifecycle_service = lifecycle_service or LifecycleService(
+            healthcheck_service=self.healthcheck_service
+        )
         self._active_deployments: dict[str, Deployment] = {}
-
 
     async def deploy(
         self,
@@ -111,6 +112,8 @@ class InferWeave:
         self.lifecycle_service.register_deployment(
             deployment=deployment,
             policy=autostop_policy,
+            is_dry_run=request.dry_run,
+            provider=compute_provider,
         )
         deployment._autostop_mins = autostop_policy.idle_minutes
         deployment._record_activity_fn = lambda: self.lifecycle_service.record_activity(
@@ -121,6 +124,19 @@ class InferWeave:
             self.lifecycle_service.get_state(deployment.id).last_activity_at
             if self.lifecycle_service.get_state(deployment.id)
             else None
+        )
+        deployment._stop_fn = lambda action=None: (
+            self.lifecycle_service.stop_deployment(
+                deployment_id=deployment.id,
+                action=action,
+                provider=compute_provider,
+            )
+        )
+        deployment._refresh_fn = lambda: self.lifecycle_service.refresh_status(
+            deployment_id=deployment.id,
+            provider=compute_provider,
+            probe=True,
+            healthcheck_config=profile.healthcheck,
         )
 
         # 7. Wire healthcheck and readiness polling closures to the Deployment
@@ -144,7 +160,9 @@ class InferWeave:
                     endpoint_url=deployment.endpoint_url,
                     config=profile.healthcheck,
                     deployment_id=deployment.id,
-                    timeout_override=float(timeout_secs) if timeout_secs is not None else None,
+                    timeout_override=float(timeout_secs)
+                    if timeout_secs is not None
+                    else None,
                 )
                 deployment._status.state = DeploymentState.HEALTHY
                 deployment._status.ready_at = datetime.now(UTC)
@@ -162,11 +180,14 @@ class InferWeave:
         self._active_deployments[deployment.id] = deployment
 
         # 9. Actively poll for readiness if wait_for_ready is enabled
-        if request.wait_for_ready and not request.dry_run and profile.healthcheck.enabled:
+        if (
+            request.wait_for_ready
+            and not request.dry_run
+            and profile.healthcheck.enabled
+        ):
             await _wait_for_ready()
 
         return deployment
-
 
     def register_model(self, profile: ModelProfile) -> None:
         """Registers a custom model profile in the registry."""
@@ -175,3 +196,21 @@ class InferWeave:
     def list_deployments(self) -> list[Deployment]:
         """Returns all actively tracked deployments in the local session."""
         return list(self._active_deployments.values())
+
+    async def stop(
+        self,
+        deployment_id: str,
+        action: Any | None = None,
+    ) -> None:
+        """Terminates or pauses an active deployment by ID."""
+        await self.lifecycle_service.stop_deployment(
+            deployment_id=deployment_id,
+            action=action,
+        )
+        dep = self._active_deployments.get(deployment_id)
+        if dep:
+            dep._status.state = DeploymentState.STOPPED
+
+    async def get_status(self, deployment_id: str) -> DeploymentStatus:
+        """Retrieves and reconciles the latest deployment status."""
+        return await self.lifecycle_service.refresh_status(deployment_id=deployment_id)

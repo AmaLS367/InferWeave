@@ -30,5 +30,6 @@ class DeploymentState(str, Enum):
     STARTING = "starting"
     HEALTHY = "healthy"
     DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
     FAILED = "failed"
     STOPPED = "stopped"

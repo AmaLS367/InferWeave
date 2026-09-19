@@ -80,10 +80,11 @@ class Deployment:
     def __init__(
         self,
         status: DeploymentStatus,
-        stop_fn: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        stop_fn: Callable[..., Coroutine[Any, Any, None]] | None = None,
         refresh_fn: Callable[[], Coroutine[Any, Any, DeploymentStatus]] | None = None,
         healthcheck_fn: Callable[[], Coroutine[Any, Any, Any]] | None = None,
-        wait_ready_fn: Callable[[int | None], Coroutine[Any, Any, DeploymentStatus]] | None = None,
+        wait_ready_fn: Callable[[int | None], Coroutine[Any, Any, DeploymentStatus]]
+        | None = None,
         autostop_mins: int | None = 30,
         record_activity_fn: Callable[[], None] | None = None,
         is_idle_fn: Callable[[], bool] | None = None,
@@ -98,7 +99,6 @@ class Deployment:
         self._record_activity_fn = record_activity_fn
         self._is_idle_fn = is_idle_fn
         self._last_activity_fn = last_activity_fn
-
 
     @property
     def id(self) -> str:
@@ -128,23 +128,35 @@ class Deployment:
     def status(self) -> DeploymentStatus:
         return self._status
 
-    async def stop(self) -> None:
+    async def stop(self, action: Any | None = None) -> None:
         """Terminates or shuts down this deployment."""
         if self._stop_fn:
-            await self._stop_fn()
+            try:
+                if action is not None:
+                    await self._stop_fn(action=action)
+                else:
+                    await self._stop_fn()
+            except TypeError:
+                await self._stop_fn()
             self._status.state = DeploymentState.STOPPED
 
     async def refresh(self) -> DeploymentStatus:
         """Refreshes and returns the latest deployment status."""
         if self._refresh_fn:
-            self._status = await self._refresh_fn()
+            current_model = self._status.model
+            new_status = await self._refresh_fn()
+            if new_status.model == "unknown" and current_model != "unknown":
+                new_status.model = current_model
+            self._status = new_status
         return self._status
 
     async def check_health(self) -> Any:
         """Executes an immediate health probe against this deployment endpoint."""
         if self._healthcheck_fn:
             return await self._healthcheck_fn()
-        raise RuntimeError("No healthcheck probe function configured for this deployment.")
+        raise RuntimeError(
+            "No healthcheck probe function configured for this deployment."
+        )
 
     @property
     def autostop_mins(self) -> int | None:
@@ -169,7 +181,9 @@ class Deployment:
             return self._is_idle_fn()
         return False
 
-    async def wait_for_ready(self, timeout_seconds: int | None = None) -> DeploymentStatus:
+    async def wait_for_ready(
+        self, timeout_seconds: int | None = None
+    ) -> DeploymentStatus:
         """Blocks until the deployment passes its readiness healthcheck."""
         if self._wait_ready_fn:
             self._status = await self._wait_ready_fn(timeout_seconds)
@@ -181,4 +195,3 @@ class Deployment:
             f"<Deployment id='{self.id}' model='{self.model}' "
             f"provider='{self.provider}' state='{self.state}' endpoint='{self.endpoint_url}'>"
         )
-

@@ -60,11 +60,15 @@ async def test_modal_deployment_flow_with_deploy_call():
     weave = InferWeave()
     with patch("modal.App.deploy") as mock_deploy:
         mock_deploy.return_value = None
-        with patch(
-            "modal.Function.get_web_url", return_value="https://my-app--serve.modal.run"
-        ), patch.object(
-            weave.healthcheck_service, "wait_for_ready", AsyncMock()
-        ) as mock_wait:
+        with (
+            patch(
+                "modal.Function.get_web_url",
+                return_value="https://my-app--serve.modal.run",
+            ),
+            patch.object(
+                weave.healthcheck_service, "wait_for_ready", AsyncMock()
+            ) as mock_wait,
+        ):
             deployment = await weave.deploy(
                 model="fish-s2-pro",
                 provider="modal",

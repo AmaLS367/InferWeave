@@ -15,7 +15,9 @@ from inferweave.runtimes.templates import (
 )
 
 
-def sample_profile(model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct") -> ModelProfile:
+def sample_profile(
+    model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct",
+) -> ModelProfile:
     return ModelProfile(
         id=model_id,
         name="Sample Model",
@@ -24,7 +26,6 @@ def sample_profile(model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct") -> Mod
         hardware=HardwareRequirements(min_vram_gb=16.0, gpu_count=1),
         healthcheck=HealthcheckConfig(port=8000),
     )
-
 
 
 def test_vllm_template_renders_custom_engine_args():

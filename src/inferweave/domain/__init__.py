@@ -1,5 +1,6 @@
 """Domain layer containing core business rules, domain services, and hardware validation."""
 
+from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.hardware_validator import HardwareValidator
 from inferweave.domain.healthcheck import (
     HealthEvaluator,
@@ -25,6 +26,7 @@ __all__ = [
     "AutostopPolicy",
     "DeploymentLifecycleEvaluator",
     "DeploymentOptions",
+    "DeploymentRecord",
     "HardwareValidator",
     "HealthEvaluator",
     "LifecycleState",
@@ -35,4 +37,3 @@ __all__ = [
     "ReadinessState",
     "RuntimeOptions",
 ]
-

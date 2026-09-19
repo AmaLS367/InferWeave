@@ -66,7 +66,9 @@ class MockWatchdogAdapter(AutostopWatchdogPort):
     """Deterministic in-memory watchdog adapter for unit testing without asyncio delays."""
 
     def __init__(self) -> None:
-        self.scheduled_checks: dict[str, tuple[float, Callable[[], Coroutine[Any, Any, None]]]] = {}
+        self.scheduled_checks: dict[
+            str, tuple[float, Callable[[], Coroutine[Any, Any, None]]]
+        ] = {}
         self.cancelled_checks: list[str] = []
 
     async def schedule_check(

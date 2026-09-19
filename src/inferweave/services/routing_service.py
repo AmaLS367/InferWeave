@@ -147,7 +147,6 @@ class SmartRoutingService:
             preferred_regions=regions,
         )
 
-
     def _filter_offers(
         self,
         offers: list[InstanceOffer],

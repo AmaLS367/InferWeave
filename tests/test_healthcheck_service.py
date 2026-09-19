@@ -1,6 +1,5 @@
 """Unit tests for HealthcheckService application service."""
 
-
 import pytest
 
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
@@ -38,10 +37,7 @@ def test_build_probe_url_standard():
     )
 
     # Raw IP without scheme and without port
-    assert (
-        service.build_probe_url("10.0.0.5", config)
-        == "http://10.0.0.5:8000/health"
-    )
+    assert service.build_probe_url("10.0.0.5", config) == "http://10.0.0.5:8000/health"
 
 
 @pytest.mark.asyncio
@@ -63,7 +59,9 @@ async def test_wait_for_ready_missing_endpoint():
     config = HealthcheckConfig(enabled=True)
 
     with pytest.raises(HealthcheckError) as exc_info:
-        await service.wait_for_ready(endpoint_url=None, config=config, deployment_id="dep-123")
+        await service.wait_for_ready(
+            endpoint_url=None, config=config, deployment_id="dep-123"
+        )
 
     assert "dep-123" in str(exc_info.value)
 
@@ -145,7 +143,9 @@ async def test_wait_for_ready_timeout_exceeded():
         error_message="Host unreachable",
     )
 
-    adapter = MockHealthcheckProbeAdapter(canned_results=[p_fail] * 10, default_healthy=False)
+    adapter = MockHealthcheckProbeAdapter(
+        canned_results=[p_fail] * 10, default_healthy=False
+    )
     service = HealthcheckService(probe_port=adapter)
     config = HealthcheckConfig(
         initial_delay_seconds=0,

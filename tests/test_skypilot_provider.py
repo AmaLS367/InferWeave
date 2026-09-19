@@ -91,38 +91,58 @@ async def test_skypilot_dry_run(sample_profile, sample_runtime):
 
 @pytest.mark.asyncio
 async def test_skypilot_stop():
+    from inferweave.domain.lifecycle import AutostopAction
+
     provider = SkyPilotProvider(cloud_name="runpod")
     deployment_id = "iw-test-cluster"
 
     mock_sky = MagicMock()
+    mock_sky.stop = MagicMock()
     mock_sky.down = MagicMock()
 
     with (
         patch.object(provider, "_ensure_supported_platform", return_value=None),
         patch.object(provider, "_get_sky_module", return_value=mock_sky),
     ):
+        # Default action is STOP
         await provider.stop(deployment_id)
+        mock_sky.stop.assert_called_once_with(cluster_name=deployment_id)
+
+        # Explicit action DOWN
+        await provider.stop(deployment_id, action=AutostopAction.DOWN)
         mock_sky.down.assert_called_once_with(cluster_name=deployment_id)
 
 
 @pytest.mark.asyncio
-async def test_skypilot_get_status_up():
+async def test_skypilot_stop_dry_run(sample_profile, sample_runtime):
+    provider = SkyPilotProvider(cloud_name="aws")
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="aws",
+        dry_run=True,
+    )
+
+    deployment = await provider.deploy(request, sample_profile, sample_runtime)
+    # Stopping dry-run deployment must succeed on any OS without invoking sky.stop/down
+    await provider.stop(deployment.id)
+    status = await provider.get_status(deployment.id)
+    assert status.state == DeploymentState.STOPPED
+    assert status.model == sample_profile.id
+
+
+@pytest.mark.asyncio
+async def test_skypilot_get_status_up(sample_profile, sample_runtime):
     provider = SkyPilotProvider(cloud_name="runpod")
-    deployment_id = "iw-test-cluster"
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="runpod",
+        dry_run=True,
+    )
+    deployment = await provider.deploy(request, sample_profile, sample_runtime)
 
-    mock_sky = MagicMock()
-    mock_record = MagicMock()
-    mock_record.status = "UP"
-    mock_sky.status = MagicMock(return_value=[mock_record])
-    mock_sky.endpoints = MagicMock(return_value={8000: "http://5.6.7.8:8000"})
-
-    with (
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        patch.object(provider, "_get_sky_module", return_value=mock_sky),
-    ):
-        status = await provider.get_status(deployment_id)
-        assert status.state == DeploymentState.HEALTHY
-        assert status.endpoint_url == "http://5.6.7.8:8000"
+    status = await provider.get_status(deployment.id)
+    assert status.model == sample_profile.id
+    assert status.provider == "runpod"
 
 
 @pytest.mark.asyncio

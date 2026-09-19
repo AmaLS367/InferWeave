@@ -28,7 +28,6 @@ def sample_profile():
     )
 
 
-
 @pytest.fixture
 def sample_runtime():
     return RuntimeSpec(
@@ -40,7 +39,9 @@ def sample_runtime():
 
 
 @pytest.mark.asyncio
-async def test_modal_provider_autostop_scaledown_window_and_timeout(sample_profile, sample_runtime):
+async def test_modal_provider_autostop_scaledown_window_and_timeout(
+    sample_profile, sample_runtime
+):
     provider = ModalProvider()
     request = DeploymentRequest(
         model=sample_profile.id,
@@ -78,9 +79,10 @@ async def test_modal_provider_autostop_scaledown_window_and_timeout(sample_profi
             assert call_kwargs.get("memory") == 16384
 
 
-
 @pytest.mark.asyncio
-async def test_skypilot_provider_passes_autostop_autodown_and_resources(sample_profile, sample_runtime):
+async def test_skypilot_provider_passes_autostop_autodown_and_resources(
+    sample_profile, sample_runtime
+):
     provider = SkyPilotProvider(cloud_name="runpod")
     request = DeploymentRequest(
         model=sample_profile.id,
