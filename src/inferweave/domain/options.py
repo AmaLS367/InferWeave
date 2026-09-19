@@ -88,6 +88,10 @@ class DeploymentOptions(BaseModel):
     runtime: RuntimeOptions = Field(default_factory=RuntimeOptions)
     provider: ProviderOptions = Field(default_factory=ProviderOptions)
     autostop: AutostopPolicy = Field(default_factory=AutostopPolicy)
+    cleanup_on_failure: bool = Field(
+        default=False,
+        description="Whether to automatically destroy compute resources if readiness probe times out",
+    )
 
     @classmethod
     def from_custom_args(
@@ -101,6 +105,7 @@ class DeploymentOptions(BaseModel):
         preserving backwards-compatibility with untyped user dictionaries.
         """
         raw = dict(custom_args or {})
+        cleanup_on_failure = bool(raw.pop("cleanup_on_failure", False))
 
         # Extract nested dictionaries if provided
         runtime_data = dict(raw.pop("runtime_args", None) or {})
@@ -149,11 +154,16 @@ class DeploymentOptions(BaseModel):
 
         # 2. Process Autostop parameters
         mins = raw.pop("autostop_mins", autostop_mins)
+        if mins == 0 or mins == "0":
+            mins = None
+            autostop_enabled = False
+        else:
+            autostop_enabled = raw.pop("autostop_enabled", True)
+
         action_val = raw.pop("autostop_action", "down" if autodown else "stop")
         action = (
             AutostopAction(action_val) if isinstance(action_val, str) else action_val
         )
-        autostop_enabled = raw.pop("autostop_enabled", True)
 
         # 3. Process known runtime / engine keys
         known_engine_keys = {
@@ -213,4 +223,5 @@ class DeploymentOptions(BaseModel):
             runtime=runtime_options,
             provider=provider_options,
             autostop=autostop_policy,
+            cleanup_on_failure=cleanup_on_failure,
         )

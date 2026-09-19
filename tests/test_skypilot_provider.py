@@ -69,6 +69,10 @@ async def test_skypilot_deploy_success(sample_profile, sample_runtime):
         deployment = await provider.deploy(request, sample_profile, sample_runtime)
 
         mock_sky.launch.assert_called_once()
+        _, launch_kwargs = mock_sky.launch.call_args
+        assert launch_kwargs.get("idle_minutes_to_autostop") == 20
+        assert launch_kwargs.get("down") is False
+
         mock_sky.endpoints.assert_called_once()
         assert deployment.provider == "runpod"
         assert deployment.endpoint_url == "http://1.2.3.4:8000"
@@ -78,6 +82,87 @@ async def test_skypilot_deploy_success(sample_profile, sample_runtime):
         mock_sky.Resources.assert_called_once()
         _, res_kwargs = mock_sky.Resources.call_args
         assert res_kwargs.get("image_id") == "docker:vllm/vllm-openai:latest"
+
+
+@pytest.mark.asyncio
+async def test_skypilot_deploy_with_autostop_action_down(sample_profile, sample_runtime):
+    from inferweave.domain.lifecycle import AutostopAction, AutostopPolicy
+    from inferweave.domain.options import DeploymentOptions
+
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="runpod",
+        options=DeploymentOptions(
+            autostop=AutostopPolicy(
+                action=AutostopAction.DOWN,
+                idle_minutes=15,
+                enabled=True,
+            )
+        ),
+    )
+
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    mock_sky.Task = MagicMock()
+    mock_sky.Resources = MagicMock()
+    mock_sky.stop = MagicMock()
+    mock_sky.down = MagicMock()
+    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        deployment = await provider.deploy(request, sample_profile, sample_runtime)
+        mock_sky.launch.assert_called_once()
+        _, launch_kwargs = mock_sky.launch.call_args
+        assert launch_kwargs.get("down") is True
+        assert launch_kwargs.get("idle_minutes_to_autostop") == 15
+
+        # Test calling deployment.stop() directly defaults to STOP
+        await deployment.stop()
+        mock_sky.stop.assert_called_once_with(cluster_name=deployment.id)
+
+        # Test calling deployment.stop(action=AutostopAction.DOWN)
+        await deployment.stop(action=AutostopAction.DOWN)
+        mock_sky.down.assert_called_once_with(cluster_name=deployment.id)
+
+
+@pytest.mark.asyncio
+async def test_skypilot_deploy_with_autostop_disabled(sample_profile, sample_runtime):
+    from inferweave.domain.lifecycle import AutostopPolicy
+    from inferweave.domain.options import DeploymentOptions
+
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="runpod",
+        options=DeploymentOptions(
+            autostop=AutostopPolicy(
+                enabled=False,
+                idle_minutes=None,
+            )
+        ),
+    )
+
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    mock_sky.Task = MagicMock()
+    mock_sky.Resources = MagicMock()
+    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        await provider.deploy(request, sample_profile, sample_runtime)
+        mock_sky.launch.assert_called_once()
+        _, launch_kwargs = mock_sky.launch.call_args
+        assert launch_kwargs.get("idle_minutes_to_autostop") is None
+        assert launch_kwargs.get("down") is False
 
 
 @pytest.mark.asyncio

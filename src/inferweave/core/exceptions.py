@@ -19,10 +19,19 @@ class ModelNotFoundError(InferWeaveError):
 class ProviderNotFoundError(InferWeaveError):
     """Raised when an unrecognized or unregistered compute provider is requested."""
 
-    def __init__(self, provider_name: str) -> None:
+    def __init__(
+        self,
+        provider_name: str,
+        available_providers: list[str] | None = None,
+    ) -> None:
+        avail_str = (
+            ", ".join(available_providers)
+            if available_providers
+            else "runpod, aws, gcp, azure, lambda, nebius, vast, oci, kubernetes, fluidstack, modal, auto"
+        )
         super().__init__(
             f"Compute provider '{provider_name}' is not supported or registered. "
-            f"Available providers: runpod, aws, gcp, azure, lambda, nebius, modal, docker, auto."
+            f"Available providers: {avail_str}."
         )
         self.provider_name = provider_name
 

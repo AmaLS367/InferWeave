@@ -4,9 +4,11 @@ import base64
 import logging
 import sys
 import time
+from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from inferweave.workers.base import (
@@ -63,22 +65,8 @@ class FluxWorker:
         self.args = args
         self.pipe: Any = None
         self.is_loaded: bool = False
-        self._check_mock_mode()
-
-    def _check_mock_mode(self) -> None:
-        """Determines whether to operate in mock mode if dependencies are unavailable."""
+        self.load_error: str | None = None
         if self.args.mock:
-            self.is_loaded = True
-            return
-
-        try:
-            import diffusers  # type: ignore # noqa: F401
-            import torch  # type: ignore # noqa: F401
-        except ImportError:
-            logger.warning(
-                "PyTorch or Diffusers not found in environment. Defaulting to mock mode."
-            )
-            self.args.mock = True
             self.is_loaded = True
 
     def load_pipeline(self) -> None:
@@ -87,47 +75,54 @@ class FluxWorker:
             self.is_loaded = True
             return
 
-        import torch  # type: ignore
-        from diffusers import FluxPipeline  # type: ignore
+        try:
+            import torch  # type: ignore
+            from diffusers import FluxPipeline  # type: ignore
 
-        dtype_map = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }
-        torch_dtype = dtype_map.get(self.args.dtype.lower(), torch.bfloat16)
+            dtype_map = {
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+                "float32": torch.float32,
+            }
+            torch_dtype = dtype_map.get(self.args.dtype.lower(), torch.bfloat16)
 
-        load_kwargs: dict[str, Any] = {
-            "torch_dtype": torch_dtype,
-        }
+            load_kwargs: dict[str, Any] = {
+                "torch_dtype": torch_dtype,
+            }
 
-        if self.args.quantize_4bit:
-            try:
-                from transformers import BitsAndBytesConfig  # type: ignore
+            if self.args.quantize_4bit:
+                try:
+                    from transformers import BitsAndBytesConfig  # type: ignore
 
-                load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch_dtype,
-                    bnb_4bit_quant_type="nf4",
-                )
-            except ImportError:
-                logger.warning(
-                    "bitsandbytes not installed, skipping 4-bit quantization config"
-                )
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch_dtype,
+                        bnb_4bit_quant_type="nf4",
+                    )
+                except ImportError:
+                    logger.warning(
+                        "bitsandbytes not installed, skipping 4-bit quantization config"
+                    )
 
-        logger.info(f"Loading FLUX pipeline from '{self.args.model}'...")
-        self.pipe = FluxPipeline.from_pretrained(self.args.model, **load_kwargs)
+            logger.info(f"Loading FLUX pipeline from '{self.args.model}'...")
+            self.pipe = FluxPipeline.from_pretrained(self.args.model, **load_kwargs)
 
-        if self.args.device.startswith("cuda") and torch.cuda.is_available():
-            try:
-                self.pipe.enable_model_cpu_offload()
-            except Exception:  # noqa: BLE001
-                self.pipe.to(self.args.device)
-        else:
-            self.pipe.to("cpu")
+            if self.args.device.startswith("cuda") and torch.cuda.is_available():
+                try:
+                    self.pipe.enable_model_cpu_offload()
+                except Exception:  # noqa: BLE001
+                    self.pipe.to(self.args.device)
+            else:
+                self.pipe.to("cpu")
 
-        self.is_loaded = True
-        logger.info("FLUX pipeline loaded successfully.")
+            self.is_loaded = True
+            self.load_error = None
+            logger.info("FLUX pipeline loaded successfully.")
+        except Exception as err:
+            self.is_loaded = False
+            self.load_error = str(err)
+            logger.error(f"Failed to load FLUX pipeline from '{self.args.model}': {err}")
+            raise
 
     def generate(
         self,
@@ -139,8 +134,14 @@ class FluxWorker:
         seed: int | None = None,
     ) -> str:
         """Executes text-to-image synthesis and returns base64 PNG data."""
-        if self.args.mock or self.pipe is None:
+        if self.args.mock:
             return _DUMMY_PNG_B64
+
+        if not self.is_loaded or self.pipe is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"FLUX pipeline is not loaded: {self.load_error or 'Initializing or load failed'}",
+            )
 
         import torch  # type: ignore
 
@@ -162,9 +163,6 @@ class FluxWorker:
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
-from contextlib import asynccontextmanager
-
-
 def create_flux_app(worker: FluxWorker) -> Any:
     """Creates the FastAPI application for the FLUX worker."""
 
@@ -174,6 +172,7 @@ def create_flux_app(worker: FluxWorker) -> Any:
             worker.load_pipeline()
         except Exception as err:  # noqa: BLE001
             logger.error(f"Failed to load pipeline on startup: {err}")
+            # Server remains alive with 503 health endpoint so readiness probes and diagnostics report error
         yield
 
     app = create_base_app(
@@ -181,6 +180,7 @@ def create_flux_app(worker: FluxWorker) -> Any:
         version="0.1.0",
         model_id=worker.args.model,
         lifespan=lifespan,
+        worker=worker,
     )
 
     @app.post("/generate")

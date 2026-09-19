@@ -1,5 +1,6 @@
 """Main InferWeave SDK client entrypoint."""
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +16,8 @@ from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.templates import get_runtime_template
 from inferweave.services.healthcheck_service import HealthcheckService
 from inferweave.services.lifecycle_service import LifecycleService
+
+logger = logging.getLogger(__name__)
 
 
 class InferWeave:
@@ -167,11 +170,40 @@ class InferWeave:
                     else None,
                 )
                 deployment._status.state = DeploymentState.HEALTHY
-                deployment._status.ready_at = datetime.now(UTC)
+                now = datetime.now(UTC)
+                deployment._status.ready_at = now
                 deployment.record_activity()
+                if self.lifecycle_service:
+                    rec = await self.lifecycle_service.get_record(deployment.id)
+                    if rec:
+                        rec.mark_healthy(endpoint_url=deployment.endpoint_url, now=now)
+                        await self.lifecycle_service.repository.save(rec)
             except HealthcheckTimeoutError as err:
                 deployment._status.state = DeploymentState.FAILED
                 deployment._status.error_message = str(err)
+                if self.lifecycle_service:
+                    rec = await self.lifecycle_service.get_record(deployment.id)
+                    if rec:
+                        rec.mark_failed(error_message=str(err))
+                        if deployment.endpoint_url:
+                            rec.endpoint_url = deployment.endpoint_url
+                        await self.lifecycle_service.repository.save(rec)
+                cleanup = False
+                if request.options and getattr(request.options, "cleanup_on_failure", False):
+                    cleanup = True
+                if cleanup:
+                    logger.warning(
+                        "Readiness timeout occurred for '%s'. cleanup_on_failure=True, terminating deployment.",
+                        deployment.id,
+                    )
+                    try:
+                        await deployment.stop()
+                    except Exception as stop_err:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to cleanup failed deployment '%s': %s",
+                            deployment.id,
+                            stop_err,
+                        )
                 raise
             return deployment._status
 

@@ -238,8 +238,18 @@ STRATEGY_REGISTRY: dict[str, RoutingStrategy] = {
 
 
 def get_strategy(strategy_name: str | None) -> RoutingStrategy:
-    """Retrieves a routing strategy by name, defaulting to 'cheapest'."""
-    key = (strategy_name or "cheapest").lower()
-    if key not in STRATEGY_REGISTRY:
+    """Retrieves a routing strategy by name, defaulting to 'cheapest' when None.
+
+    Raises:
+        ValueError: If strategy_name is unrecognized.
+    """
+    if strategy_name is None:
         return STRATEGY_REGISTRY["cheapest"]
+
+    key = strategy_name.lower().strip()
+    if key not in STRATEGY_REGISTRY:
+        valid = ", ".join(sorted(STRATEGY_REGISTRY.keys()))
+        raise ValueError(
+            f"Invalid routing strategy '{strategy_name}'. Supported strategies: {valid}."
+        )
     return STRATEGY_REGISTRY[key]

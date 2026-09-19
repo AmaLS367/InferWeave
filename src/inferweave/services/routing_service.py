@@ -73,6 +73,28 @@ class SmartRoutingService:
                 f"Strategy '{strategy.name}' produced no valid candidate rankings for model '{profile.id}'."
             )
 
+        # Step 3: Live availability check via probe if configured
+        if self._probe is not None:
+            verified_ranked = []
+            for candidate in ranked:
+                try:
+                    is_avail = await self._probe.check_availability(
+                        provider=candidate.offer.provider,
+                        gpu_type=candidate.offer.gpu_type,
+                        region=candidate.offer.region,
+                    )
+                    if is_avail:
+                        verified_ranked.append(candidate)
+                except Exception as probe_err:  # noqa: BLE001
+                    logger.warning(
+                        "Live availability probe check failed for '%s' (%s): %s",
+                        candidate.offer.provider,
+                        candidate.offer.instance_type,
+                        probe_err,
+                    )
+            if verified_ranked:
+                ranked = verified_ranked
+
         best = ranked[0]
         logger.info(
             "Routing selected provider '%s' (%s, %s) using '%s' strategy for '%s'",

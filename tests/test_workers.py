@@ -220,3 +220,112 @@ def test_worker_module_import_does_not_load_control_plane_or_httpx():
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "ISOLATION_OK" in res.stdout
 
+
+@pytest.mark.asyncio
+async def test_flux_worker_fail_closed_on_load_error():
+    """Validates that FLUX worker fails closed with 503 on health and generate when pipeline fails to load."""
+    args = WorkerArgs(
+        model="black-forest-labs/FLUX.1-schnell",
+        mock=False,
+    )
+    worker = FluxWorker(args)
+    worker.load_error = "CUDA out of memory during weight allocation"
+    worker.is_loaded = False
+
+    app = create_flux_app(worker)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # /health must return 503 Service Unavailable
+        health_resp = await client.get("/health")
+        assert health_resp.status_code == 503
+        data = health_resp.json()
+        assert data["status"] == "unhealthy"
+        assert "CUDA out of memory" in data["error"]
+
+        # /healthz liveness stays ok (process is alive)
+        healthz_resp = await client.get("/healthz")
+        assert healthz_resp.status_code == 200
+
+        # /generate must return 503, NOT dummy image!
+        gen_resp = await client.post(
+            "/generate",
+            json={"prompt": "A test prompt"},
+        )
+        assert gen_resp.status_code == 503
+        assert "FLUX pipeline is not loaded" in gen_resp.json()["detail"]
+
+        # /v1/images/generations must also return 503
+        v1_resp = await client.post(
+            "/v1/images/generations",
+            json={"prompt": "A test prompt"},
+        )
+        assert v1_resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_wan_worker_fail_closed_on_load_error():
+    """Validates that WAN worker fails closed with 503 on health and generate when pipeline fails to load."""
+    args = WorkerArgs(
+        model="wan-video/wan-2.1",
+        mock=False,
+    )
+    worker = WanWorker(args)
+    worker.load_error = "Diffusers pipeline import error"
+    worker.is_loaded = False
+
+    app = create_wan_app(worker)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        health_resp = await client.get("/health")
+        assert health_resp.status_code == 503
+        data = health_resp.json()
+        assert data["status"] == "unhealthy"
+        assert "Diffusers pipeline import error" in data["error"]
+
+        gen_resp = await client.post(
+            "/generate",
+            json={"prompt": "A test video"},
+        )
+        assert gen_resp.status_code == 503
+        assert "WAN pipeline is not loaded" in gen_resp.json()["detail"]
+
+
+def test_fish_speech_template_conforms_to_official_docs():
+    """Validates that Fish Speech template uses latest-cu126, decoder path, and /v1/health."""
+    from inferweave.runtimes.templates import FishSpeechTemplate
+
+    template = FishSpeechTemplate()
+    profile = ModelProfile(
+        id="fishaudio/s2-pro",
+        name="Fish Speech S2 Pro",
+        workload_type=WorkloadType.AUDIO,
+        default_runtime="fish-speech",
+        hardware=HardwareRequirements(min_vram_gb=24.0),
+        healthcheck=HealthcheckConfig(port=8080, path="/v1/health"),
+    )
+    req = DeploymentRequest(model="fishaudio/s2-pro")
+    spec = template.render(profile, req)
+
+    assert spec.docker_image == "fishaudio/fish-speech:latest-cu126"
+    assert spec.healthcheck_path == "/v1/health"
+    assert "--llama-checkpoint-path checkpoints/fishaudio/s2-pro" in spec.run_command
+    assert "--decoder-checkpoint-path checkpoints/fishaudio/s2-pro/codec.pth" in spec.run_command
+
+
+def test_wan_video_template_includes_imageio_dependencies():
+    """Validates that WAN Video template includes imageio and imageio-ffmpeg."""
+    template = WanVideoTemplate()
+    profile = ModelProfile(
+        id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        name="WAN 2.1",
+        workload_type=WorkloadType.VIDEO,
+        default_runtime="wan-video",
+        hardware=HardwareRequirements(min_vram_gb=24.0),
+    )
+    req = DeploymentRequest(model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
+    spec = template.render(profile, req)
+
+    setup_joined = " ".join(spec.setup_commands)
+    assert "imageio" in setup_joined
+    assert "imageio-ffmpeg" in setup_joined
+

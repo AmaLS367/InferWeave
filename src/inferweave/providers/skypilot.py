@@ -113,9 +113,23 @@ class SkyPilotProvider(ComputeProvider):
 
             return sky
         except ImportError as e:
+            known_individual_extras = {
+                "runpod",
+                "aws",
+                "gcp",
+                "azure",
+                "lambda",
+                "nebius",
+                "kubernetes",
+            }
+            pkg_hint = (
+                f"inferweave[{self.name}]"
+                if self.name in known_individual_extras
+                else "inferweave[clouds]"
+            )
             raise ImportError(
                 f"SkyPilot is not installed with support for '{self.name}'. "
-                f"Install it via: pip install 'inferweave[{self.name}]'"
+                f"Install it via: pip install '{pkg_hint}'"
             ) from e
 
     async def deploy(
@@ -164,7 +178,9 @@ class SkyPilotProvider(ComputeProvider):
             )
             return Deployment(
                 status=status,
-                stop_fn=lambda: self.stop(deployment_id),
+                stop_fn=lambda action=None: self.stop(
+                    deployment_id, action=action or AutostopAction.STOP
+                ),
                 refresh_fn=lambda: self.get_status(deployment_id),
             )
 
@@ -215,7 +231,19 @@ class SkyPilotProvider(ComputeProvider):
             else None
         )
         disk_size = provider_opts.disk_size_gb if provider_opts else None
-        autodown = provider_opts.autodown if provider_opts else False
+
+        # Determine provider-native autostop policy (action & idle minutes)
+        autodown = False
+        idle_mins = request.autostop_mins
+        if request.options and request.options.autostop:
+            if request.options.autostop.enabled:
+                autodown = request.options.autostop.action == AutostopAction.DOWN
+                if request.options.autostop.idle_minutes is not None:
+                    idle_mins = request.options.autostop.idle_minutes
+            else:
+                idle_mins = None
+        elif provider_opts and provider_opts.autodown:
+            autodown = True
 
         resources_kwargs: dict[str, Any] = {
             "cloud": (
@@ -247,7 +275,7 @@ class SkyPilotProvider(ComputeProvider):
             sky.launch(
                 task,
                 cluster_name=deployment_id,
-                idle_minutes_to_autostop=request.autostop_mins,
+                idle_minutes_to_autostop=idle_mins,
                 down=autodown,
                 stream_logs=False,
             )
@@ -274,8 +302,8 @@ class SkyPilotProvider(ComputeProvider):
         if self._repository:
             await self._repository.save(record)
 
-        async def _stop(action: AutostopAction = AutostopAction.STOP) -> None:
-            await self.stop(deployment_id, action=action)
+        async def _stop(action: AutostopAction | str | None = AutostopAction.STOP) -> None:
+            await self.stop(deployment_id, action=action or AutostopAction.STOP)
 
         async def _refresh() -> DeploymentStatus:
             return await self.get_status(deployment_id)
@@ -285,7 +313,7 @@ class SkyPilotProvider(ComputeProvider):
     async def _resolve_endpoint(
         self, sky: Any, cluster_name: str, port: int
     ) -> str | None:
-        """Safely queries SkyPilot endpoints for a cluster."""
+        """Queries cluster endpoints from SkyPilot."""
 
         def _fetch() -> str | None:
             try:
@@ -314,11 +342,12 @@ class SkyPilotProvider(ComputeProvider):
     async def stop(
         self,
         deployment_id: str,
-        action: AutostopAction | str = AutostopAction.STOP,
+        action: AutostopAction | str | None = AutostopAction.STOP,
     ) -> None:
         """Terminates or pauses the SkyPilot cluster corresponding to this deployment."""
+        act = action or AutostopAction.STOP
         target_action = (
-            AutostopAction(action.lower()) if isinstance(action, str) else action
+            AutostopAction(act.lower()) if isinstance(act, str) else act
         )
         is_dry_run = False
         if deployment_id in self._local_deployments:

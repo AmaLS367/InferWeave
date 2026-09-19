@@ -39,7 +39,7 @@ kubernetes = [
     "skypilot[kubernetes]>=0.13.0",
 ]
 modal = [
-    "modal>=0.60.0",
+    "modal>=0.63.0,<1.6.0",
 ]
 clouds = [
     "skypilot[kubernetes,aws,gcp,azure,oci,nebius,lambda,runpod,fluidstack,paperspace,cudo,ibm,scp,seeweb,shadeform,verda]>=0.13.0",

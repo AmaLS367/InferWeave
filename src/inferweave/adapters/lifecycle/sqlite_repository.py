@@ -61,7 +61,8 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
         return conn
 
     def _save_sync(self, record: DeploymentRecord) -> None:
-        data_json = record.model_dump_json()
+        sanitized = record.to_sanitized_record()
+        data_json = sanitized.model_dump_json()
         with self._get_connection() as conn:
             conn.execute(
                 """

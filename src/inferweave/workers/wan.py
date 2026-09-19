@@ -2,11 +2,14 @@
 
 import base64
 import logging
+import os
 import sys
+import tempfile
 import time
-from io import BytesIO
+from contextlib import asynccontextmanager
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from inferweave.workers.base import (
@@ -65,22 +68,8 @@ class WanWorker:
         self.args = args
         self.pipe: Any = None
         self.is_loaded: bool = False
-        self._check_mock_mode()
-
-    def _check_mock_mode(self) -> None:
-        """Determines whether to operate in mock mode if dependencies are unavailable."""
+        self.load_error: str | None = None
         if self.args.mock:
-            self.is_loaded = True
-            return
-
-        try:
-            import diffusers  # type: ignore # noqa: F401
-            import torch  # type: ignore # noqa: F401
-        except ImportError:
-            logger.warning(
-                "PyTorch or Diffusers not found in environment. Defaulting to mock mode."
-            )
-            self.args.mock = True
             self.is_loaded = True
 
     def load_pipeline(self) -> None:
@@ -89,54 +78,61 @@ class WanWorker:
             self.is_loaded = True
             return
 
-        import torch  # type: ignore
-        from diffusers import AutoPipelineForText2Video  # type: ignore
-
-        dtype_map = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }
-        torch_dtype = dtype_map.get(self.args.dtype.lower(), torch.bfloat16)
-
-        load_kwargs: dict[str, Any] = {
-            "torch_dtype": torch_dtype,
-        }
-
-        if self.args.quantize_4bit:
-            try:
-                from transformers import BitsAndBytesConfig  # type: ignore
-
-                load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch_dtype,
-                    bnb_4bit_quant_type="nf4",
-                )
-            except ImportError:
-                logger.warning(
-                    "bitsandbytes not installed, skipping 4-bit quantization config"
-                )
-
-        logger.info(f"Loading WAN pipeline from '{self.args.model}'...")
         try:
-            from diffusers import WanPipeline  # type: ignore
+            import torch  # type: ignore
+            from diffusers import AutoPipelineForText2Video  # type: ignore
 
-            self.pipe = WanPipeline.from_pretrained(self.args.model, **load_kwargs)
-        except (ImportError, AttributeError):
-            self.pipe = AutoPipelineForText2Video.from_pretrained(
-                self.args.model, **load_kwargs
-            )
+            dtype_map = {
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+                "float32": torch.float32,
+            }
+            torch_dtype = dtype_map.get(self.args.dtype.lower(), torch.bfloat16)
 
-        if self.args.device.startswith("cuda") and torch.cuda.is_available():
+            load_kwargs: dict[str, Any] = {
+                "torch_dtype": torch_dtype,
+            }
+
+            if self.args.quantize_4bit:
+                try:
+                    from transformers import BitsAndBytesConfig  # type: ignore
+
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch_dtype,
+                        bnb_4bit_quant_type="nf4",
+                    )
+                except ImportError:
+                    logger.warning(
+                        "bitsandbytes not installed, skipping 4-bit quantization config"
+                    )
+
+            logger.info(f"Loading WAN pipeline from '{self.args.model}'...")
             try:
-                self.pipe.enable_model_cpu_offload()
-            except Exception:  # noqa: BLE001
-                self.pipe.to(self.args.device)
-        else:
-            self.pipe.to("cpu")
+                from diffusers import WanPipeline  # type: ignore
 
-        self.is_loaded = True
-        logger.info("WAN video pipeline loaded successfully.")
+                self.pipe = WanPipeline.from_pretrained(self.args.model, **load_kwargs)
+            except (ImportError, AttributeError):
+                self.pipe = AutoPipelineForText2Video.from_pretrained(
+                    self.args.model, **load_kwargs
+                )
+
+            if self.args.device.startswith("cuda") and torch.cuda.is_available():
+                try:
+                    self.pipe.enable_model_cpu_offload()
+                except Exception:  # noqa: BLE001
+                    self.pipe.to(self.args.device)
+            else:
+                self.pipe.to("cpu")
+
+            self.is_loaded = True
+            self.load_error = None
+            logger.info("WAN video pipeline loaded successfully.")
+        except Exception as err:
+            self.is_loaded = False
+            self.load_error = str(err)
+            logger.error(f"Failed to load WAN pipeline from '{self.args.model}': {err}")
+            raise
 
     def generate(
         self,
@@ -150,8 +146,14 @@ class WanWorker:
         seed: int | None = None,
     ) -> str:
         """Synthesizes video frames from text prompt and returns base64 MP4."""
-        if self.args.mock or self.pipe is None:
+        if self.args.mock:
             return _DUMMY_MP4_B64
+
+        if not self.is_loaded or self.pipe is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"WAN pipeline is not loaded: {self.load_error or 'Initializing or load failed'}",
+            )
 
         import torch  # type: ignore
         from diffusers.utils import export_to_video  # type: ignore
@@ -170,12 +172,20 @@ class WanWorker:
             generator=generator,
         )
         frames = output.frames[0]
-        buffer = BytesIO()
-        export_to_video(frames, buffer, fps=fps)
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-
-from contextlib import asynccontextmanager
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        try:
+            export_to_video(frames, tmp_path, fps=fps)
+            with open(tmp_path, "rb") as f:
+                video_bytes = f.read()
+            return base64.b64encode(video_bytes).decode("utf-8")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 def create_wan_app(worker: WanWorker) -> Any:
@@ -187,6 +197,7 @@ def create_wan_app(worker: WanWorker) -> Any:
             worker.load_pipeline()
         except Exception as err:  # noqa: BLE001
             logger.error(f"Failed to load WAN pipeline on startup: {err}")
+            # Server remains alive with 503 health endpoint so readiness probes and diagnostics report error
         yield
 
     app = create_base_app(
@@ -194,6 +205,7 @@ def create_wan_app(worker: WanWorker) -> Any:
         version="0.1.0",
         model_id=worker.args.model,
         lifespan=lifespan,
+        worker=worker,
     )
 
     @app.post("/generate")

@@ -1,3 +1,4 @@
+
 """Base infrastructure for InferWeave runtime workers."""
 
 import argparse
@@ -7,6 +8,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 
 @dataclass
@@ -98,16 +100,39 @@ def create_base_app(
     version: str = "0.1.0",
     model_id: str = "",
     lifespan: Any = None,
+    worker: Any | None = None,
 ) -> FastAPI:
     """Instantiates a FastAPI application with standardized healthcheck routes."""
     app = FastAPI(title=title, version=version, lifespan=lifespan)
 
     @app.get("/health")
-    async def health() -> dict[str, Any]:
+    async def health() -> Any:
+        now_str = datetime.now(UTC).isoformat()
+        if worker is not None:
+            if getattr(worker, "load_error", None):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "unhealthy",
+                        "model": model_id,
+                        "error": str(worker.load_error),
+                        "timestamp": now_str,
+                    },
+                )
+            if not getattr(worker, "is_loaded", False):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "loading",
+                        "model": model_id,
+                        "timestamp": now_str,
+                    },
+                )
+
         return {
             "status": "healthy",
             "model": model_id,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": now_str,
         }
 
     @app.get("/healthz")

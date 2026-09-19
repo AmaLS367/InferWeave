@@ -2,8 +2,9 @@
 
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from inferweave.models.enums import DeploymentState
 
@@ -31,6 +32,19 @@ class AutostopPolicy(BaseModel):
         default=True,
         description="Master switch enabling or disabling idle autostop evaluations",
     )
+
+    @field_validator("idle_minutes", mode="before")
+    @classmethod
+    def _validate_idle_minutes(cls, v: Any) -> Any:
+        if v == 0 or v == "0":
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def _sync_enabled(self) -> "AutostopPolicy":
+        if self.idle_minutes is None:
+            self.enabled = False
+        return self
 
 
 class LifecycleState(BaseModel):

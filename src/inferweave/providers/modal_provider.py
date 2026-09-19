@@ -155,7 +155,9 @@ class ModalProvider(ComputeProvider):
             )
             return Deployment(
                 status=status,
-                stop_fn=lambda: self.stop(deployment_id),
+                stop_fn=lambda action=None: self.stop(
+                    deployment_id, action=action or AutostopAction.STOP
+                ),
                 refresh_fn=lambda: self.get_status(deployment_id),
             )
 
@@ -182,7 +184,7 @@ class ModalProvider(ComputeProvider):
         if self._repository:
             await self._repository.save(record)
 
-        async def _stop(action: AutostopAction = AutostopAction.STOP) -> None:
+        async def _stop(action: AutostopAction | str | None = None) -> None:
             await self.stop(deployment_id, action=action)
 
         async def _refresh() -> DeploymentStatus:
@@ -190,10 +192,36 @@ class ModalProvider(ComputeProvider):
 
         return Deployment(status=status, stop_fn=_stop, refresh_fn=_refresh)
 
+    async def _stop_modal_app(self, deployment_id: str) -> None:
+        """Internal adapter invoking Modal SDK application stop endpoint.
+
+        Note: Modal 1.5.x warns that internal APIs (modal.cli.app.resolve_app_identifier,
+        modal.client._Client, modal_proto) may be modified or removed in 1.6.0+.
+        This adapter isolates internal calls for Modal versions >=0.63.0,<1.6.0.
+        """
+        try:
+            from modal.cli.app import resolve_app_identifier
+            from modal.client import _Client
+            from modal_proto import api_pb2
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Modal internal CLI/client modules not found. Ensure supported Modal SDK version (<1.6.0): {exc}"
+            ) from exc
+
+        client = await _Client.from_env()
+        app_id, _, lifecycle = await resolve_app_identifier(
+            deployment_id, None, client
+        )
+        if lifecycle.app_state != api_pb2.APP_STATE_STOPPED:
+            req = api_pb2.AppStopRequest(
+                app_id=app_id, source=api_pb2.APP_STOP_SOURCE_CLI
+            )
+            await client.stub.AppStop(req)
+
     async def stop(
         self,
         deployment_id: str,
-        action: AutostopAction = AutostopAction.STOP,
+        action: AutostopAction | str | None = None,
     ) -> None:
         """Stops the Modal deployment app and terminates its running containers."""
         is_dry_run = False
@@ -217,33 +245,19 @@ class ModalProvider(ComputeProvider):
 
         self._get_modal_module()
         try:
-            from modal.cli.app import resolve_app_identifier
-            from modal.client import _Client
-            from modal_proto import api_pb2
+            await self._stop_modal_app(deployment_id)
+        except Exception as err:
+            logger.error("Failed to stop Modal app '%s': %s", deployment_id, err)
+            raise
 
-            client = await _Client.from_env()
-            app_id, _, lifecycle = await resolve_app_identifier(
-                deployment_id, None, client
-            )
-            if lifecycle.app_state != api_pb2.APP_STATE_STOPPED:
-                req = api_pb2.AppStopRequest(
-                    app_id=app_id, source=api_pb2.APP_STOP_SOURCE_CLI
-                )
-                await client.stub.AppStop(req)
-        except (RuntimeError, ValueError, OSError) as err:
-            logger.warning("Failed to stop Modal app '%s': %s", deployment_id, err)
-        except Exception as err:  # noqa: BLE001
-            logger.warning(
-                "Unexpected error stopping Modal app '%s': %s", deployment_id, err
-            )
-        finally:
-            if deployment_id in self._local_deployments:
-                self._local_deployments[deployment_id]["record"].mark_stopped()
-            if self._repository:
-                rec = await self._repository.get(deployment_id)
-                if rec:
-                    rec.mark_stopped()
-                    await self._repository.save(rec)
+        # Only on confirmed success update persistent state to STOPPED
+        if deployment_id in self._local_deployments:
+            self._local_deployments[deployment_id]["record"].mark_stopped()
+        if self._repository:
+            rec = await self._repository.get(deployment_id)
+            if rec:
+                rec.mark_stopped()
+                await self._repository.save(rec)
 
     async def get_status(self, deployment_id: str) -> DeploymentStatus:
         """Retrieves deployment state from Modal."""

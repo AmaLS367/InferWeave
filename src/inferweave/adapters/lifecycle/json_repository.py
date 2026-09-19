@@ -72,7 +72,10 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
     def _write_records_sync(self, records: dict[str, DeploymentRecord]) -> None:
         """Atomically writes records to the JSON file via a temporary file."""
         self._ensure_dir()
-        serialized = {dep_id: rec.model_dump(mode="json") for dep_id, rec in records.items()}
+        serialized = {
+            dep_id: rec.to_sanitized_record().model_dump(mode="json")
+            for dep_id, rec in records.items()
+        }
         data = json.dumps(serialized, indent=2, default=str)
 
         # Write to temporary file in same directory and atomically replace

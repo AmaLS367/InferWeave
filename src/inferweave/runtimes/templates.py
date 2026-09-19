@@ -80,7 +80,7 @@ class FishSpeechTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8080
-        cmd = f"python3 -m tools.api_server --listen 0.0.0.0:{port} --llama-checkpoint-path checkpoints/{profile.id}"
+        cmd = f"python3 -m tools.api_server --listen 0.0.0.0:{port} --llama-checkpoint-path checkpoints/{profile.id} --decoder-checkpoint-path checkpoints/{profile.id}/codec.pth"
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
             extra_cli = runtime_opts.to_cli_args()
@@ -94,14 +94,14 @@ class FishSpeechTemplate(RuntimeTemplate):
 
         return RuntimeSpec(
             name=self.name,
-            docker_image="fishaudio/fish-speech:latest-cu121",
+            docker_image="fishaudio/fish-speech:latest-cu126",
             setup_commands=[
                 f"huggingface-cli download {profile.target_artifact} --local-dir checkpoints/{profile.id}"
             ],
             run_command=cmd,
             port=port,
             env_vars=env,
-            healthcheck_path="/health",
+            healthcheck_path="/v1/health",
         )
 
 
@@ -164,7 +164,7 @@ class WanVideoTemplate(RuntimeTemplate):
             name=self.name,
             docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             setup_commands=[
-                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
+                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn imageio imageio-ffmpeg"
             ],
             run_command=cmd,
             port=port,

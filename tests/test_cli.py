@@ -53,6 +53,9 @@ def test_cli_providers_list():
     assert "runpod" in result.stdout
     assert "modal" in result.stdout
     assert "aws" in result.stdout
+    assert "vast" in result.stdout
+    assert "oci" in result.stdout
+    assert "fluidstack" in result.stdout
     assert "SkyPilot" in result.stdout
 
 
@@ -222,5 +225,63 @@ def test_cli_stop_not_found(tmp_path):
         assert "not found" in res.stdout.lower()
     finally:
         del os.environ["INFERWEAVE_DEPLOYMENTS_PATH"]
+
+
+def test_cli_deploy_invalid_strategy():
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            "fish-s2-pro",
+            "--strategy",
+            "potato",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Validation error" in result.stdout
+    assert "potato" in result.stdout
+
+
+def test_cli_deploy_autostop_zero():
+    result = runner.invoke(
+        app,
+        [
+            "deploy",
+            "fish-s2-pro",
+            "--provider",
+            "modal",
+            "--autostop",
+            "0",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Dry-run completed successfully" in result.stdout
+
+
+def test_cli_deploy_healthcheck_timeout_warning():
+    from inferweave.core.exceptions import HealthcheckTimeoutError
+
+    timeout_err = HealthcheckTimeoutError(
+        endpoint_url="https://test.modal.run/health",
+        timeout_seconds=300.0,
+        total_probes=10,
+        deployment_id="iw-modal-test-orphan123",
+    )
+    with patch("inferweave.sdk.InferWeave.deploy", AsyncMock(side_effect=timeout_err)):
+        result = runner.invoke(
+            app,
+            [
+                "deploy",
+                "fish-s2-pro",
+                "--provider",
+                "modal",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Readiness timeout" in result.stdout
+        assert "inferweave stop iw-modal-test-orphan123" in result.stdout
+
 
 

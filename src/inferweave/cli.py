@@ -13,6 +13,7 @@ from rich.table import Table
 from inferweave import AutostopAction, InferWeave, WorkloadType
 from inferweave.core.exceptions import (
     DeploymentNotFoundError,
+    HealthcheckTimeoutError,
     InferWeaveError,
     ProviderNotFoundError,
 )
@@ -127,6 +128,13 @@ def deploy(
             help="Block until readiness healthcheck probe passes",
         ),
     ] = True,
+    cleanup_on_failure: Annotated[
+        bool,
+        typer.Option(
+            "--cleanup-on-failure",
+            help="Automatically terminate cloud resources if readiness probe times out",
+        ),
+    ] = False,
 ) -> None:
     """Deploys a model to the requested compute provider."""
     # Parse env pairs
@@ -166,6 +174,14 @@ def deploy(
                     f"[yellow]Warning: Ignoring custom arg '{item}'. Expected format is key=value.[/yellow]"
                 )
 
+    if cleanup_on_failure:
+        custom_args_dict["cleanup_on_failure"] = True
+
+    # Support --autostop 0 as disabling the timer
+    effective_autostop: int | None = autostop
+    if autostop is not None and autostop <= 0:
+        effective_autostop = None
+
     weave = InferWeave()
     status_msg = f"[bold green]Deploying {model} via provider '{provider}'...[/bold green]"
     if dry_run:
@@ -181,7 +197,7 @@ def deploy(
                     gpu_type=gpu,
                     num_gpus=num_gpus,
                     env=env_dict,
-                    autostop_mins=autostop,
+                    autostop_mins=effective_autostop,
                     custom_args=custom_args_dict,
                     dry_run=dry_run,
                     wait_for_ready=wait,
@@ -210,6 +226,21 @@ def deploy(
         table.add_row("Autostop Idle Mins", str(deployment.autostop_mins))
         console.print(table)
 
+    except HealthcheckTimeoutError as err:
+        console.print(f"\n[bold red]Readiness timeout:[/bold red] {err}")
+        dep_id = getattr(err, "deployment_id", None) or "unknown"
+        console.print(
+            f"\n[bold yellow]Warning:[/bold yellow] Deployment [cyan]{dep_id}[/cyan] was launched in cloud infrastructure, "
+            f"but failed readiness checks."
+        )
+        console.print(
+            f"[yellow]To prevent unintended compute charges, you can terminate it with:[/yellow]\n"
+            f"  [bold cyan]inferweave stop {dep_id}[/bold cyan]\n"
+        )
+        raise typer.Exit(code=1) from err
+    except ValueError as err:
+        console.print(f"\n[bold red]Validation error:[/bold red] {err}")
+        raise typer.Exit(code=1) from err
     except InferWeaveError as err:
         console.print(f"\n[bold red]Deployment failed:[/bold red] {err}")
         raise typer.Exit(code=1) from err
@@ -273,20 +304,28 @@ def list_providers() -> None:
     table.add_column("Engine", style="magenta")
     table.add_column("Description")
 
-    providers = [
-        ("runpod", "SkyPilot", "RunPod GPU Cloud instances"),
-        ("modal", "Modal SDK", "Modal Serverless GPU Functions & Web Endpoints"),
-        ("aws", "SkyPilot", "Amazon Web Services EC2 GPU instances"),
-        ("gcp", "SkyPilot", "Google Cloud Platform Compute Engine GPUs"),
-        ("azure", "SkyPilot", "Microsoft Azure GPU Virtual Machines"),
-        ("lambda", "SkyPilot", "Lambda GPU Cloud instances"),
-        ("nebius", "SkyPilot", "Nebius AI Cloud instances"),
-        ("kubernetes", "SkyPilot", "Self-hosted or managed Kubernetes clusters"),
-        ("auto", "Smart Router", "Automatic VRAM- and cost-aware provider selection"),
-    ]
-    for p, engine, desc in providers:
+    weave = InferWeave()
+    registered = weave.router.list_providers()
+    provider_meta: dict[str, tuple[str, str]] = {
+        "runpod": ("SkyPilot", "RunPod GPU Cloud instances"),
+        "modal": ("Modal SDK", "Modal Serverless GPU Functions & Web Endpoints"),
+        "aws": ("SkyPilot", "Amazon Web Services EC2 GPU instances"),
+        "gcp": ("SkyPilot", "Google Cloud Platform Compute Engine GPUs"),
+        "azure": ("SkyPilot", "Microsoft Azure GPU Virtual Machines"),
+        "lambda": ("SkyPilot", "Lambda GPU Cloud instances"),
+        "nebius": ("SkyPilot", "Nebius AI Cloud instances"),
+        "vast": ("SkyPilot", "Vast.ai GPU Cloud instances"),
+        "oci": ("SkyPilot", "Oracle Cloud Infrastructure GPU instances"),
+        "kubernetes": ("SkyPilot", "Self-hosted or managed Kubernetes clusters"),
+        "fluidstack": ("SkyPilot", "FluidStack GPU Cloud instances"),
+    }
+    for p in registered:
+        engine, desc = provider_meta.get(
+            p, ("SkyPilot", f"{p.title()} GPU Cloud instances")
+        )
         table.add_row(p, engine, desc)
 
+    table.add_row("auto", "Smart Router", "Automatic VRAM- and cost-aware provider selection")
     console.print(table)
 
 

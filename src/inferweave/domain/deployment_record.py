@@ -91,3 +91,49 @@ class DeploymentRecord(BaseModel):
             DeploymentState.HEALTHY,
             DeploymentState.DEGRADED,
         }
+
+    def to_sanitized_record(self) -> "DeploymentRecord":
+        """Returns a copy of the record with sensitive credentials and tokens redacted for disk storage."""
+        sanitized = self.model_copy(deep=True)
+        if not sanitized.options:
+            return sanitized
+
+        # Sanitize extra_provider_args
+        if sanitized.options.provider and sanitized.options.provider.extra_provider_args:
+            extra_args = dict(sanitized.options.provider.extra_provider_args)
+            if "secrets" in extra_args:
+                sec = extra_args["secrets"]
+                if isinstance(sec, dict):
+                    extra_args["secrets"] = {k: "[REDACTED]" for k in sec}
+                elif isinstance(sec, list):
+                    redacted_list = []
+                    for item in sec:
+                        if isinstance(item, str) and "=" in item:
+                            k, _ = item.split("=", 1)
+                            redacted_list.append(f"{k}=[REDACTED]")
+                        else:
+                            redacted_list.append(item)
+                    extra_args["secrets"] = redacted_list
+                elif isinstance(sec, str):
+                    extra_args["secrets"] = "[REDACTED]"
+
+            for key in list(extra_args.keys()):
+                lower_k = key.lower()
+                if any(term in lower_k for term in ("token", "secret", "password", "api_key")):
+                    if isinstance(extra_args[key], str):
+                        extra_args[key] = "[REDACTED]"
+                    elif isinstance(extra_args[key], dict):
+                        extra_args[key] = {k: "[REDACTED]" for k in extra_args[key]}
+
+            sanitized.options.provider.extra_provider_args = extra_args
+
+        # Sanitize runtime extra_env
+        if sanitized.options.runtime and sanitized.options.runtime.extra_env:
+            env_copy = dict(sanitized.options.runtime.extra_env)
+            for k in list(env_copy.keys()):
+                lower_k = k.lower()
+                if any(term in lower_k for term in ("token", "secret", "password", "key")):
+                    env_copy[k] = "[REDACTED]"
+            sanitized.options.runtime.extra_env = env_copy
+
+        return sanitized

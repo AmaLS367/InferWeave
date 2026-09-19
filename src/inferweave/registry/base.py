@@ -46,11 +46,11 @@ class ModelRegistry:
                 workload_type=WorkloadType.AUDIO,
                 default_runtime="fish-speech",
                 hardware=HardwareRequirements(
-                    min_vram_gb=16.0,
-                    recommended_gpus=["A10G", "L4", "RTX4090", "A100"],
+                    min_vram_gb=24.0,
+                    recommended_gpus=["L4", "RTX4090", "A100", "H100"],
                     gpu_count=1,
                 ),
-                healthcheck=HealthcheckConfig(port=8080, path="/health"),
+                healthcheck=HealthcheckConfig(port=8080, path="/v1/health"),
             )
         )
 

@@ -143,3 +143,40 @@ async def test_modal_provider_get_status(sample_profile, sample_runtime):
     assert status.id == deployment.id
     assert status.model == sample_profile.id
     assert status.provider == "modal"
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_stop_failure_propagates_and_retains_state(
+    sample_profile, sample_runtime
+):
+    """Ensures that Modal API failures propagate and do not falsely mark deployment as STOPPED."""
+    provider = ModalProvider()
+    request = DeploymentRequest(
+        model=sample_profile.id,
+        provider="modal",
+        dry_run=False,
+    )
+
+    with (
+        patch("modal.App.deploy", return_value=None),
+        patch("modal.Function.get_web_url", return_value="https://test-fail.modal.run"),
+    ):
+        deployment = await provider.deploy(request, sample_profile, sample_runtime)
+
+    assert deployment.state == DeploymentState.HEALTHY
+
+    with (
+        patch.object(
+            provider,
+            "_stop_modal_app",
+            side_effect=RuntimeError("Modal API authentication error"),
+        ),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await deployment.stop()
+
+        assert "Modal API authentication error" in str(exc_info.value)
+
+        # State must remain HEALTHY, NOT STOPPED!
+        status = await provider.get_status(deployment.id)
+        assert status.state == DeploymentState.HEALTHY

@@ -131,13 +131,12 @@ class Deployment:
     async def stop(self, action: Any | None = None) -> None:
         """Terminates or shuts down this deployment."""
         if self._stop_fn:
-            try:
-                if action is not None:
-                    await self._stop_fn(action=action)
-                else:
-                    await self._stop_fn()
-            except TypeError:
-                await self._stop_fn()
+            from inferweave.domain.lifecycle import AutostopAction
+
+            act = action or AutostopAction.STOP
+            if isinstance(act, str):
+                act = AutostopAction(act.lower())
+            await self._stop_fn(action=act)
             self._status.state = DeploymentState.STOPPED
 
     async def refresh(self) -> DeploymentStatus:

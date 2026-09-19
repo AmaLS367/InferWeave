@@ -206,3 +206,56 @@ async def test_sqlite_repo_concurrent_writes(temp_sqlite_file: Path):
     ids = {r.id for r in all_records}
     assert len(ids) == 20
 
+
+@pytest.mark.asyncio
+async def test_sqlite_repo_sanitizes_secrets(temp_sqlite_file: Path):
+    """Validates that credentials and secrets are redacted before persistence to disk."""
+    import sqlite3
+
+    from inferweave.adapters.lifecycle.sqlite_repository import (
+        SqliteDeploymentRepository,
+    )
+    from inferweave.domain.options import (
+        DeploymentOptions,
+        ProviderOptions,
+        RuntimeOptions,
+    )
+
+    repo = SqliteDeploymentRepository(db_path=temp_sqlite_file)
+    rec = DeploymentRecord(
+        id="iw-secrets-test-1",
+        model="fish-s2-pro",
+        provider="modal",
+        options=DeploymentOptions(
+            provider=ProviderOptions(
+                extra_provider_args={
+                    "secrets": {"HF_TOKEN": "hf_secret_12345", "MODAL_SECRET": "secret_xyz"},
+                    "api_key": "raw_secret_key",
+                }
+            ),
+            runtime=RuntimeOptions(
+                extra_env={"HF_TOKEN": "hf_runtime_env_secret", "NORMAL_VAR": "hello"}
+            ),
+        ),
+    )
+
+    await repo.save(rec)
+
+    # Read the raw SQLite database directly to verify on-disk content
+    conn = sqlite3.connect(str(temp_sqlite_file))
+    cursor = conn.cursor()
+    cursor.execute("SELECT data_json FROM deployments WHERE id = 'iw-secrets-test-1';")
+    raw_data_json = cursor.fetchone()[0]
+    conn.close()
+
+    # Sensitive values must NOT appear in raw stored JSON
+    assert "hf_secret_12345" not in raw_data_json
+    assert "secret_xyz" not in raw_data_json
+    assert "raw_secret_key" not in raw_data_json
+    assert "hf_runtime_env_secret" not in raw_data_json
+
+    # Values must be redacted
+    assert "[REDACTED]" in raw_data_json
+    assert "NORMAL_VAR" in raw_data_json
+    assert "hello" in raw_data_json
+

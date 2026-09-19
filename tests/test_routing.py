@@ -21,6 +21,7 @@ from inferweave.routing.strategies import (
     CheapestStrategy,
     FreeFirstStrategy,
     LowestLatencyStrategy,
+    get_strategy,
 )
 from inferweave.services.routing_service import SmartRoutingService
 
@@ -266,3 +267,43 @@ async def test_sdk_auto_provider_lowest_latency_dry_run():
     assert weave.router.last_decision is not None
     assert weave.router.last_decision.strategy_used == "lowest_latency"
     assert weave.router.last_decision.chosen_offer.provider == "modal"
+
+
+def test_invalid_routing_strategy_raises_value_error():
+    """Validates that get_strategy raises ValueError on unknown strategy name."""
+    with pytest.raises(ValueError) as exc_info:
+        get_strategy("potato")
+
+    assert "Invalid routing strategy 'potato'" in str(exc_info.value)
+    assert "cheapest" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_smart_routing_with_live_availability_probe(sample_offers):
+    """Validates that SmartRoutingService queries AvailabilityProbePort and filters out unavailable offers."""
+    from inferweave.ports.catalog import AvailabilityProbePort
+
+    class MockProbe(AvailabilityProbePort):
+        async def check_availability(
+            self, provider: str, gpu_type: str, region: str | None = None
+        ) -> bool:
+            # Simulate cheapest provider (runpod) being out of stock
+            return provider != "runpod"
+
+    probe = MockProbe()
+    catalog = StaticCatalogAdapter(custom_offers=sample_offers)
+    service = SmartRoutingService(catalog=catalog, availability_probe=probe)
+
+    profile = ModelProfile(
+        id="test-model",
+        name="Test Model",
+        workload_type=WorkloadType.LLM,
+        default_runtime="vllm",
+        hardware=HardwareRequirements(min_vram_gb=16.0),
+    )
+    req = DeploymentRequest(model="test-model", provider="auto", strategy="cheapest")
+
+    decision = await service.aresolve(profile, req)
+    # runpod was cheapest, but probe reported unavailable, so next available offer is picked
+    assert decision.chosen_provider != "runpod"
+    assert decision.chosen_provider in ["lambda", "aws", "modal"]

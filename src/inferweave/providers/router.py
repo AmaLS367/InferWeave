@@ -46,7 +46,9 @@ class ProviderRouter:
         """Retrieves a provider by name. Raises ProviderNotFoundError if unknown."""
         name = provider_name.lower()
         if name not in self._providers:
-            raise ProviderNotFoundError(provider_name)
+            raise ProviderNotFoundError(
+                provider_name, available_providers=self.list_providers() + ["auto"]
+            )
         return self._providers[name]
 
     def resolve(

@@ -60,6 +60,10 @@ async def test_sdk_deployment_activity_and_autostop_trigger():
     with (
         patch("modal.App.deploy", return_value=None),
         patch("modal.Function.get_web_url", return_value="https://test.modal.run"),
+        patch(
+            "inferweave.providers.modal_provider.ModalProvider._stop_modal_app",
+            return_value=None,
+        ),
     ):
         deployment = await weave.deploy(
             model="fish-s2-pro",
@@ -171,6 +175,10 @@ async def test_sdk_weave_stop_and_get_status():
     with (
         patch("modal.App.deploy", return_value=None),
         patch("modal.Function.get_web_url", return_value="https://test.modal.run"),
+        patch(
+            "inferweave.providers.modal_provider.ModalProvider._stop_modal_app",
+            return_value=None,
+        ),
     ):
         deployment = await weave.deploy(
             model="fish-s2-pro",
