@@ -73,7 +73,9 @@ class InferWeave:
             provider_name=request.provider,
             profile=profile,
             strategy=request.strategy,
+            request=request,
         )
+
 
         # 4. Provision and launch deployment
         deployment = await compute_provider.deploy(

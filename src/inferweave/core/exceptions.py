@@ -37,3 +37,12 @@ class DeploymentError(InferWeaveError):
     def __init__(self, message: str, deployment_id: str | None = None) -> None:
         super().__init__(message)
         self.deployment_id = deployment_id
+
+
+class NoFeasibleProviderError(InferWeaveError):
+    """Raised when no compute provider meets the model requirements or routing constraints."""
+
+    def __init__(self, message: str, reasons: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.reasons = reasons or []
+

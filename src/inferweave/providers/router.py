@@ -1,18 +1,28 @@
 """Provider router resolving provider names and selection strategies."""
 
 from inferweave.core.exceptions import ProviderNotFoundError
+from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
+from inferweave.models.routing import RoutingDecision
 from inferweave.providers.base import ComputeProvider
 from inferweave.providers.modal_provider import ModalProvider
 from inferweave.providers.skypilot import SkyPilotProvider
+from inferweave.services.routing_service import SmartRoutingService
 
 
 class ProviderRouter:
     """Manages available compute backends and handles provider resolution."""
 
-    def __init__(self) -> None:
+    def __init__(self, routing_service: SmartRoutingService | None = None) -> None:
         self._providers: dict[str, ComputeProvider] = {}
+        self._routing_service = routing_service or SmartRoutingService()
+        self._last_decision: RoutingDecision | None = None
         self._register_default_providers()
+
+    @property
+    def last_decision(self) -> RoutingDecision | None:
+        """Returns the most recent RoutingDecision made during 'auto' resolution."""
+        return self._last_decision
 
     def register(self, provider: ComputeProvider) -> None:
         """Registers a compute provider."""
@@ -30,18 +40,29 @@ class ProviderRouter:
         provider_name: str,
         profile: ModelProfile,
         strategy: str | None = "cheapest",
+        request: DeploymentRequest | None = None,
     ) -> ComputeProvider:
         """Resolves target provider. If provider_name is 'auto', selects best fit according to strategy."""
         name = provider_name.lower()
         if name != "auto":
             return self.get(name)
 
-        # Smart strategy selection for 'auto'
-        # In early alpha: defaults to RunPod for IaaS or Modal for serverless workloads
-        if strategy == "free_first" or strategy == "cheapest":
-            return self.get("runpod")
+        req = request or DeploymentRequest(
+            model=profile.id,
+            provider="auto",
+            strategy=strategy or "cheapest",
+            dry_run=True,
+        )
 
-        return self.get("runpod")
+        decision = self._routing_service.resolve(profile=profile, request=req)
+        self._last_decision = decision
+
+        # Populate recommended GPU into request if user did not specify one
+        if request is not None and not request.gpu_type:
+            request.gpu_type = decision.chosen_offer.gpu_spec.name
+
+        return self.get(decision.chosen_provider)
+
 
     def list_providers(self) -> list[str]:
         """Returns list of registered provider names."""
