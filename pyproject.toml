@@ -13,6 +13,9 @@ dependencies = [
     "typer>=0.12.0",
 ]
 
+[project.scripts]
+inferweave = "inferweave.cli:app"
+
 [project.optional-dependencies]
 runpod = [
     "skypilot[runpod]>=0.13.0",
@@ -69,6 +72,12 @@ packages = [
     "src/inferweave",
     "src/inferweave_worker",
     "src/wan_server",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+markers = [
+    "integration: marks tests as integration tests that require external services or credentials",
 ]
 
 

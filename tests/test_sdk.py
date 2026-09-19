@@ -56,7 +56,13 @@ async def test_modal_dry_run_deployment_flow():
 
 
 @pytest.mark.asyncio
-async def test_modal_deployment_flow_with_deploy_call():
+async def test_modal_deployment_orchestration_mock_unit():
+    """Unit test verifying SDK orchestration, provider dispatch, and mock readiness hook.
+
+    Note: This is a unit test of the SDK's internal wiring using mocked Modal SDK calls.
+    It does not perform a live cloud deployment to Modal. The `is_healthy` state is
+    verified as a transition triggered by the readiness polling hook.
+    """
     weave = InferWeave()
     with patch("modal.App.deploy") as mock_deploy:
         mock_deploy.return_value = None
@@ -79,6 +85,7 @@ async def test_modal_deployment_flow_with_deploy_call():
             assert deployment.provider == "modal"
             assert deployment.model == "fish-s2-pro"
             assert deployment.endpoint_url == "https://my-app--serve.modal.run"
+            # State is healthy because SDK _wait_for_ready successfully transitioned it
             assert deployment.is_healthy
 
 

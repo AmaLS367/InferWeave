@@ -117,6 +117,30 @@ pip install "inferweave[all]"
 
 ---
 
+## ⚡ CLI Quickstart
+
+InferWeave includes a high-performance command-line interface for deploying and inspecting models across GPU providers:
+
+```bash
+# 1. Deploy models directly to cloud GPUs
+inferweave deploy fish-s2-pro --provider modal
+inferweave deploy meta-llama/Meta-Llama-3-8B-Instruct --provider runpod --gpu A100
+
+# 2. Dry-run deployment to preview configuration and hardware budgets
+inferweave deploy fish-s2-pro --provider modal --dry-run
+
+# 3. Explore supported models and cloud providers
+inferweave models
+inferweave models --workload audio
+inferweave providers
+
+# 4. Check status or stop active deployments
+inferweave status <deployment-id>
+inferweave stop <deployment-id>
+```
+
+---
+
 ## 💻 Platform & OS Support Guidelines
 
 | Operating System | InferWeave Core / Client | Modal Engine | SkyPilot Engine (Multi-Cloud) |

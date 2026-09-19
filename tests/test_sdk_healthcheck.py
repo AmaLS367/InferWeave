@@ -1,4 +1,4 @@
-"""Integration tests for Healthcheck & Readiness Polling through InferWeave SDK."""
+"""Unit tests for Healthcheck & Readiness Polling through InferWeave SDK with simulated probe adapters."""
 
 from unittest.mock import patch
 

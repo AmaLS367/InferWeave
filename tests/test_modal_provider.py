@@ -1,4 +1,8 @@
-"""Unit tests for ModalProvider lifecycle methods."""
+"""Unit tests for ModalProvider lifecycle methods with mocked Modal SDK.
+
+These tests validate the adapter's translation, image building, and app registration
+against a mocked Modal SDK, without executing live deployments on Modal cloud.
+"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -45,6 +49,7 @@ def sample_runtime() -> RuntimeSpec:
 
 @pytest.mark.asyncio
 async def test_modal_provider_deploy_success(sample_profile, sample_runtime):
+    """Verifies that ModalProvider sets up the app and transitions to STARTING."""
     provider = ModalProvider()
     request = DeploymentRequest(
         model=sample_profile.id,
