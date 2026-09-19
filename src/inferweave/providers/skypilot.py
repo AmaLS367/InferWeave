@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -21,7 +23,55 @@ from inferweave.runtimes.base import RuntimeSpec
 logger = logging.getLogger(__name__)
 
 
+def resolve_worker_workdir(
+    pkg_path: Path | None = None,
+    staging_base: Path | None = None,
+) -> str | None:
+    """Resolves a lightweight workdir containing only the inferweave package for remote workers.
+
+    Guarantees that an entire site-packages or dist-packages directory is never synced to remote cluster.
+    - If running from a source checkout (parent directory is 'src'), returns 'src/'.
+    - If running from an installed wheel (site-packages / dist-packages), stages only the 'inferweave'
+      package directory into '~/.inferweave/staging/worker_pkg' and returns that path.
+    """
+    pkg_dir = pkg_path or Path(__file__).resolve().parent.parent
+    if not pkg_dir.is_dir() or pkg_dir.name != "inferweave":
+        return None
+
+    parent_dir = pkg_dir.parent
+
+    # 1. Source checkout: parent is named 'src'
+    if parent_dir.name == "src" and (parent_dir / "inferweave").is_dir():
+        return str(parent_dir)
+
+    # 2. Installed wheel / site-packages: create lightweight staging directory
+    if staging_base is None:
+        env_staging = os.environ.get("INFERWEAVE_STAGING_DIR")
+        staging_base = (
+            Path(env_staging)
+            if env_staging
+            else Path.home() / ".inferweave" / "staging"
+        )
+
+    worker_stage = staging_base / "worker_pkg"
+    target_inferweave = worker_stage / "inferweave"
+
+    try:
+        worker_stage.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            pkg_dir,
+            target_inferweave,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+        return str(worker_stage)
+    except OSError as err:
+        logger.warning("Could not stage inferweave package for worker: %s", err)
+        return None
+
+
 class SkyPilotProvider(ComputeProvider):
+
     """Compute provider delegating GPU provisioning and execution to SkyPilot.
 
     Supports: RunPod, AWS, GCP, Azure, Lambda Labs, Nebius, Vast.ai, OCI, Kubernetes, etc.
@@ -142,14 +192,8 @@ class SkyPilotProvider(ComputeProvider):
             workdir = provider_opts.extra_provider_args.get("workdir")
 
         if workdir is None and runtime.run_command and "inferweave" in runtime.run_command:
-            # Automatically resolve local inferweave package root for workers delivery
-            src_dir = Path(__file__).resolve().parents[2]
-            if (src_dir / "inferweave").is_dir():
-                workdir = str(src_dir)
-            else:
-                pkg_dir = Path(__file__).resolve().parents[1]
-                if pkg_dir.name == "inferweave" and pkg_dir.is_dir():
-                    workdir = str(pkg_dir.parent)
+            workdir = resolve_worker_workdir()
+
 
         task_envs = dict(runtime.env_vars) if runtime.env_vars else {}
         if workdir and "PYTHONPATH" not in task_envs:

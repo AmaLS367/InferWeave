@@ -1,5 +1,6 @@
 """Unit tests for SkyPilotProvider lifecycle operations."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -154,6 +155,54 @@ async def test_skypilot_auto_workdir_for_inferweave_workers(sample_profile):
         task_envs = task_kwargs.get("envs", {})
         assert "PYTHONPATH" in task_envs
         assert ".:$PYTHONPATH" in task_envs["PYTHONPATH"]
+
+
+def test_resolve_worker_workdir_from_source_tree():
+    from inferweave.providers.skypilot import resolve_worker_workdir
+
+    workdir = resolve_worker_workdir()
+    assert workdir is not None
+    p = Path(workdir)
+    assert p.name == "src"
+    assert (p / "inferweave").is_dir()
+
+
+def test_resolve_worker_workdir_from_site_packages_never_syncs_site_packages(tmp_path):
+    from inferweave.providers.skypilot import resolve_worker_workdir
+
+    # Simulate installed environment in site-packages
+    site_packages = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+    pkg_dir = site_packages / "inferweave"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("# inferweave init", encoding="utf-8")
+    (pkg_dir / "workers").mkdir()
+    (pkg_dir / "workers" / "flux.py").write_text("# flux worker", encoding="utf-8")
+
+    # Add huge dummy packages alongside inferweave
+    torch_dir = site_packages / "torch"
+    torch_dir.mkdir()
+    (torch_dir / "libtorch.so").write_bytes(b"huge_binary")
+
+    staging_base = tmp_path / "custom_staging"
+
+    # Resolve workdir for the site-packages installed inferweave
+    staged_workdir = resolve_worker_workdir(pkg_path=pkg_dir, staging_base=staging_base)
+
+    assert staged_workdir is not None
+    # 1. CRITICAL: Never return the entire site-packages!
+    assert staged_workdir != str(site_packages)
+    assert Path(staged_workdir).name != "site-packages"
+
+    # 2. Returned workdir must be the staged worker_pkg directory
+    staged_path = Path(staged_workdir)
+    assert staged_path == staging_base / "worker_pkg"
+
+    # 3. Only inferweave was staged, NOT torch or other dependencies
+    assert (staged_path / "inferweave").is_dir()
+    assert (staged_path / "inferweave" / "__init__.py").exists()
+    assert (staged_path / "inferweave" / "workers" / "flux.py").exists()
+    assert not (staged_path / "torch").exists()
+
 
 
 
