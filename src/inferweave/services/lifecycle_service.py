@@ -182,6 +182,19 @@ class LifecycleService:
         if not target_provider and not is_dry_run:
             raise ProviderNotFoundError(record.provider if record else "unknown")
 
+        if is_dry_run:
+            # For dry-run deployments, stop purely modifies persisted state without invoking cloud provider API
+            if state:
+                state.is_stopped = True
+                state.stopped_at = current_time
+            if deployment and hasattr(deployment, "_status"):
+                deployment._status.state = DeploymentState.STOPPED
+            if record:
+                record.mark_stopped(now=current_time)
+                await self._repository.save(record)
+            await self._watchdog.cancel_check(deployment_id)
+            return
+
         target_action = action or (
             state.policy.action if state else AutostopAction.STOP
         )
@@ -270,7 +283,38 @@ class LifecycleService:
                 await self._repository.save(record)
             return stopped_status
 
+        is_dry_run = (record.is_dry_run if record else False) or (
+            getattr(deployment, "is_dry_run", False) if deployment else False
+        )
+        if is_dry_run:
+            # For dry-run deployments, return persisted state directly without querying cloud provider API
+            dry_status = DeploymentStatus(
+                id=deployment_id,
+                model=record.model
+                if record
+                else (deployment.model if deployment else "unknown"),
+                provider=record.provider
+                if record
+                else (deployment.provider if deployment else "unknown"),
+                state=record.state
+                if record
+                else DeploymentState.PROVISIONING,
+                endpoint_url=record.endpoint_url
+                if record
+                else (deployment.endpoint_url if deployment else None),
+                created_at=record.created_at
+                if record
+                else (
+                    deployment.status.created_at if deployment else datetime.now(UTC)
+                ),
+                ready_at=record.ready_at if record else None,
+            )
+            if deployment and hasattr(deployment, "_status"):
+                deployment._status = dry_status
+            return dry_status
+
         # 1. Fetch raw status from provider or deployment handle
+
         raw_status: DeploymentStatus | None = None
         if target_provider and hasattr(target_provider, "get_status"):
             raw_status = await target_provider.get_status(deployment_id)

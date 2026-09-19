@@ -113,6 +113,50 @@ async def test_skypilot_docker_image_and_workdir(sample_profile, sample_runtime)
         assert res_kwargs.get("image_id") == "docker:vllm/vllm-openai:latest"
 
 
+@pytest.mark.asyncio
+async def test_skypilot_auto_workdir_for_inferweave_workers(sample_profile):
+    from pathlib import Path
+
+    flux_runtime = RuntimeSpec(
+        name="flux-diffusers",
+        docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
+        run_command="python3 -m inferweave.workers.flux --model black-forest-labs/FLUX.1-schnell --port 8000",
+        port=8000,
+        env_vars={"MODEL": "black-forest-labs/FLUX.1-schnell"},
+    )
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(
+        model="black-forest-labs/FLUX.1-schnell",
+        provider="runpod",
+    )
+
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    mock_sky.Task = MagicMock()
+    mock_sky.Resources = MagicMock()
+    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        await provider.deploy(request, sample_profile, flux_runtime)
+        mock_sky.Task.assert_called_once()
+        _, task_kwargs = mock_sky.Task.call_args
+
+        # Ensure workdir was auto-resolved to local directory containing inferweave
+        workdir = task_kwargs.get("workdir")
+        assert workdir is not None
+        assert (Path(workdir) / "inferweave").is_dir()
+
+        # Ensure PYTHONPATH contains .:$PYTHONPATH
+        task_envs = task_kwargs.get("envs", {})
+        assert "PYTHONPATH" in task_envs
+        assert ".:$PYTHONPATH" in task_envs["PYTHONPATH"]
+
+
+
 
 @pytest.mark.asyncio
 async def test_skypilot_dry_run(sample_profile, sample_runtime):

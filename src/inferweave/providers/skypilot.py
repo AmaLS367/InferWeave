@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 from inferweave.core.exceptions import ProviderPlatformError
@@ -140,13 +141,28 @@ class SkyPilotProvider(ComputeProvider):
         if provider_opts and provider_opts.extra_provider_args:
             workdir = provider_opts.extra_provider_args.get("workdir")
 
+        if workdir is None and runtime.run_command and "inferweave" in runtime.run_command:
+            # Automatically resolve local inferweave package root for workers delivery
+            src_dir = Path(__file__).resolve().parents[2]
+            if (src_dir / "inferweave").is_dir():
+                workdir = str(src_dir)
+            else:
+                pkg_dir = Path(__file__).resolve().parents[1]
+                if pkg_dir.name == "inferweave" and pkg_dir.is_dir():
+                    workdir = str(pkg_dir.parent)
+
+        task_envs = dict(runtime.env_vars) if runtime.env_vars else {}
+        if workdir and "PYTHONPATH" not in task_envs:
+            task_envs["PYTHONPATH"] = ".:$PYTHONPATH"
+
         task = sky.Task(
             name=deployment_id,
             setup=setup_script,
             run=runtime.run_command,
-            envs=runtime.env_vars,
+            envs=task_envs,
             workdir=workdir,
         )
+
 
         use_spot = provider_opts.allow_spot if provider_opts else True
         region = (

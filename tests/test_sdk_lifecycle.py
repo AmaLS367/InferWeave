@@ -240,3 +240,57 @@ async def test_sdk_weave_stop_failure_does_not_mark_stopped():
         assert record.state == DeploymentState.HEALTHY
         assert record.stopped_at is None
 
+
+@pytest.mark.asyncio
+async def test_lifecycle_dry_run_cross_process_no_provider_calls(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from inferweave.adapters.lifecycle.sqlite_repository import (
+        SqliteDeploymentRepository,
+    )
+    from inferweave.domain.deployment_record import DeploymentRecord
+
+    db_path = tmp_path / "test_lifecycle_dryrun.db"
+    repo = SqliteDeploymentRepository(db_path=db_path)
+
+    # 1. Simulate a dry-run deployment saved by a previous CLI process
+    record = DeploymentRecord(
+        id="iw-dryrun-mock-12345",
+        model="fish-s2-pro",
+        provider="modal",
+        state=DeploymentState.PROVISIONING,
+        endpoint_url="http://dryrun-iw-dryrun-mock-12345.cloud:8080",
+        is_dry_run=True,
+    )
+    await repo.save(record)
+
+    # 2. In a brand new LifecycleService instance, attach a mock provider resolver
+    mock_provider = MagicMock()
+    mock_provider.get_status = AsyncMock()
+    mock_provider.stop = AsyncMock()
+
+    lifecycle_svc = LifecycleService(
+        repository=repo,
+        provider_resolver=lambda _: mock_provider,
+    )
+
+    # 3. Calling refresh_status on dry-run should NOT invoke provider API
+    status = await lifecycle_svc.refresh_status("iw-dryrun-mock-12345")
+    mock_provider.get_status.assert_not_called()
+    assert status.id == "iw-dryrun-mock-12345"
+    assert status.model == "fish-s2-pro"
+    assert status.provider == "modal"
+    assert status.state == DeploymentState.PROVISIONING
+    assert status.endpoint_url == "http://dryrun-iw-dryrun-mock-12345.cloud:8080"
+
+    # 4. Calling stop_deployment on dry-run should NOT invoke provider API
+    await lifecycle_svc.stop_deployment("iw-dryrun-mock-12345")
+    mock_provider.stop.assert_not_called()
+
+    # 5. Persisted record is now STOPPED
+    updated_record = await repo.get("iw-dryrun-mock-12345")
+    assert updated_record is not None
+    assert updated_record.state == DeploymentState.STOPPED
+    assert updated_record.stopped_at is not None
+
+
