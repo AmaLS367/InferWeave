@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "assets/**"
+      - "LICENSE"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "assets/**"
+      - "LICENSE"
+  workflow_dispatch:
+
+# A newer run for the same PR / branch cancels the older in-progress run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+  UV_NO_PROGRESS: "1"
+  # Keep test/smoke runs from writing deployment state into the runner home directory.
+  INFERWEAVE_DEPLOYMENTS_PATH: ${{ github.workspace }}/.ci-state/deployments.db
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: lint
+      - name: Verify uv.lock is up to date
+        run: uv lock --check
+      - name: Ruff
+        run: uv run --locked --only-group dev ruff check --output-format=github .
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: typecheck
+      - name: Install
+        run: uv sync --locked --extra modal --extra workers --group dev
+      - name: Mypy
+        run: uv run --no-sync mypy src
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-suffix: test-py${{ matrix.python-version }}
+      # Modal + worker extras are needed by the mocked unit tests. SkyPilot is
+      # deliberately not installed: unit tests must not depend on it.
+      - name: Install
+        run: uv sync --locked --extra modal --extra workers --group dev
+      - name: Pytest (unit, no live cloud tests)
+        run: uv run --no-sync pytest -m "not integration" --strict-markers -ra
+
+  package:
+    name: Package / wheel smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: package
+      - name: Build sdist and wheel
+        # uv builds the wheel from the sdist, catching files missing from the sdist.
+        run: uv build
+      - name: Check wheel metadata
+        run: uv run --no-project python .github/scripts/wheel_smoke.py metadata dist/*.whl
+      - name: Install base wheel into a clean environment
+        # --no-config + running outside the checkout ignores [tool.uv] project settings,
+        # so resolution matches what a plain `pip install inferweave` user gets.
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --no-config "$RUNNER_TEMP/smoke" --python 3.12
+          uv pip install --no-config --python "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE"/dist/*.whl
+      - name: Smoke test installed wheel
+        # Run outside the checkout so the source tree cannot shadow the installed package.
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports
+          "$RUNNER_TEMP/smoke/bin/inferweave" --version
+          "$RUNNER_TEMP/smoke/bin/inferweave" --help

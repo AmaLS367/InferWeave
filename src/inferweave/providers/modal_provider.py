@@ -65,9 +65,7 @@ class ModalProvider(ComputeProvider):
             id=deployment_id,
             model=profile.id,
             provider=self.name,
-            state=DeploymentState.PROVISIONING
-            if request.dry_run
-            else DeploymentState.HEALTHY,
+            state=DeploymentState.PROVISIONING,
             endpoint_url=f"https://dryrun-{deployment_id}.modal.run"
             if request.dry_run
             else None,
@@ -172,14 +170,17 @@ class ModalProvider(ComputeProvider):
         if not endpoint_url:
             endpoint_url = f"https://{deployment_id}.modal.run"
 
+        # A successful app.deploy() only proves the app was deployed, not that the model
+        # runtime is serving. Report STARTING; HEALTHY is assigned only after a
+        # successful readiness healthcheck (see InferWeave.deploy / wait_for_ready).
         status = DeploymentStatus(
             id=deployment_id,
             model=profile.id,
             provider=self.name,
-            state=DeploymentState.HEALTHY,
+            state=DeploymentState.STARTING,
             endpoint_url=endpoint_url,
         )
-        record.state = DeploymentState.HEALTHY
+        record.state = DeploymentState.STARTING
         record.endpoint_url = endpoint_url
         if self._repository:
             await self._repository.save(record)

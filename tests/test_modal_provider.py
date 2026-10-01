@@ -72,7 +72,8 @@ async def test_modal_provider_deploy_success(sample_profile, sample_runtime):
             assert (
                 deployment.endpoint_url == "https://workspace--iw-modal-test.modal.run"
             )
-            assert deployment.state == DeploymentState.HEALTHY
+            # app.deploy() succeeding does not prove runtime readiness
+            assert deployment.state == DeploymentState.STARTING
 
 
 @pytest.mark.asyncio
@@ -163,7 +164,7 @@ async def test_modal_provider_stop_failure_propagates_and_retains_state(
     ):
         deployment = await provider.deploy(request, sample_profile, sample_runtime)
 
-    assert deployment.state == DeploymentState.HEALTHY
+    assert deployment.state == DeploymentState.STARTING
 
     with (
         patch.object(
@@ -175,8 +176,9 @@ async def test_modal_provider_stop_failure_propagates_and_retains_state(
     ):
         await deployment.stop()
 
-        assert "Modal API authentication error" in str(exc_info.value)
+    assert "Modal API authentication error" in str(exc_info.value)
 
-        # State must remain HEALTHY, NOT STOPPED!
-        status = await provider.get_status(deployment.id)
-        assert status.state == DeploymentState.HEALTHY
+    # State must remain STARTING, NOT STOPPED!
+    record = provider._local_deployments[deployment.id]["record"]
+    assert record.state == DeploymentState.STARTING
+    assert record.stopped_at is None

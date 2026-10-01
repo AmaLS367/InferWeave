@@ -47,7 +47,7 @@ class InferWeave:
         gpu_type: str | None = None,
         num_gpus: int | None = None,
         env: dict[str, str] | None = None,
-        autostop_mins: int = 30,
+        autostop_mins: int | None = 30,
         custom_args: dict[str, Any] | None = None,
         dry_run: bool = False,
         wait_for_ready: bool = True,
@@ -61,7 +61,7 @@ class InferWeave:
             gpu_type: Optional GPU override ('A100', 'H100', 'L4')
             num_gpus: Optional GPU count override
             env: Custom environment variables
-            autostop_mins: Idle shutdown timer in minutes
+            autostop_mins: Idle shutdown timer in minutes (None disables autostop)
             custom_args: Provider-specific extra configurations
             dry_run: When True, constructs the configuration without launching live cloud resources
             wait_for_ready: When True, actively polls endpoint until readiness healthcheck passes

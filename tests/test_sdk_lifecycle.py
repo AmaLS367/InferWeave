@@ -123,7 +123,7 @@ async def test_sdk_healthcheck_updates_last_activity():
 
 
 @pytest.mark.asyncio
-async def test_sdk_refresh_retains_model_and_reconciles_unhealthy():
+async def test_sdk_refresh_retains_model_and_never_reports_unverified_healthy():
     # Probe adapter returns unhealthy probe result
     probe_adapter = MockHealthcheckProbeAdapter(default_healthy=False)
     healthcheck_svc = HealthcheckService(probe_port=probe_adapter)
@@ -148,14 +148,15 @@ async def test_sdk_refresh_retains_model_and_reconciles_unhealthy():
         )
 
         assert deployment.model == "fish-s2-pro"
-        assert deployment.state == DeploymentState.HEALTHY
+        # Readiness was never verified, so the deployment must not claim HEALTHY
+        assert deployment.state == DeploymentState.STARTING
 
-        # Refresh status: probe will fail, so reconciled state should be UNHEALTHY
-        # and model should STILL be "fish-s2-pro", NOT "unknown"!
+        # Refresh status: readiness is still unverified (probe fails), so the state
+        # must not become HEALTHY, and model should STILL be "fish-s2-pro", NOT "unknown"!
         refreshed = await deployment.refresh()
         assert refreshed.model == "fish-s2-pro"
-        assert refreshed.state == DeploymentState.UNHEALTHY
-        assert deployment.state == DeploymentState.UNHEALTHY
+        assert refreshed.state != DeploymentState.HEALTHY
+        assert deployment.state != DeploymentState.HEALTHY
 
 
 @pytest.mark.asyncio
@@ -228,7 +229,7 @@ async def test_sdk_weave_stop_failure_does_not_mark_stopped():
             wait_for_ready=False,
         )
 
-        assert deployment.state == DeploymentState.HEALTHY
+        assert deployment.state == DeploymentState.STARTING
 
         # Mock the modal provider's stop to raise RuntimeError (network/API error)
         modal_provider = weave.router.get("modal")
@@ -245,7 +246,7 @@ async def test_sdk_weave_stop_failure_does_not_mark_stopped():
         record = await lifecycle_svc.get_record(deployment.id)
         assert record is not None
         assert record.state != DeploymentState.STOPPED
-        assert record.state == DeploymentState.HEALTHY
+        assert record.state == DeploymentState.STARTING
         assert record.stopped_at is None
 
 

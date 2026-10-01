@@ -16,6 +16,7 @@ from inferweave.models.routing import (
     InstanceOffer,
     RoutingConstraints,
 )
+from inferweave.ports.catalog import AvailabilityProbePort
 from inferweave.routing.strategies import (
     BalancedStrategy,
     CheapestStrategy,
@@ -307,3 +308,176 @@ async def test_smart_routing_with_live_availability_probe(sample_offers):
     # runpod was cheapest, but probe reported unavailable, so next available offer is picked
     assert decision.chosen_provider != "runpod"
     assert decision.chosen_provider in ["lambda", "aws", "modal"]
+
+
+# --- Live availability probe: fail-closed semantics -------------------------------
+
+
+class _ScriptedProbe(AvailabilityProbePort):
+    """Availability probe returning scripted results per provider and recording calls."""
+
+    def __init__(self, results: dict[str, bool | Exception]) -> None:
+        self._results = results
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def check_availability(
+        self, provider: str, gpu_type: str, region: str | None = None
+    ) -> bool:
+        self.calls.append((provider, gpu_type, region))
+        result = self._results[provider]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _probe_profile() -> ModelProfile:
+    return ModelProfile(
+        id="test-model",
+        name="Test Model",
+        workload_type=WorkloadType.LLM,
+        default_runtime="vllm",
+        hardware=HardwareRequirements(min_vram_gb=16.0),
+    )
+
+
+def _probe_request(provider: str = "auto") -> DeploymentRequest:
+    # dry_run keeps SkyPilot offers eligible regardless of host platform
+    return DeploymentRequest(
+        model="test-model", provider=provider, strategy="cheapest", dry_run=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_some_available_selects_only_verified_candidates(sample_offers):
+    probe = _ScriptedProbe(
+        {"aws": False, "runpod": True, "modal": True, "lambda": False}
+    )
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=sample_offers),
+        availability_probe=probe,
+    )
+
+    decision = await service.aresolve(_probe_profile(), _probe_request())
+
+    # aws is statically cheapest but live-unavailable; runpod is the cheapest verified
+    assert decision.chosen_provider == "runpod"
+    assert {r.offer.provider for r in decision.rankings} == {"runpod", "modal"}
+    # The probe is called with the offer's GPU model name
+    assert ("runpod", "L4", None) in probe.calls
+
+
+@pytest.mark.asyncio
+async def test_probe_all_unavailable_fails_closed(sample_offers):
+    probe = _ScriptedProbe({p.provider: False for p in sample_offers})
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=sample_offers),
+        availability_probe=probe,
+    )
+
+    with pytest.raises(NoFeasibleProviderError) as exc_info:
+        await service.aresolve(_probe_profile(), _probe_request())
+
+    message = str(exc_info.value)
+    assert "live-verified" in message
+    assert "4 candidate(s) satisfied static catalog requirements" in message
+    assert len(exc_info.value.reasons) == 4
+    assert all("reported unavailable" in r for r in exc_info.value.reasons)
+
+
+@pytest.mark.asyncio
+async def test_probe_all_errors_fails_closed(sample_offers):
+    probe = _ScriptedProbe(
+        {p.provider: RuntimeError("provider API unreachable") for p in sample_offers}
+    )
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=sample_offers),
+        availability_probe=probe,
+    )
+
+    with pytest.raises(NoFeasibleProviderError) as exc_info:
+        await service.aresolve(_probe_profile(), _probe_request())
+
+    assert "live-verified" in str(exc_info.value)
+    assert all("provider API unreachable" in r for r in exc_info.value.reasons)
+
+
+@pytest.mark.asyncio
+async def test_probe_mixed_errors_and_unavailable_fails_closed(sample_offers):
+    probe = _ScriptedProbe(
+        {
+            "aws": False,
+            "runpod": RuntimeError("timeout"),
+            "modal": False,
+            "lambda": RuntimeError("rate limited"),
+        }
+    )
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=sample_offers),
+        availability_probe=probe,
+    )
+
+    with pytest.raises(NoFeasibleProviderError):
+        await service.aresolve(_probe_profile(), _probe_request())
+
+
+@pytest.mark.asyncio
+async def test_no_probe_keeps_static_routing(sample_offers):
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=sample_offers)
+    )
+
+    decision = await service.aresolve(_probe_profile(), _probe_request())
+
+    # Static catalog: AWS T4 spot ($0.20) is cheapest
+    assert decision.chosen_provider == "aws"
+    assert len(decision.rankings) == 4
+
+
+@pytest.mark.asyncio
+async def test_unavailable_cheap_candidate_never_beats_verified_expensive(
+    sample_gpu_a100,
+):
+    offers = [
+        InstanceOffer(
+            provider="runpod",
+            instance_type="runpod.a100",
+            gpu_spec=sample_gpu_a100,
+            price_per_hour=1.19,
+            is_available=True,
+        ),
+        InstanceOffer(
+            provider="modal",
+            instance_type="modal.a100",
+            gpu_spec=sample_gpu_a100,
+            price_per_hour=3.95,
+            is_available=True,
+        ),
+    ]
+    probe = _ScriptedProbe({"runpod": False, "modal": True})
+    service = SmartRoutingService(
+        catalog=StaticCatalogAdapter(custom_offers=offers),
+        availability_probe=probe,
+    )
+
+    decision = await service.aresolve(_probe_profile(), _probe_request())
+
+    assert decision.chosen_provider == "modal"
+    assert [r.offer.provider for r in decision.rankings] == ["modal"]
+
+
+def test_router_scoped_provider_does_not_bypass_failed_live_probe(sample_offers):
+    """Provider-scoped routing must not fall back to recommended GPUs when the probe rejects all."""
+    from inferweave.providers.router import ProviderRouter
+
+    probe = _ScriptedProbe({p.provider: False for p in sample_offers})
+    router = ProviderRouter(
+        routing_service=SmartRoutingService(
+            catalog=StaticCatalogAdapter(custom_offers=sample_offers),
+            availability_probe=probe,
+        )
+    )
+    profile = _probe_profile()
+    profile.hardware.recommended_gpus = ["L4"]
+
+    with pytest.raises(NoFeasibleProviderError, match="live-verified"):
+        router.resolve("runpod", profile, request=_probe_request("runpod"))

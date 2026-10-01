@@ -73,27 +73,52 @@ class SmartRoutingService:
                 f"Strategy '{strategy.name}' produced no valid candidate rankings for model '{profile.id}'."
             )
 
-        # Step 3: Live availability check via probe if configured
+        # Step 3: Live availability check via probe if configured.
+        # When a probe is configured it is authoritative: only positively verified
+        # candidates remain eligible, and we fail closed rather than falling back
+        # to the static catalog ranking.
         if self._probe is not None:
             verified_ranked = []
+            probe_rejections: list[str] = []
             for candidate in ranked:
+                offer = candidate.offer
+                label = f"Instance '{offer.instance_type}' on '{offer.provider}'"
                 try:
                     is_avail = await self._probe.check_availability(
-                        provider=candidate.offer.provider,
-                        gpu_type=candidate.offer.gpu_type,
-                        region=candidate.offer.region,
+                        provider=offer.provider,
+                        gpu_type=offer.gpu_spec.name,
+                        region=offer.region,
                     )
-                    if is_avail:
-                        verified_ranked.append(candidate)
                 except Exception as probe_err:  # noqa: BLE001
                     logger.warning(
                         "Live availability probe check failed for '%s' (%s): %s",
-                        candidate.offer.provider,
-                        candidate.offer.instance_type,
+                        offer.provider,
+                        offer.instance_type,
                         probe_err,
                     )
-            if verified_ranked:
-                ranked = verified_ranked
+                    probe_rejections.append(
+                        f"{label} could not be live-verified (probe error: {probe_err})"
+                    )
+                    continue
+                if is_avail is True:
+                    verified_ranked.append(candidate)
+                else:
+                    probe_rejections.append(
+                        f"{label} reported unavailable by live availability probe"
+                    )
+
+            if not verified_ranked:
+                provider_ctx = (
+                    f" on provider '{provider_filter}'" if provider_filter else ""
+                )
+                raise NoFeasibleProviderError(
+                    f"No compute provider could be live-verified for model '{profile.id}'{provider_ctx}: "
+                    f"{len(ranked)} candidate(s) satisfied static catalog requirements, but none "
+                    f"were confirmed available by the live availability probe."
+                    "\n  - " + "\n  - ".join(probe_rejections),
+                    reasons=probe_rejections,
+                )
+            ranked = verified_ranked
 
         best = ranked[0]
         logger.info(
