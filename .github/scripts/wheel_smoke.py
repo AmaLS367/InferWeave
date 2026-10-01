@@ -2,16 +2,24 @@
 
 Usage:
     python wheel_smoke.py metadata <path-to-wheel>
-        Verifies provider SDKs (SkyPilot, Modal) are not mandatory dependencies.
+        Verifies provider SDKs (SkyPilot, Modal) are not mandatory dependencies, the
+        httpx upper bound is present, provider extras exist, and py.typed is packaged.
 
     python wheel_smoke.py imports
         Run with the interpreter of a clean environment that has ONLY the base wheel
         installed. Verifies the public import surface and CLI entry point.
+
+    python wheel_smoke.py typed
+        Run with the interpreter of a clean environment that has the base wheel and mypy
+        installed. Verifies the installed package is PEP 561 type-discoverable.
 """
 
+import subprocess
 import sys
+import tempfile
 import zipfile
 from email.parser import Parser
+from pathlib import Path
 
 OPTIONAL_PROVIDER_SDKS = ("skypilot", "modal")
 
@@ -32,15 +40,31 @@ def check_metadata(wheel_path: str) -> None:
     if leaked:
         sys.exit(f"Provider SDKs must be optional extras, found mandatory: {leaked}")
 
+    # httpx 1.x is a different API (0.x AsyncClient usage); the upper bound must not be dropped.
+    # Metadata orders specifiers arbitrarily ("httpx<1.0,>=0.28.1"), so compare as a set.
+    httpx_specs = {
+        frozenset(r.replace(" ", "")[len("httpx") :].split(","))
+        for r in mandatory
+        if r.lower().startswith("httpx")
+    }
+    if httpx_specs != {frozenset({">=0.28.1", "<1.0"})}:
+        sys.exit(f"httpx must be constrained to '>=0.28.1,<1.0', got: {mandatory}")
+
+    with zipfile.ZipFile(wheel_path) as wheel:
+        if "inferweave/py.typed" not in wheel.namelist():
+            sys.exit("Wheel is missing inferweave/py.typed (PEP 561 marker)")
+
     extras = set(metadata.get_all("Provides-Extra") or [])
-    expected = {"runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "clouds", "modal"}
+    expected = {
+        "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast", "clouds", "modal",
+    }
     if missing := expected - extras:
         sys.exit(f"Missing expected extras: {sorted(missing)}")
 
     for extra, sdk in [(e, "skypilot") for e in sorted(expected - {"modal"})] + [("modal", "modal")]:
         if not any(r.lower().startswith(sdk) and f"extra == '{extra}'" in r for r in requires):
             sys.exit(f"Extra '{extra}' does not provide '{sdk}'")
-    print("Metadata OK: SkyPilot and Modal are only available via extras.")
+    print("Metadata OK: SkyPilot and Modal only via extras, httpx<1.0 bounded, py.typed packaged.")
 
 
 def check_imports() -> None:
@@ -75,10 +99,40 @@ def check_imports() -> None:
     print(f"Imports OK: inferweave {inferweave.__version__} from {inferweave.__file__}")
 
 
+def check_typed() -> None:
+    import inferweave
+
+    package_dir = Path(inferweave.__file__ or "").parent
+    if not (package_dir / "py.typed").is_file():
+        sys.exit(f"{package_dir} has no py.typed; installed package is not type-discoverable")
+
+    snippet = """from inferweave import InferWeave
+reveal_type(InferWeave().list_deployments())
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(snippet, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-m", "mypy", "--no-incremental", "--cache-dir", tmp, str(probe)],
+            capture_output=True,
+            text=True,
+            cwd=tmp,
+            check=False,
+        )
+    print(result.stdout)
+    if "py.typed" in result.stdout or "missing library stubs" in result.stdout:
+        sys.exit("mypy does not treat the installed inferweave as a typed package")
+    if "list[inferweave.models.deployment.Deployment]" not in result.stdout:
+        sys.exit("mypy could not resolve InferWeave.list_deployments() return type")
+    print("Typed OK: mypy resolves inferweave annotations from the installed wheel.")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "metadata":
         check_metadata(sys.argv[2])
     elif len(sys.argv) == 2 and sys.argv[1] == "imports":
         check_imports()
+    elif len(sys.argv) == 2 and sys.argv[1] == "typed":
+        check_typed()
     else:
         sys.exit(__doc__)

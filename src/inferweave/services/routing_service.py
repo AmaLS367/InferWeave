@@ -5,6 +5,7 @@ import logging
 import sys
 
 from inferweave.adapters.catalog.static_catalog import StaticCatalogAdapter
+from inferweave.core.asyncio_utils import ensure_no_running_loop
 from inferweave.core.exceptions import NoFeasibleProviderError
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
@@ -143,23 +144,13 @@ class SmartRoutingService:
         request: DeploymentRequest,
         target_provider: str | None = None,
     ) -> RoutingDecision:
-        """Synchronous wrapper for aresolve."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+        """Synchronous entry point for callers outside an event loop.
 
-        if loop and loop.is_running():
-            # In an active event loop, run directly via future or new task in worker thread
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                return executor.submit(
-                    lambda: asyncio.run(
-                        self.aresolve(profile, request, target_provider)
-                    )
-                ).result()
-
+        Raises RuntimeError when called from a running event loop; use ``aresolve`` there.
+        """
+        ensure_no_running_loop(
+            "SmartRoutingService.resolve()", "SmartRoutingService.aresolve()"
+        )
         return asyncio.run(self.aresolve(profile, request, target_provider))
 
     def _build_constraints(

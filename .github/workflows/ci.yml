@@ -123,3 +123,9 @@ jobs:
           "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports
           "$RUNNER_TEMP/smoke/bin/inferweave" --version
           "$RUNNER_TEMP/smoke/bin/inferweave" --help
+      - name: Check installed wheel is PEP 561 type-discoverable
+        # mypy is only installed after the import smoke test so it cannot mask eager imports.
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv pip install --no-config --python "$RUNNER_TEMP/smoke/bin/python" mypy
+          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" typed

@@ -1,5 +1,8 @@
 """Provider router resolving provider names and selection strategies."""
 
+import asyncio
+
+from inferweave.core.asyncio_utils import ensure_no_running_loop
 from inferweave.core.exceptions import (
     NoFeasibleProviderError,
     ProviderNotFoundError,
@@ -58,6 +61,22 @@ class ProviderRouter:
         strategy: str | None = "cheapest",
         request: DeploymentRequest | None = None,
     ) -> ComputeProvider:
+        """Synchronous entry point for callers outside an event loop.
+
+        Raises RuntimeError when called from a running event loop; use ``aresolve`` there.
+        """
+        ensure_no_running_loop("ProviderRouter.resolve()", "ProviderRouter.aresolve()")
+        return asyncio.run(
+            self.aresolve(provider_name, profile, strategy=strategy, request=request)
+        )
+
+    async def aresolve(
+        self,
+        provider_name: str,
+        profile: ModelProfile,
+        strategy: str | None = "cheapest",
+        request: DeploymentRequest | None = None,
+    ) -> ComputeProvider:
         """Resolves target provider, validates hardware VRAM, and selects optimal instance."""
         name = provider_name.lower()
 
@@ -74,7 +93,7 @@ class ProviderRouter:
             if req.gpu_type:
                 self._hardware_service.validate_deployment_hardware(profile, req)
 
-            decision = self._routing_service.resolve(profile=profile, request=req)
+            decision = await self._routing_service.aresolve(profile=profile, request=req)
             self._last_decision = decision
 
             if request is not None and not request.gpu_type:
@@ -99,7 +118,7 @@ class ProviderRouter:
         )
 
         try:
-            decision = self._routing_service.resolve(
+            decision = await self._routing_service.aresolve(
                 profile=profile,
                 request=req,
                 target_provider=name,

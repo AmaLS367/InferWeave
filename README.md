@@ -101,6 +101,7 @@ pip install "inferweave[azure]"
 pip install "inferweave[lambda]"
 pip install "inferweave[nebius]"
 pip install "inferweave[kubernetes]"
+pip install "inferweave[vast]"
 
 # Serverless compute engine
 pip install "inferweave[modal]"
@@ -191,8 +192,25 @@ uv sync --all-extras --group dev
 # Run linting and type checking
 uv run ruff check .
 uv run mypy src
-uv run pytest
+uv run pytest -m "not integration"
+```
 
+#### Live integration tests (opt-in, spend real money)
+
+Tests marked `integration` talk to real clouds. They are excluded from CI and skip
+cleanly unless explicitly enabled and configured:
+
+| Test | Required environment |
+| --- | --- |
+| `tests/test_modal_integration.py` | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` |
+| `tests/test_runpod_integration.py` | `INFERWEAVE_RUNPOD_INTEGRATION=1`, `RUNPOD_API_KEY` (or `~/.runpod/config.toml`), `inferweave[runpod]` on Linux/macOS/WSL2 |
+
+The RunPod test also reads optional `INFERWEAVE_RUNPOD_GPU` (default `L4`),
+`INFERWEAVE_RUNPOD_MODEL` (default `facebook/opt-125m`), `INFERWEAVE_RUNPOD_READY_TIMEOUT_SECS`,
+`INFERWEAVE_RUNPOD_AUTOSTOP_MINS` and `INFERWEAVE_RUNPOD_ALLOW_SPOT`; see the module docstring.
+
+```bash
+INFERWEAVE_RUNPOD_INTEGRATION=1 RUNPOD_API_KEY=...   uv run --extra runpod pytest -m integration tests/test_runpod_integration.py -s
 ```
 
 ---

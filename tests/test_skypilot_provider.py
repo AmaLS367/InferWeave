@@ -76,7 +76,8 @@ async def test_skypilot_deploy_success(sample_profile, sample_runtime):
         mock_sky.endpoints.assert_called_once()
         assert deployment.provider == "runpod"
         assert deployment.endpoint_url == "http://1.2.3.4:8000"
-        assert deployment.state == DeploymentState.HEALTHY
+        # A launched cluster is infrastructure only; HEALTHY needs a readiness probe.
+        assert deployment.state == DeploymentState.STARTING
 
         # Validate docker image_id was passed to sky.Resources
         mock_sky.Resources.assert_called_once()
@@ -383,3 +384,89 @@ async def test_skypilot_get_status_stopped():
     ):
         status = await provider.get_status(deployment_id)
         assert status.state == DeploymentState.STOPPED
+
+
+# --- SkyPilot >=0.9 client SDK: every API returns a request ID that must be sky.get()-ed ---
+
+
+def _request_id_sky(results: dict[str, object]) -> MagicMock:
+    """Mocks the SkyPilot client SDK where API calls return request IDs, not values."""
+    sky = MagicMock()
+    sky.launch = MagicMock(return_value="req-launch")
+    sky.endpoints = MagicMock(return_value="req-endpoints")
+    sky.status = MagicMock(return_value="req-status")
+    sky.stop = MagicMock(return_value="req-stop")
+    sky.down = MagicMock(return_value="req-down")
+    sky.get = MagicMock(side_effect=lambda request_id: results[request_id])
+    sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+    return sky
+
+
+@pytest.mark.asyncio
+async def test_skypilot_deploy_waits_for_launch_and_resolves_endpoint_request(
+    sample_profile, sample_runtime
+):
+    sky = _request_id_sky({"req-launch": (1, None), "req-endpoints": {8000: "1.2.3.4:8000"}})
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(model=sample_profile.id, provider="runpod", gpu_type="A100")
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=sky),
+    ):
+        deployment = await provider.deploy(request, sample_profile, sample_runtime)
+
+    resolved = [call.args[0] for call in sky.get.call_args_list]
+    assert resolved == ["req-launch", "req-endpoints"]
+    assert deployment.endpoint_url == "http://1.2.3.4:8000"
+    assert deployment.state == DeploymentState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_skypilot_deploy_surfaces_launch_failure(sample_profile, sample_runtime):
+    """A failed launch only reports its error through sky.get; it must not be swallowed."""
+    sky = _request_id_sky({})
+    sky.get = MagicMock(side_effect=RuntimeError("no capacity"))
+    provider = SkyPilotProvider(cloud_name="runpod")
+    request = DeploymentRequest(model=sample_profile.id, provider="runpod", gpu_type="A100")
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=sky),
+        pytest.raises(RuntimeError, match="no capacity"),
+    ):
+        await provider.deploy(request, sample_profile, sample_runtime)
+
+
+@pytest.mark.asyncio
+async def test_skypilot_stop_and_down_wait_for_their_requests():
+    from inferweave.domain.lifecycle import AutostopAction
+
+    sky = _request_id_sky({"req-stop": None, "req-down": None})
+    provider = SkyPilotProvider(cloud_name="runpod")
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=sky),
+    ):
+        await provider.stop("iw-test", action=AutostopAction.STOP)
+        await provider.stop("iw-test", action=AutostopAction.DOWN)
+
+    assert [call.args[0] for call in sky.get.call_args_list] == ["req-stop", "req-down"]
+
+
+@pytest.mark.asyncio
+async def test_skypilot_get_status_resolves_status_request():
+    cluster = MagicMock()
+    cluster.status = "UP"
+    sky = _request_id_sky({"req-status": [cluster], "req-endpoints": {8000: "1.2.3.4:8000"}})
+    provider = SkyPilotProvider(cloud_name="runpod")
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=sky),
+    ):
+        status = await provider.get_status("iw-test")
+
+    assert status.state == DeploymentState.STARTING
+    assert status.endpoint_url == "http://1.2.3.4:8000"

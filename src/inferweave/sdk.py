@@ -90,7 +90,7 @@ class InferWeave:
             self.router.hardware_service.validate_deployment_hardware(profile, request)
 
         # 3. Resolve target compute provider (SkyPilot clouds or Modal) with VRAM-aware routing
-        compute_provider = self.router.resolve(
+        compute_provider = await self.router.aresolve(
             provider_name=request.provider,
             profile=profile,
             strategy=request.strategy,
@@ -250,5 +250,23 @@ class InferWeave:
             dep._status.state = DeploymentState.STOPPED
 
     async def get_status(self, deployment_id: str) -> DeploymentStatus:
-        """Retrieves and reconciles the latest deployment status."""
-        return await self.lifecycle_service.refresh_status(deployment_id=deployment_id)
+        """Retrieves and reconciles the latest deployment status.
+
+        Infrastructure state alone never yields HEALTHY; when the deployment's model profile
+        is known, its readiness healthcheck is probed to establish application health.
+        """
+        healthcheck_config = None
+        record = await self.lifecycle_service.get_record(deployment_id)
+        if record is not None:
+            try:
+                healthcheck_config = self.registry.get(record.model).healthcheck
+            except Exception as err:  # noqa: BLE001
+                logger.debug(
+                    "No model profile for '%s'; skipping readiness probe: %s",
+                    record.model,
+                    err,
+                )
+        return await self.lifecycle_service.refresh_status(
+            deployment_id=deployment_id,
+            healthcheck_config=healthcheck_config,
+        )

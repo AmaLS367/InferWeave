@@ -121,6 +121,7 @@ class SkyPilotProvider(ComputeProvider):
                 "lambda",
                 "nebius",
                 "kubernetes",
+                "vast",
             }
             pkg_hint = (
                 f"inferweave[{self.name}]"
@@ -131,6 +132,18 @@ class SkyPilotProvider(ComputeProvider):
                 f"SkyPilot is not installed with support for '{self.name}'. "
                 f"Install it via: pip install '{pkg_hint}'"
             ) from e
+
+    @staticmethod
+    def _await_request(sky: Any, result: Any) -> Any:
+        """Resolves a SkyPilot client API result to its value.
+
+        SkyPilot's client SDK (>=0.9) submits work to its API server and returns a request
+        ID (a ``str``); the operation's result or error is only available via ``sky.get``.
+        Blocking; call from a worker thread. Non-ID results are returned unchanged.
+        """
+        if isinstance(result, str):
+            return sky.get(result)
+        return result
 
     async def deploy(
         self,
@@ -147,9 +160,7 @@ class SkyPilotProvider(ComputeProvider):
             id=deployment_id,
             model=profile.id,
             provider=self.name,
-            state=DeploymentState.PROVISIONING
-            if request.dry_run
-            else DeploymentState.HEALTHY,
+            state=DeploymentState.PROVISIONING,
             endpoint_url=f"http://dryrun-{deployment_id}.cloud:{runtime.port}"
             if request.dry_run
             else None,
@@ -272,20 +283,26 @@ class SkyPilotProvider(ComputeProvider):
 
         # Launch the task asynchronously
         def _launch_sync() -> None:
-            sky.launch(
-                task,
-                cluster_name=deployment_id,
-                idle_minutes_to_autostop=idle_mins,
-                down=autodown,
-                stream_logs=False,
+            self._await_request(
+                sky,
+                sky.launch(
+                    task,
+                    cluster_name=deployment_id,
+                    idle_minutes_to_autostop=idle_mins,
+                    down=autodown,
+                    stream_logs=False,
+                ),
             )
 
         await asyncio.to_thread(_launch_sync)
 
         # Query live cluster endpoint if ready
         endpoint_url = await self._resolve_endpoint(sky, deployment_id, runtime.port)
+        # A launched cluster with an endpoint only proves the infrastructure is up, not that
+        # the model runtime is serving. Report STARTING; HEALTHY is assigned only after a
+        # successful readiness healthcheck (see InferWeave.deploy / refresh_status).
         state = (
-            DeploymentState.HEALTHY
+            DeploymentState.STARTING
             if endpoint_url is not None
             else DeploymentState.PROVISIONING
         )
@@ -317,7 +334,7 @@ class SkyPilotProvider(ComputeProvider):
 
         def _fetch() -> str | None:
             try:
-                eps = sky.endpoints(cluster_name, port=port)
+                eps = self._await_request(sky, sky.endpoints(cluster_name, port=port))
                 if not eps:
                     return None
                 ep = eps.get(port) or next(iter(eps.values()), None)
@@ -372,10 +389,14 @@ class SkyPilotProvider(ComputeProvider):
         sky = self._get_sky_module()
         if target_action == AutostopAction.DOWN:
             logger.info("Tearing down SkyPilot cluster '%s'...", deployment_id)
-            await asyncio.to_thread(sky.down, cluster_name=deployment_id)
+            await asyncio.to_thread(
+                lambda: self._await_request(sky, sky.down(cluster_name=deployment_id))
+            )
         else:
             logger.info("Stopping SkyPilot cluster '%s'...", deployment_id)
-            await asyncio.to_thread(sky.stop, cluster_name=deployment_id)
+            await asyncio.to_thread(
+                lambda: self._await_request(sky, sky.stop(cluster_name=deployment_id))
+            )
 
         if deployment_id in self._local_deployments:
             self._local_deployments[deployment_id]["record"].mark_stopped()
@@ -421,7 +442,9 @@ class SkyPilotProvider(ComputeProvider):
 
         def _fetch_status() -> tuple[DeploymentState, str | None]:
             try:
-                clusters = sky.status(cluster_names=[deployment_id])
+                clusters = self._await_request(
+                    sky, sky.status(cluster_names=[deployment_id])
+                )
                 if not clusters:
                     return DeploymentState.STOPPED, None
 
@@ -432,8 +455,10 @@ class SkyPilotProvider(ComputeProvider):
 
                 status_str = str(getattr(status_raw, "value", status_raw)).upper()
 
+                # Cluster UP is infrastructure state only; application readiness is
+                # established separately by a healthcheck probe.
                 if "UP" in status_str:
-                    state = DeploymentState.HEALTHY
+                    state = DeploymentState.STARTING
                 elif "INIT" in status_str:
                     state = DeploymentState.PROVISIONING
                 elif "STOPPED" in status_str:
@@ -443,9 +468,9 @@ class SkyPilotProvider(ComputeProvider):
 
                 # Try fetching endpoint if UP
                 endpoint = None
-                if state == DeploymentState.HEALTHY:
+                if state == DeploymentState.STARTING:
                     try:
-                        eps = sky.endpoints(deployment_id)
+                        eps = self._await_request(sky, sky.endpoints(deployment_id))
                         if eps:
                             ep = next(iter(eps.values()), None)
                             if ep:

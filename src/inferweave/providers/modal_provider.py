@@ -194,30 +194,36 @@ class ModalProvider(ComputeProvider):
         return Deployment(status=status, stop_fn=_stop, refresh_fn=_refresh)
 
     async def _stop_modal_app(self, deployment_id: str) -> None:
-        """Internal adapter invoking Modal SDK application stop endpoint.
+        """Stops the deployed Modal app named ``deployment_id`` via the public SDK.
 
-        Note: Modal 1.5.x warns that internal APIs (modal.cli.app.resolve_app_identifier,
-        modal.client._Client, modal_proto) may be modified or removed in 1.6.0+.
-        This adapter isolates internal calls for Modal versions >=0.63.0,<1.6.0.
+        Uses ``modal.experimental.stop_app`` (public, non-underscore; available since
+        modal 1.3). Modal has a single app-level stop: stopping an app terminates its
+        containers and removes the deployment. It has no "pause" equivalent, so
+        ``AutostopAction.STOP`` and ``AutostopAction.DOWN`` both map to this call.
+        Stopping an app that is already gone is treated as success (idempotent).
         """
+        modal = self._get_modal_module()
         try:
-            from modal.cli.app import resolve_app_identifier
-            from modal.client import _Client
-            from modal_proto import api_pb2
-        except ImportError as exc:
-            raise RuntimeError(
-                f"Modal internal CLI/client modules not found. Ensure supported Modal SDK version (<1.6.0): {exc}"
-            ) from exc
-
-        client = await _Client.from_env()
-        app_id, _, lifecycle = await resolve_app_identifier(
-            deployment_id, None, client
-        )
-        if lifecycle.app_state != api_pb2.APP_STATE_STOPPED:
-            req = api_pb2.AppStopRequest(
-                app_id=app_id, source=api_pb2.APP_STOP_SOURCE_CLI
+            await asyncio.to_thread(modal.experimental.stop_app, deployment_id)
+        except modal.exception.NotFoundError:
+            logger.info(
+                "Modal app '%s' not found; treating it as already stopped.",
+                deployment_id,
             )
-            await client.stub.AppStop(req)
+
+    async def _fetch_modal_state(self, deployment_id: str) -> DeploymentState:
+        """Maps Modal app presence to an infrastructure-level DeploymentState.
+
+        A deployed Modal app only proves the infrastructure exists, not that the model
+        runtime is serving, so it maps to STARTING; HEALTHY requires an application
+        readiness probe (see LifecycleService.refresh_status).
+        """
+        modal = self._get_modal_module()
+        try:
+            await asyncio.to_thread(modal.App.lookup, deployment_id)
+        except modal.exception.NotFoundError:
+            return DeploymentState.STOPPED
+        return DeploymentState.STARTING
 
     async def stop(
         self,
@@ -292,57 +298,18 @@ class ModalProvider(ComputeProvider):
             )
 
         self._get_modal_module()
+        endpoint = cached_record.endpoint_url if cached_record else None
         try:
-            from modal.cli.app import resolve_app_identifier
-            from modal.client import _Client
-            from modal_proto import api_pb2
-
-            client = await _Client.from_env()
-            _, _, lifecycle = await resolve_app_identifier(deployment_id, None, client)
-            state_map = {
-                api_pb2.APP_STATE_DEPLOYED: DeploymentState.HEALTHY,
-                api_pb2.APP_STATE_EPHEMERAL: DeploymentState.HEALTHY,
-                api_pb2.APP_STATE_INITIALIZING: DeploymentState.PROVISIONING,
-                api_pb2.APP_STATE_STOPPED: DeploymentState.STOPPED,
-                api_pb2.APP_STATE_STOPPING: DeploymentState.STOPPED,
-                api_pb2.APP_STATE_DISABLED: DeploymentState.FAILED,
-            }
-            state = state_map.get(lifecycle.app_state, DeploymentState.PENDING)
-            endpoint = cached_record.endpoint_url if cached_record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model_name,
-                provider=self.name,
-                state=state,
-                endpoint_url=endpoint,
-            )
-        except (RuntimeError, ValueError, OSError) as err:
+            state = await self._fetch_modal_state(deployment_id)
+        except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to get Modal status for '%s': %s", deployment_id, err
             )
-            fallback_state = (
-                cached_record.state if cached_record else DeploymentState.PENDING
-            )
-            endpoint = cached_record.endpoint_url if cached_record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model_name,
-                provider=self.name,
-                state=fallback_state,
-                endpoint_url=endpoint,
-            )
-        except Exception as err:  # noqa: BLE001
-            logger.warning(
-                "Unexpected error getting Modal status for '%s': %s", deployment_id, err
-            )
-            fallback_state = (
-                cached_record.state if cached_record else DeploymentState.PENDING
-            )
-            endpoint = cached_record.endpoint_url if cached_record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model_name,
-                provider=self.name,
-                state=fallback_state,
-                endpoint_url=endpoint,
-            )
+            state = cached_record.state if cached_record else DeploymentState.PENDING
+        return DeploymentStatus(
+            id=deployment_id,
+            model=model_name,
+            provider=self.name,
+            state=state,
+            endpoint_url=endpoint,
+        )

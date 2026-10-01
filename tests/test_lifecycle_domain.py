@@ -156,3 +156,26 @@ def test_evaluator_reconcile_state():
         )
         == DeploymentState.PROVISIONING
     )
+
+
+def test_reconcile_never_reports_healthy_from_infrastructure_alone():
+    from inferweave.models.enums import DeploymentState as S
+
+    reconcile = DeploymentLifecycleEvaluator.reconcile_state
+
+    # Infra running (STARTING, or HEALTHY from a legacy provider) without a probe is not healthy.
+    assert reconcile(infra_state=S.STARTING) == S.STARTING
+    assert reconcile(infra_state=S.HEALTHY) == S.STARTING
+    assert reconcile(infra_state=S.HEALTHY, current_state=S.PROVISIONING) == S.STARTING
+    # Only a successful probe promotes.
+    assert reconcile(infra_state=S.STARTING, probe_is_healthy=True) == S.HEALTHY
+    # A failed probe on a warming deployment keeps it warming; it never becomes healthy.
+    assert (
+        reconcile(infra_state=S.STARTING, probe_is_healthy=False, current_state=S.STARTING)
+        == S.STARTING
+    )
+    # A previously verified application state survives a probe-less infrastructure refresh.
+    assert reconcile(infra_state=S.STARTING, current_state=S.HEALTHY) == S.HEALTHY
+    # Failed / stopped infrastructure always propagates.
+    assert reconcile(infra_state=S.FAILED, current_state=S.HEALTHY) == S.FAILED
+    assert reconcile(infra_state=S.STOPPED, current_state=S.HEALTHY) == S.STOPPED

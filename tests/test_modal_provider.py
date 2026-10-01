@@ -4,10 +4,16 @@ These tests validate the adapter's translation, image building, and app registra
 against a mocked Modal SDK, without executing live deployments on Modal cloud.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import inspect
+import tomllib
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
+from packaging.requirements import Requirement
 
+from inferweave.adapters.lifecycle.memory_repository import InMemoryDeploymentRepository
+from inferweave.domain.lifecycle import AutostopAction
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import DeploymentState, WorkloadType
 from inferweave.models.profile import (
@@ -15,8 +21,11 @@ from inferweave.models.profile import (
     HealthcheckConfig,
     ModelProfile,
 )
+from inferweave.providers import modal_provider as modal_provider_module
 from inferweave.providers.modal_provider import ModalProvider
 from inferweave.runtimes.base import RuntimeSpec
+
+PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 
 @pytest.fixture
@@ -92,25 +101,130 @@ async def test_modal_provider_dry_run(sample_profile, sample_runtime):
         assert "dryrun" in (deployment.endpoint_url or "")
 
 
-@pytest.mark.asyncio
-async def test_modal_provider_stop():
-    provider = ModalProvider()
-    deployment_id = "iw-modal-test-123456"
-
-    mock_client = MagicMock()
-    mock_client.stub.AppStop = AsyncMock()
-    mock_lifecycle = MagicMock()
-    mock_lifecycle.app_state = 1  # Not stopped
-
+async def _deploy_live(provider, sample_profile, sample_runtime):
+    request = DeploymentRequest(model=sample_profile.id, provider="modal")
     with (
-        patch("modal.client._Client.from_env", AsyncMock(return_value=mock_client)),
-        patch(
-            "modal.cli.app.resolve_app_identifier",
-            AsyncMock(return_value=("ap-12345", "main", mock_lifecycle)),
-        ),
+        patch("modal.App.deploy", return_value=None),
+        patch("modal.Function.get_web_url", return_value="https://live.modal.run"),
     ):
-        await provider.stop(deployment_id)
-        mock_client.stub.AppStop.assert_called_once()
+        return await provider.deploy(request, sample_profile, sample_runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [None, AutostopAction.STOP, AutostopAction.DOWN])
+async def test_modal_provider_stop_uses_public_stop_app(
+    action, sample_profile, sample_runtime
+):
+    """STOP and DOWN both map to Modal's single app-level stop (public SDK API)."""
+    provider = ModalProvider()
+    deployment = await _deploy_live(provider, sample_profile, sample_runtime)
+
+    with patch("modal.experimental.stop_app") as mock_stop:
+        await provider.stop(deployment.id, action=action)
+
+    mock_stop.assert_called_once_with(deployment.id)
+    record = provider._local_deployments[deployment.id]["record"]
+    assert record.state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_stop_works_from_persisted_record_only(
+    sample_profile, sample_runtime
+):
+    """Cross-process stop: a fresh provider with no in-memory state stops by deployment ID."""
+    repo = InMemoryDeploymentRepository()
+    first = ModalProvider(repository=repo)
+    deployment = await _deploy_live(first, sample_profile, sample_runtime)
+
+    fresh = ModalProvider(repository=repo)
+    assert deployment.id not in fresh._local_deployments
+    with patch("modal.experimental.stop_app") as mock_stop:
+        await fresh.stop(deployment.id)
+
+    mock_stop.assert_called_once_with(deployment.id)
+    record = await repo.get(deployment.id)
+    assert record is not None and record.state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_stop_is_idempotent_when_app_already_gone(
+    sample_profile, sample_runtime
+):
+    import modal
+
+    provider = ModalProvider()
+    deployment = await _deploy_live(provider, sample_profile, sample_runtime)
+
+    with patch(
+        "modal.experimental.stop_app", side_effect=modal.exception.NotFoundError("gone")
+    ):
+        await provider.stop(deployment.id)
+
+    record = provider._local_deployments[deployment.id]["record"]
+    assert record.state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_get_status_deployed_app_is_starting_not_healthy():
+    """A deployed Modal app is infrastructure state only; it must never read as HEALTHY."""
+    provider = ModalProvider()
+    with patch("modal.App.lookup", return_value=MagicMock()) as mock_lookup:
+        status = await provider.get_status("iw-modal-test-123456")
+
+    mock_lookup.assert_called_once_with("iw-modal-test-123456")
+    assert status.state == DeploymentState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_get_status_missing_app_is_stopped():
+    import modal
+
+    provider = ModalProvider()
+    with patch("modal.App.lookup", side_effect=modal.exception.NotFoundError("gone")):
+        status = await provider.get_status("iw-modal-test-123456")
+
+    assert status.state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_get_status_transient_error_keeps_cached_state(
+    sample_profile, sample_runtime
+):
+    provider = ModalProvider()
+    deployment = await _deploy_live(provider, sample_profile, sample_runtime)
+
+    with patch("modal.App.lookup", side_effect=OSError("network down")):
+        status = await provider.get_status(deployment.id)
+
+    assert status.state == DeploymentState.STARTING
+
+
+def test_modal_provider_uses_only_public_modal_apis():
+    """Private Modal internals (modal.cli, modal.client._Client, modal_proto) must not be used."""
+    source = inspect.getsource(modal_provider_module)
+    for private in ("modal_proto", "modal.cli", "_Client", "resolve_app_identifier", "api_pb2"):
+        assert private not in source, f"modal_provider relies on private API: {private}"
+
+
+def test_modal_public_surface_required_by_provider_exists():
+    """Guards the installed Modal SDK still exposes the public APIs the provider calls."""
+    import modal
+
+    assert callable(modal.experimental.stop_app)
+    assert callable(modal.App.lookup)
+    assert issubclass(modal.exception.NotFoundError, Exception)
+
+
+def test_modal_extra_supports_current_stable_sdk():
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    (spec,) = [
+        Requirement(dep)
+        for dep in project["optional-dependencies"]["modal"]
+        if dep.lower().startswith("modal")
+    ]
+    assert spec.specifier.contains("1.3.0"), "minimum supported Modal (public stop_app)"
+    assert spec.specifier.contains("1.6.0"), "current stable Modal must be allowed"
+    assert not spec.specifier.contains("0.73.0"), "pre-stop_app Modal must stay excluded"
 
 
 @pytest.mark.asyncio

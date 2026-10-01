@@ -360,7 +360,9 @@ class LifecycleService:
             probe
             and self._healthcheck_service
             and endpoint_url
-            and raw_status.state == DeploymentState.HEALTHY
+            and healthcheck_config is not None
+            and raw_status.state
+            in {DeploymentState.STARTING, DeploymentState.HEALTHY}
         ):
             try:
                 probe_res = await self._healthcheck_service.check_health(
@@ -395,6 +397,12 @@ class LifecycleService:
 
         # 4. Persist updated status to repository and deployment handle
         if record:
+            if (
+                reconciled_state == DeploymentState.HEALTHY
+                and record.state != DeploymentState.HEALTHY
+            ):
+                record.mark_healthy(endpoint_url=endpoint_url)
+                updated_status.ready_at = updated_status.ready_at or record.ready_at
             record.state = reconciled_state
             record.endpoint_url = endpoint_url
             await self._repository.save(record)

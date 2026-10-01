@@ -98,8 +98,9 @@ class DeploymentLifecycleEvaluator:
     ) -> DeploymentState:
         """Reconciles raw compute infrastructure state with application-level healthcheck probe results.
 
-        Prevents false-positive 'HEALTHY' reports when cloud infrastructure is UP but the model server
-        inside the container is still provisioning, crashed, or failing readiness checks.
+        Infrastructure state and application readiness are distinct: providers report that the
+        machine/app is running (STARTING), never that the model server is ready. HEALTHY is only
+        ever produced here from a successful probe, or carried over from an earlier verified state.
         """
         if is_stopped or infra_state == DeploymentState.STOPPED:
             return DeploymentState.STOPPED
@@ -107,14 +108,11 @@ class DeploymentLifecycleEvaluator:
         if infra_state == DeploymentState.FAILED:
             return DeploymentState.FAILED
 
-        if infra_state in {
-            DeploymentState.PENDING,
-            DeploymentState.PROVISIONING,
-            DeploymentState.STARTING,
-        }:
+        if infra_state in {DeploymentState.PENDING, DeploymentState.PROVISIONING}:
             return infra_state
 
-        # Infrastructure is reported UP / HEALTHY by the cloud provider
+        # Infrastructure is running (STARTING, or HEALTHY from a legacy provider). This proves
+        # nothing about the model runtime, so only a probe can establish application health.
         if probe_is_healthy is True:
             return DeploymentState.HEALTHY
         if probe_is_healthy is False:
@@ -123,9 +121,16 @@ class DeploymentLifecycleEvaluator:
                 DeploymentState.PROVISIONING,
                 DeploymentState.STARTING,
             }:
-                return DeploymentState.PROVISIONING
+                return current_state
             # Otherwise, the endpoint failed its health check
             return DeploymentState.UNHEALTHY
 
-        # If probe was not executed or not configured, fall back to infra state
-        return infra_state
+        # No probe ran: keep an application-level state verified earlier, otherwise the
+        # infrastructure is up but readiness is unproven.
+        if current_state in {
+            DeploymentState.HEALTHY,
+            DeploymentState.DEGRADED,
+            DeploymentState.UNHEALTHY,
+        }:
+            return current_state
+        return DeploymentState.STARTING
