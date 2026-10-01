@@ -50,24 +50,43 @@ def check_metadata(wheel_path: str) -> None:
     if httpx_specs != {frozenset({">=0.28.1", "<1.0"})}:
         sys.exit(f"httpx must be constrained to '>=0.28.1,<1.0', got: {mandatory}")
 
+    version = metadata.get("Version")
+    if not version or version != "0.1.0":
+        sys.exit(f"Wheel Version metadata invalid or unexpected: {version}")
+
     with zipfile.ZipFile(wheel_path) as wheel:
         if "inferweave/py.typed" not in wheel.namelist():
             sys.exit("Wheel is missing inferweave/py.typed (PEP 561 marker)")
 
     extras = set(metadata.get_all("Provides-Extra") or [])
     expected = {
-        "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast", "clouds", "modal",
+        "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast", "clouds", "modal", "workers", "all",
     }
     if missing := expected - extras:
         sys.exit(f"Missing expected extras: {sorted(missing)}")
 
-    for extra, sdk in [(e, "skypilot") for e in sorted(expected - {"modal"})] + [("modal", "modal")]:
+    for extra, sdk in [(e, "skypilot") for e in sorted(expected - {"modal", "workers", "all"})] + [("modal", "modal")]:
         if not any(r.lower().startswith(sdk) and f"extra == '{extra}'" in r for r in requires):
             sys.exit(f"Extra '{extra}' does not provide '{sdk}'")
-    print("Metadata OK: SkyPilot and Modal only via extras, httpx<1.0 bounded, py.typed packaged.")
+
+    # Modal must be optional and bounded to the verified range (>=1.6,<1.7)
+    modal_reqs = [
+        r for r in requires if "extra == 'modal'" in r and r.lower().startswith("modal")
+    ]
+    if not modal_reqs:
+        sys.exit("Missing Requires-Dist for extra == 'modal'")
+    modal_specs = {
+        frozenset(r.replace(" ", "").split(";")[0][len("modal") :].split(","))
+        for r in modal_reqs
+    }
+    if modal_specs != {frozenset({">=1.6", "<1.7"})}:
+        sys.exit(f"Modal must be bounded to '>=1.6,<1.7', got: {modal_reqs}")
+
+    print("Metadata OK: SkyPilot and Modal only via extras, httpx<1.0 bounded, modal range tested, py.typed packaged.")
 
 
 def check_imports() -> None:
+    import importlib.metadata
     import importlib.util
     from importlib.metadata import entry_points
 
@@ -80,6 +99,11 @@ def check_imports() -> None:
 
     if not inferweave.__version__:
         sys.exit("inferweave.__version__ is empty")
+    dist_version = importlib.metadata.version("inferweave")
+    if inferweave.__version__ != dist_version:
+        sys.exit(
+            f"inferweave.__version__ ({inferweave.__version__}) does not match dist metadata ({dist_version})"
+        )
     if "site-packages" not in (inferweave.__file__ or ""):
         sys.exit(f"inferweave imported from {inferweave.__file__}, not the installed wheel")
 

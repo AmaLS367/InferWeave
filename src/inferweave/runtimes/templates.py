@@ -1,8 +1,29 @@
-"""Built-in runtime templates for Audio, LLM, Image, and Video workloads."""
+"""Built-in runtime templates for Audio, LLM, Image, and Video workloads.
+
+Built-in production templates use reproducible, explicit version tags and pinned or bounded
+dependencies from ``inferweave.runtimes.manifest``. Custom user-defined templates can still
+choose their own arbitrary container images or mutable versions if desired.
+"""
+
+import shlex
 
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
 from inferweave.runtimes.base import RuntimeSpec, RuntimeTemplate
+from inferweave.runtimes.manifest import (
+    ACCELERATE_SPEC,
+    DIFFUSERS_SPEC,
+    FASTAPI_SPEC,
+    FISH_SPEECH_IMAGE,
+    IMAGEIO_FFMPEG_SPEC,
+    IMAGEIO_SPEC,
+    PROTOBUF_SPEC,
+    PYTORCH_IMAGE,
+    SENTENCEPIECE_SPEC,
+    TRANSFORMERS_SPEC,
+    UVICORN_SPEC,
+    VLLM_IMAGE,
+)
 
 
 class VLLMTemplate(RuntimeTemplate):
@@ -57,14 +78,15 @@ class VLLMTemplate(RuntimeTemplate):
                     cmd_parts.extend([flag_name, str(val)])
             cmd_parts.extend(runtime_opts.extra_cli_args)
 
-        cmd = " ".join(cmd_parts)
+        cmd = shlex.join(cmd_parts)
         extra_env = runtime_opts.extra_env if runtime_opts else {}
         env = {**profile.default_env, **request.env, **extra_env}
 
         return RuntimeSpec(
             name=self.name,
-            docker_image="vllm/vllm-openai:latest",
+            docker_image=VLLM_IMAGE,
             run_command=cmd,
+            run_args=cmd_parts,
             port=port,
             env_vars=env,
             healthcheck_path="/health",
@@ -80,25 +102,41 @@ class FishSpeechTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8080
-        cmd = f"python3 -m tools.api_server --listen 0.0.0.0:{port} --llama-checkpoint-path checkpoints/{profile.id} --decoder-checkpoint-path checkpoints/{profile.id}/codec.pth"
+        cmd_parts = [
+            "python3",
+            "-m",
+            "tools.api_server",
+            "--listen",
+            f"0.0.0.0:{port}",
+            "--llama-checkpoint-path",
+            f"checkpoints/{profile.id}",
+            "--decoder-checkpoint-path",
+            f"checkpoints/{profile.id}/codec.pth",
+        ]
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
-            extra_cli = runtime_opts.to_cli_args()
-            if extra_cli:
-                cmd = f"{cmd} {' '.join(extra_cli)}"
+            cmd_parts.extend(runtime_opts.to_cli_args())
             extra_env = runtime_opts.extra_env
         else:
             extra_env = {}
 
+        cmd = shlex.join(cmd_parts)
         env = {**profile.default_env, **request.env, **extra_env}
+
+        setup_cmd = shlex.join([
+            "huggingface-cli",
+            "download",
+            profile.target_artifact,
+            "--local-dir",
+            f"checkpoints/{profile.id}",
+        ])
 
         return RuntimeSpec(
             name=self.name,
-            docker_image="fishaudio/fish-speech:latest-cu126",
-            setup_commands=[
-                f"huggingface-cli download {profile.target_artifact} --local-dir checkpoints/{profile.id}"
-            ],
+            docker_image=FISH_SPEECH_IMAGE,
+            setup_commands=[setup_cmd],
             run_command=cmd,
+            run_args=cmd_parts,
             port=port,
             env_vars=env,
             healthcheck_path="/v1/health",
@@ -114,25 +152,36 @@ class FluxDiffusersTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8000
-        cmd = f"python3 -m inferweave.workers.flux --model {profile.target_artifact} --port {port}"
+        cmd_parts = [
+            "python3",
+            "-m",
+            "inferweave.workers.flux",
+            "--model",
+            profile.target_artifact,
+            "--port",
+            str(port),
+        ]
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
-            extra_cli = runtime_opts.to_cli_args()
-            if extra_cli:
-                cmd = f"{cmd} {' '.join(extra_cli)}"
+            cmd_parts.extend(runtime_opts.to_cli_args())
             extra_env = runtime_opts.extra_env
         else:
             extra_env = {}
 
+        cmd = shlex.join(cmd_parts)
         env = {**profile.default_env, **request.env, **extra_env}
+
+        setup_pip = (
+            f"pip install {DIFFUSERS_SPEC} {TRANSFORMERS_SPEC} {ACCELERATE_SPEC} "
+            f"{SENTENCEPIECE_SPEC} {PROTOBUF_SPEC} {FASTAPI_SPEC} {UVICORN_SPEC}"
+        )
 
         return RuntimeSpec(
             name=self.name,
-            docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
-            setup_commands=[
-                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn"
-            ],
+            docker_image=PYTORCH_IMAGE,
+            setup_commands=[setup_pip],
             run_command=cmd,
+            run_args=cmd_parts,
             port=port,
             env_vars=env,
             healthcheck_path="/health",
@@ -148,25 +197,37 @@ class WanVideoTemplate(RuntimeTemplate):
 
     def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
         port = profile.healthcheck.port or 8000
-        cmd = f"python3 -m inferweave.workers.wan --model {profile.target_artifact} --port {port}"
+        cmd_parts = [
+            "python3",
+            "-m",
+            "inferweave.workers.wan",
+            "--model",
+            profile.target_artifact,
+            "--port",
+            str(port),
+        ]
         runtime_opts = request.options.runtime if request.options else None
         if runtime_opts:
-            extra_cli = runtime_opts.to_cli_args()
-            if extra_cli:
-                cmd = f"{cmd} {' '.join(extra_cli)}"
+            cmd_parts.extend(runtime_opts.to_cli_args())
             extra_env = runtime_opts.extra_env
         else:
             extra_env = {}
 
+        cmd = shlex.join(cmd_parts)
         env = {**profile.default_env, **request.env, **extra_env}
+
+        setup_pip = (
+            f"pip install {DIFFUSERS_SPEC} {TRANSFORMERS_SPEC} {ACCELERATE_SPEC} "
+            f"{SENTENCEPIECE_SPEC} {PROTOBUF_SPEC} {FASTAPI_SPEC} {UVICORN_SPEC} "
+            f"{IMAGEIO_SPEC} {IMAGEIO_FFMPEG_SPEC}"
+        )
 
         return RuntimeSpec(
             name=self.name,
-            docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
-            setup_commands=[
-                "pip install -U diffusers transformers accelerate sentencepiece protobuf fastapi uvicorn imageio imageio-ffmpeg"
-            ],
+            docker_image=PYTORCH_IMAGE,
+            setup_commands=[setup_pip],
             run_command=cmd,
+            run_args=cmd_parts,
             port=port,
             env_vars=env,
             healthcheck_path="/health",

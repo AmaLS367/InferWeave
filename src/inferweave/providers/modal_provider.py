@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import shlex
 import uuid
 from typing import Any
 
@@ -118,7 +119,6 @@ class ModalProvider(ComputeProvider):
             if (provider_opts and provider_opts.timeout_seconds)
             else 86400
         )
-        run_command = runtime.run_command
 
         fn_kwargs: dict[str, Any] = {
             "image": image,
@@ -134,13 +134,20 @@ class ModalProvider(ComputeProvider):
             if "memory" in provider_opts.extra_provider_args:
                 fn_kwargs["memory"] = provider_opts.extra_provider_args["memory"]
 
+        # Structured argv execution without shell interpretation
+        run_args = (
+            list(runtime.run_args)
+            if runtime.run_args
+            else shlex.split(runtime.run_command)
+        )
+
         # Register containerized web server function listening on runtime port
         @app.function(**fn_kwargs)
         @modal.web_server(port=runtime.port, startup_timeout=300)
         def serve():
             import subprocess
 
-            subprocess.Popen(run_command, shell=True)
+            subprocess.Popen(run_args, shell=False)
 
         # Handle dry-run mode without provisioning live Modal workers
         if request.dry_run:
@@ -196,15 +203,24 @@ class ModalProvider(ComputeProvider):
     async def _stop_modal_app(self, deployment_id: str) -> None:
         """Stops the deployed Modal app named ``deployment_id`` via the public SDK.
 
-        Uses ``modal.experimental.stop_app`` (public, non-underscore; available since
-        modal 1.3). Modal has a single app-level stop: stopping an app terminates its
-        containers and removes the deployment. It has no "pause" equivalent, so
-        ``AutostopAction.STOP`` and ``AutostopAction.DOWN`` both map to this call.
+        Uses ``modal.experimental.stop_app`` (public, non-underscore; verified on
+        modal 1.6+). Supports forward capability detection for public stop APIs.
         Stopping an app that is already gone is treated as success (idempotent).
         """
         modal = self._get_modal_module()
+        stop_fn = (
+            getattr(getattr(modal, "experimental", None), "stop_app", None)
+            or getattr(modal, "stop_app", None)
+            or getattr(getattr(modal, "App", None), "stop", None)
+        )
         try:
-            await asyncio.to_thread(modal.experimental.stop_app, deployment_id)
+            if callable(stop_fn):
+                await asyncio.to_thread(stop_fn, deployment_id)
+            else:
+                raise RuntimeError(  # noqa: TRY004
+                    "Modal SDK does not expose a supported public app stop API "
+                    "(expected modal.experimental.stop_app)."
+                )
         except modal.exception.NotFoundError:
             logger.info(
                 "Modal app '%s' not found; treating it as already stopped.",

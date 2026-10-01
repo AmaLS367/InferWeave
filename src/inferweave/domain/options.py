@@ -16,7 +16,7 @@ class RuntimeOptions(BaseModel):
     )
     extra_cli_args: list[str] = Field(
         default_factory=list,
-        description="Arbitrary raw CLI arguments appended to runtime server launch command",
+        description="Literal argv tokens appended to runtime launch command (treated as argument data, not shell script)",
     )
     extra_env: dict[str, str] = Field(
         default_factory=dict,
@@ -111,9 +111,17 @@ class DeploymentOptions(BaseModel):
         runtime_data = dict(raw.pop("runtime_args", None) or {})
         engine_args = dict(raw.pop("engine_args", None) or {})
         provider_data = dict(raw.pop("provider_args", None) or {})
-        extra_cli_args = list(
-            raw.pop("extra_cli_args", None) or raw.pop("extra_args", None) or []
+        raw_extra = (
+            raw.pop("extra_cli_args", None)
+            or raw.pop("extra_args", None)
+            or []
         )
+        if isinstance(raw_extra, str):
+            import shlex
+
+            extra_cli_args = shlex.split(raw_extra)
+        else:
+            extra_cli_args = [str(arg) for arg in raw_extra]
         extra_env = dict(raw.pop("extra_env", None) or {})
 
         # 1. Process Provider parameters

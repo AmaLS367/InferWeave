@@ -23,10 +23,14 @@ def test_cli_help():
 
 
 def test_cli_version():
+    import inferweave
+
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     # Rich may emit ANSI styling (e.g. under FORCE_COLOR); compare the plain text.
-    assert "0.1.0" in click.unstyle(result.stdout)
+    unformatted = click.unstyle(result.stdout)
+    assert "0.1.0" in unformatted
+    assert inferweave.__version__ in unformatted
 
 
 def test_cli_models_list():

@@ -103,8 +103,11 @@ pip install "inferweave[nebius]"
 pip install "inferweave[kubernetes]"
 pip install "inferweave[vast]"
 
-# Serverless compute engine
+# Serverless compute engine (verified with modal>=1.6,<1.7)
 pip install "inferweave[modal]"
+
+# Inference worker runtime (FastAPI / Uvicorn stack)
+pip install "inferweave[workers]"
 ```
 
 ### 3. Multi-Cloud Bundles
@@ -164,16 +167,17 @@ SkyPilot’s underlying execution engine relies on POSIX system primitives (`ter
 
 - [x] **Core Model Registry:** Pre-configured specs for popular Audio, LLM, Image, and Video models with separation of InferWeave IDs and external model repository artifacts.
 - [x] **Runtime Templates:**
-  - LLM: `vLLM`
-  - Audio: `fish-speech` / `fish-s2-pro`
-  - Image: `FLUX` via unified worker
-  - Video: `WAN` 2.1 via unified worker
+  - LLM: `vLLM` (pinned versioned image `vllm/vllm-openai:v0.7.3`)
+  - Audio: `fish-speech` / `fish-s2-pro` (pinned `fishaudio/fish-speech:v1.5.1`)
+  - Image: `FLUX` via unified worker (pinned PyTorch base & bounded diffusers stack)
+  - Video: `WAN` 2.1 via unified worker (pinned PyTorch base & bounded diffusers/video stack)
+  - Custom user-defined runtimes may specify arbitrary container images and dependencies
 - [x] **Smart Compute Routing:**
   - `provider="auto"` with `strategy="cheapest"`
   - `strategy="free_first"` (spot instances / community compute)
   - Latency and VRAM-aware GPU matching and validation.
 - [ ] **Unified Client Protocol:** Standardized `.generate()`, `.synthesize()`, and `.render()` methods.
-- [x] **Lifecycle Management:** Auto-shutdown on idle, healthcheck polling, and persistent cross-process deployment state repository (`~/.inferweave/deployments.json`).
+- [x] **Lifecycle Management:** Auto-shutdown on idle, healthcheck polling, and persistent cross-process deployment state repository (`~/.inferweave/deployments.db`, SQLite with WAL mode, configurable via `INFERWEAVE_DEPLOYMENTS_PATH`).
 
 ---
 
@@ -183,8 +187,8 @@ InferWeave uses [`uv`](https://docs.astral.sh/uv/) for lightning-fast dependency
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/inferweave.git
-cd inferweave
+git clone https://github.com/AmaLS367/InferWeave.git
+cd InferWeave
 
 # Setup virtual environment with all extras and dev dependencies
 uv sync --all-extras --group dev
@@ -210,7 +214,8 @@ The RunPod test also reads optional `INFERWEAVE_RUNPOD_GPU` (default `L4`),
 `INFERWEAVE_RUNPOD_AUTOSTOP_MINS` and `INFERWEAVE_RUNPOD_ALLOW_SPOT`; see the module docstring.
 
 ```bash
-INFERWEAVE_RUNPOD_INTEGRATION=1 RUNPOD_API_KEY=...   uv run --extra runpod pytest -m integration tests/test_runpod_integration.py -s
+INFERWEAVE_RUNPOD_INTEGRATION=1 RUNPOD_API_KEY=... \
+  uv run --extra runpod pytest -m integration tests/test_runpod_integration.py -s
 ```
 
 ---

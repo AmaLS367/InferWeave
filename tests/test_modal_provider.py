@@ -222,9 +222,42 @@ def test_modal_extra_supports_current_stable_sdk():
         for dep in project["optional-dependencies"]["modal"]
         if dep.lower().startswith("modal")
     ]
-    assert spec.specifier.contains("1.3.0"), "minimum supported Modal (public stop_app)"
     assert spec.specifier.contains("1.6.0"), "current stable Modal must be allowed"
-    assert not spec.specifier.contains("0.73.0"), "pre-stop_app Modal must stay excluded"
+    assert spec.specifier.contains("1.6.5"), "patch updates in verified 1.6 series allowed"
+    assert not spec.specifier.contains("1.5.9"), "unverified pre-1.6 Modal must stay excluded"
+    assert not spec.specifier.contains("1.7.0"), "untested 1.7+ Modal must stay excluded"
+    assert not spec.specifier.contains("2.0.0"), "untested major version 2.0 must stay excluded"
+
+
+@pytest.mark.asyncio
+async def test_modal_stop_capability_detection():
+    """Validates capability detection fallback across public stop interfaces."""
+    provider = ModalProvider()
+
+    # 1. Standard modal.experimental.stop_app
+    mock_modal = MagicMock()
+    mock_modal.experimental.stop_app = MagicMock()
+    mock_modal.exception.NotFoundError = type("NotFoundError", (Exception,), {})
+    with patch.object(provider, "_get_modal_module", return_value=mock_modal):
+        await provider._stop_modal_app("app-123")
+        mock_modal.experimental.stop_app.assert_called_once_with("app-123")
+
+    # 2. Future modal.stop_app (if promoted out of experimental)
+    mock_modal2 = MagicMock(spec=["stop_app", "exception"])
+    mock_modal2.stop_app = MagicMock()
+    mock_modal2.exception.NotFoundError = type("NotFoundError", (Exception,), {})
+    with patch.object(provider, "_get_modal_module", return_value=mock_modal2):
+        await provider._stop_modal_app("app-456")
+        mock_modal2.stop_app.assert_called_once_with("app-456")
+
+    # 3. Missing stop API raises RuntimeError
+    mock_modal3 = MagicMock(spec=["exception"])
+    mock_modal3.exception.NotFoundError = type("NotFoundError", (Exception,), {})
+    with (
+        patch.object(provider, "_get_modal_module", return_value=mock_modal3),
+        pytest.raises(RuntimeError, match="supported public app stop API"),
+    ):
+        await provider._stop_modal_app("app-789")
 
 
 @pytest.mark.asyncio

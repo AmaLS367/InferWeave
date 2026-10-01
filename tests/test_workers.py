@@ -291,7 +291,8 @@ async def test_wan_worker_fail_closed_on_load_error():
 
 
 def test_fish_speech_template_conforms_to_official_docs():
-    """Validates that Fish Speech template uses latest-cu126, decoder path, and /v1/health."""
+    """Validates that Fish Speech template uses pinned version, decoder path, and /v1/health."""
+    from inferweave.runtimes.manifest import FISH_SPEECH_IMAGE
     from inferweave.runtimes.templates import FishSpeechTemplate
 
     template = FishSpeechTemplate()
@@ -306,7 +307,8 @@ def test_fish_speech_template_conforms_to_official_docs():
     req = DeploymentRequest(model="fishaudio/s2-pro")
     spec = template.render(profile, req)
 
-    assert spec.docker_image == "fishaudio/fish-speech:latest-cu126"
+    assert spec.docker_image == FISH_SPEECH_IMAGE
+    assert spec.docker_image == "fishaudio/fish-speech:v1.5.1"
     assert spec.healthcheck_path == "/v1/health"
     assert "--llama-checkpoint-path checkpoints/fishaudio/s2-pro" in spec.run_command
     assert "--decoder-checkpoint-path checkpoints/fishaudio/s2-pro/codec.pth" in spec.run_command

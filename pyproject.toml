@@ -1,9 +1,27 @@
 [project]
 name = "inferweave"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Unified AI inference deployment SDK across cloud GPU providers"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "AmaLS367" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx>=0.28.1,<1.0",
     "pydantic>=2.10.0",
@@ -11,6 +29,12 @@ dependencies = [
     "rich>=13.0.0",
     "typer>=0.12.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AmaLS367/InferWeave"
+Repository = "https://github.com/AmaLS367/InferWeave"
+Issues = "https://github.com/AmaLS367/InferWeave/issues"
+Changelog = "https://github.com/AmaLS367/InferWeave/blob/master/README.md"
 
 [project.scripts]
 inferweave = "inferweave.cli:app"
@@ -41,7 +65,7 @@ vast = [
     "skypilot[vast]>=0.13.0",
 ]
 modal = [
-    "modal>=1.3.0,<2.0",
+    "modal>=1.6,<1.7",
 ]
 clouds = [
     "skypilot[kubernetes,aws,gcp,azure,oci,nebius,lambda,runpod,fluidstack,paperspace,cudo,ibm,scp,seeweb,shadeform,vast,verda]>=0.13.0",
@@ -64,14 +88,24 @@ dev = [
 
 [tool.uv]
 prerelease = "allow"
-# Lockfile-only. prerelease="allow" is needed for SkyPilot's Azure SDK betas, but would also
-# make uv lock dev builds of Modal and the optional [vast] SDK. Keep those on stable releases.
-# Does not affect published wheel metadata (the declared extras ranges stay broad).
-constraint-dependencies = ["modal==1.6.0", "vastai-sdk<1.0.0.dev0"]
+# Lockfile-only. prerelease="allow" is required because SkyPilot's Azure dependency chain
+# (via azure-cli) strictly pins Azure SDK beta releases (e.g. azure-batch==15.0.0b1).
+# To keep core, worker, and provider packages on verified stable releases, we constrain
+# known sensitive dependencies.
+constraint-dependencies = [
+    "modal==1.6.0",
+    "vastai-sdk<1.0.0.dev0",
+    "lxml<6.0.0",
+    "sentry-sdk<3.0.0",
+    "colorful<0.6.0",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/inferweave/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [

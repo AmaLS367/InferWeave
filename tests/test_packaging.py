@@ -92,3 +92,55 @@ def test_wheel_metadata_check_rejects_unbounded_httpx(tmp_path, built_wheel):
 
     with pytest.raises(SystemExit, match="httpx"):
         _load_smoke().check_metadata(str(tampered))
+
+
+def test_wheel_metadata_check_rejects_broad_modal_bound(tmp_path, built_wheel):
+    """Expanding the modal range to untested versions must fail the metadata check."""
+    tampered = tmp_path / built_wheel.name
+    with zipfile.ZipFile(built_wheel) as src, zipfile.ZipFile(tampered, "w") as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename.endswith(".dist-info/METADATA"):
+                data = data.replace(b"modal<1.7,>=1.6", b"modal<2.0,>=1.3.0")
+                data = data.replace(b"modal>=1.6,<1.7", b"modal>=1.3.0,<2.0")
+            dst.writestr(item, data)
+
+    with pytest.raises(SystemExit, match="Modal"):
+        _load_smoke().check_metadata(str(tampered))
+
+
+def test_version_single_sourced_and_matches_distribution_metadata():
+    """Package version must be defined in one place and match importlib metadata."""
+    import importlib.metadata
+
+    import inferweave
+
+    version = inferweave.__version__
+    assert version == "0.1.0"
+    dist_version = importlib.metadata.version("inferweave")
+    assert version == dist_version
+
+
+def test_pyproject_constrains_modal_to_tested_range():
+    """pyproject.toml must declare the tested range modal>=1.6,<1.7."""
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    (spec,) = [
+        Requirement(dep)
+        for dep in project["optional-dependencies"]["modal"]
+        if dep.lower().startswith("modal")
+    ]
+    assert spec.specifier.contains("1.6.0")
+    assert not spec.specifier.contains("1.7.0")
+    assert not spec.specifier.contains("2.0.0")
+
+
+def test_pyproject_metadata_completeness():
+    """Ensures mandatory PyPI metadata is factual, valid, and fully declared."""
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    assert project.get("license") == "Apache-2.0"
+    assert "LICENSE" in project.get("license-files", [])
+    assert any(a.get("name") == "AmaLS367" for a in project.get("authors", []))
+    urls = project.get("urls", {})
+    assert urls.get("Repository") == "https://github.com/AmaLS367/InferWeave"
+    assert urls.get("Issues") == "https://github.com/AmaLS367/InferWeave/issues"
+    assert "Typing :: Typed" in project.get("classifiers", [])

@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from inferweave import AutostopAction, InferWeave, WorkloadType
+from inferweave import AutostopAction, InferWeave, WorkloadType, __version__
 from inferweave.core.exceptions import (
     DeploymentNotFoundError,
     HealthcheckTimeoutError,
@@ -29,7 +29,7 @@ console = Console()
 def version_callback(value: bool) -> None:
     if value:
         console.print(
-            "[bold cyan]InferWeave CLI[/bold cyan] version [bold green]0.1.0[/bold green]"
+            f"[bold cyan]InferWeave CLI[/bold cyan] version [bold green]{__version__}[/bold green]"
         )
         raise typer.Exit()
 
