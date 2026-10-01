@@ -168,9 +168,9 @@ SkyPilot’s underlying execution engine relies on POSIX system primitives (`ter
 - [x] **Core Model Registry:** Pre-configured specs for popular Audio, LLM, Image, and Video models with separation of InferWeave IDs and external model repository artifacts.
 - [x] **Runtime Templates:**
   - LLM: `vLLM` (pinned versioned image `vllm/vllm-openai:v0.7.3`)
-  - Audio: `fish-speech` / `fish-s2-pro` (pinned `fishaudio/fish-speech:v1.5.1`)
-  - Image: `FLUX` via unified worker (pinned PyTorch base & bounded diffusers stack)
-  - Video: `WAN` 2.1 via unified worker (pinned PyTorch base & bounded diffusers/video stack)
+  - Audio: `fish-s2-pro` on `fish-speech-s2` (official `fishaudio/fish-speech:server-cuda-v2.0.0-beta`, weights pinned to an exact `fishaudio/s2-pro` revision); legacy Fish Speech v1.x models stay on `fish-speech` (`fishaudio/fish-speech:v1.5.1`)
+  - Image: `FLUX` via unified worker (pinned PyTorch base image, exact-pinned diffusers stack incl. transitive dependencies)
+  - Video: `WAN` 2.1 via unified worker (pinned PyTorch base image, exact-pinned diffusers/video stack incl. transitive dependencies)
   - Custom user-defined runtimes may specify arbitrary container images and dependencies
 - [x] **Smart Compute Routing:**
   - `provider="auto"` with `strategy="cheapest"`

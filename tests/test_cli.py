@@ -29,8 +29,7 @@ def test_cli_version():
     assert result.exit_code == 0
     # Rich may emit ANSI styling (e.g. under FORCE_COLOR); compare the plain text.
     unformatted = click.unstyle(result.stdout)
-    assert "0.1.0" in unformatted
-    assert inferweave.__version__ in unformatted
+    assert inferweave.__version__ in unformatted.split()
 
 
 def test_cli_models_list():

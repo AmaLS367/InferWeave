@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shlex
 import shutil
 import sys
 import uuid
@@ -218,7 +219,12 @@ class SkyPilotProvider(ComputeProvider):
         if provider_opts and provider_opts.extra_provider_args:
             workdir = provider_opts.extra_provider_args.get("workdir")
 
-        if workdir is None and runtime.run_command and "inferweave" in runtime.run_command:
+        # SkyPilot's Task.run is a shell string. It is built exclusively from the structured
+        # argv (every token shell-quoted), never from the free-form run_command, so model IDs,
+        # engine args and extra_cli_args stay literal arguments instead of shell fragments.
+        run_script = shlex.join(runtime.run_args)
+
+        if workdir is None and "inferweave" in run_script:
             workdir = resolve_worker_workdir()
 
 
@@ -229,7 +235,7 @@ class SkyPilotProvider(ComputeProvider):
         task = sky.Task(
             name=deployment_id,
             setup=setup_script,
-            run=runtime.run_command,
+            run=run_script,
             envs=task_envs,
             workdir=workdir,
         )

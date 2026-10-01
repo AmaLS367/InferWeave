@@ -10,6 +10,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from inferweave import __version__
+
 
 @dataclass
 class WorkerArgs:
@@ -97,13 +99,13 @@ def parse_worker_args(
 
 def create_base_app(
     title: str,
-    version: str = "0.1.0",
+    version: str | None = None,
     model_id: str = "",
     lifespan: Any = None,
     worker: Any | None = None,
 ) -> FastAPI:
     """Instantiates a FastAPI application with standardized healthcheck routes."""
-    app = FastAPI(title=title, version=version, lifespan=lifespan)
+    app = FastAPI(title=title, version=version or __version__, lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> Any:

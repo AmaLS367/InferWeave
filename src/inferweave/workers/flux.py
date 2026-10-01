@@ -177,7 +177,6 @@ def create_flux_app(worker: FluxWorker) -> Any:
 
     app = create_base_app(
         title="InferWeave FLUX Worker",
-        version="0.1.0",
         model_id=worker.args.model,
         lifespan=lifespan,
         worker=worker,

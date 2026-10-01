@@ -109,16 +109,53 @@ def test_wheel_metadata_check_rejects_broad_modal_bound(tmp_path, built_wheel):
         _load_smoke().check_metadata(str(tampered))
 
 
-def test_version_single_sourced_and_matches_distribution_metadata():
-    """Package version must be defined in one place and match importlib metadata."""
+def test_version_is_single_sourced_from_package_module():
+    """pyproject must not hardcode a version; Hatch reads it from inferweave/__init__.py."""
+    pyproject = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    assert "version" not in pyproject["project"]
+    assert "version" in pyproject["project"]["dynamic"]
+    assert pyproject["tool"]["hatch"]["version"]["path"] == "src/inferweave/__init__.py"
+
+
+def test_version_matches_distribution_metadata():
+    """__version__ and the installed distribution metadata must agree (no literal version)."""
     import importlib.metadata
 
     import inferweave
 
-    version = inferweave.__version__
-    assert version == "0.1.0"
-    dist_version = importlib.metadata.version("inferweave")
-    assert version == dist_version
+    assert inferweave.__version__
+    assert inferweave.__version__ == importlib.metadata.version("inferweave")
+
+
+def test_built_wheel_version_matches_package_version(built_wheel):
+    """The wheel METADATA Version (the artifact, not the source tree) equals __version__."""
+    import inferweave
+
+    assert _load_smoke().wheel_version(str(built_wheel)) == inferweave.__version__
+    assert f"inferweave-{inferweave.__version__}-" in built_wheel.name
+
+
+def test_cli_version_output_matches_package_version():
+    import click
+    from typer.testing import CliRunner
+
+    import inferweave
+    from inferweave.cli import app
+
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert inferweave.__version__ in click.unstyle(result.stdout).split()
+
+
+def test_wheel_smoke_does_not_hardcode_a_release_version():
+    """Release checks must validate relationships, not a literal like '0.1.0'."""
+    import re
+
+    import inferweave
+
+    source = SMOKE_SCRIPT.read_text(encoding="utf-8")
+    assert not re.search(r"""["']\d+\.\d+\.\d+["']""", source)
+    assert inferweave.__version__ not in source
 
 
 def test_pyproject_constrains_modal_to_tested_range():
@@ -140,7 +177,19 @@ def test_pyproject_metadata_completeness():
     assert project.get("license") == "Apache-2.0"
     assert "LICENSE" in project.get("license-files", [])
     assert any(a.get("name") == "AmaLS367" for a in project.get("authors", []))
-    urls = project.get("urls", {})
-    assert urls.get("Repository") == "https://github.com/AmaLS367/InferWeave"
-    assert urls.get("Issues") == "https://github.com/AmaLS367/InferWeave/issues"
+    assert project.get("urls") == {
+        "Homepage": "https://github.com/AmaLS367/InferWeave",
+        "Repository": "https://github.com/AmaLS367/InferWeave",
+        "Issues": "https://github.com/AmaLS367/InferWeave/issues",
+    }, "Only factual URLs; add Changelog only together with a real changelog document"
     assert "Typing :: Typed" in project.get("classifiers", [])
+
+
+def test_built_wheel_project_urls_are_factual(built_wheel):
+    from email.parser import Parser
+
+    with zipfile.ZipFile(built_wheel) as wheel:
+        name = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
+        metadata = Parser().parsestr(wheel.read(name).decode("utf-8"))
+    labels = {u.split(",", 1)[0].strip() for u in metadata.get_all("Project-URL") or []}
+    assert labels == {"Homepage", "Repository", "Issues"}

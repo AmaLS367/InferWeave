@@ -34,7 +34,6 @@ dependencies = [
 Homepage = "https://github.com/AmaLS367/InferWeave"
 Repository = "https://github.com/AmaLS367/InferWeave"
 Issues = "https://github.com/AmaLS367/InferWeave/issues"
-Changelog = "https://github.com/AmaLS367/InferWeave/blob/master/README.md"
 
 [project.scripts]
 inferweave = "inferweave.cli:app"

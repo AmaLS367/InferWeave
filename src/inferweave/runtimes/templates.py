@@ -1,10 +1,11 @@
 """Built-in runtime templates for Audio, LLM, Image, and Video workloads.
 
-Built-in production templates use reproducible, explicit version tags and pinned or bounded
-dependencies from ``inferweave.runtimes.manifest``. Custom user-defined templates can still
-choose their own arbitrary container images or mutable versions if desired.
+Built-in production templates use explicit container version tags and exact dependency pins
+from ``inferweave.runtimes.manifest``. Custom user-defined templates can still choose their own
+arbitrary container images or mutable versions if desired.
 """
 
+import re
 import shlex
 
 from inferweave.models.deployment import DeploymentRequest
@@ -13,8 +14,12 @@ from inferweave.runtimes.base import RuntimeSpec, RuntimeTemplate
 from inferweave.runtimes.manifest import (
     ACCELERATE_SPEC,
     DIFFUSERS_SPEC,
+    DIFFUSION_TRANSITIVE_PINS,
     FASTAPI_SPEC,
+    FISH_S2_PRO_ARTIFACT,
+    FISH_S2_PRO_REVISION,
     FISH_SPEECH_IMAGE,
+    FISH_SPEECH_S2_IMAGE,
     IMAGEIO_FFMPEG_SPEC,
     IMAGEIO_SPEC,
     PROTOBUF_SPEC,
@@ -94,7 +99,7 @@ class VLLMTemplate(RuntimeTemplate):
 
 
 class FishSpeechTemplate(RuntimeTemplate):
-    """Runtime template for Fish Audio / Fish Speech TTS and voice cloning models."""
+    """Runtime template for legacy Fish Speech v1.x models. S2 models use ``FishSpeechS2Template``."""
 
     @property
     def name(self) -> str:
@@ -143,6 +148,76 @@ class FishSpeechTemplate(RuntimeTemplate):
         )
 
 
+class FishSpeechS2Template(RuntimeTemplate):
+    """Runtime template for Fish Audio S2 series models (e.g. ``fishaudio/s2-pro``).
+
+    S2 needs the Fish Speech v2 codebase (Dual-AR model, ModifiedDAC codec ``codec.pth``,
+    ``modded_dac_vq`` decoder config), which the v1.x image used by ``FishSpeechTemplate``
+    does not contain. Follows upstream: weights downloaded with ``hf download`` into
+    ``checkpoints/<name>``, server started with ``tools/api_server.py``, ``/v1/health``,
+    default port 8080. The official image keeps its uv environment in ``/app/.venv`` and
+    expects checkpoints under ``/app/checkpoints``; its entrypoint is bypassed here so the
+    structured argv is the only thing executed.
+    """
+
+    APP_DIR = "/app"
+
+    @property
+    def name(self) -> str:
+        return "fish-speech-s2"
+
+    @staticmethod
+    def _checkpoint_name(profile: ModelProfile) -> str:
+        base = profile.target_artifact.rsplit("/", 1)[-1]
+        base = re.sub(r"[^A-Za-z0-9._-]", "-", base)
+        return base if base.strip(".") else "s2-pro"
+
+    def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
+        port = profile.healthcheck.port or 8080
+        checkpoint_dir = f"{self.APP_DIR}/checkpoints/{self._checkpoint_name(profile)}"
+        cmd_parts = [
+            f"{self.APP_DIR}/.venv/bin/python",
+            f"{self.APP_DIR}/tools/api_server.py",
+            "--listen",
+            f"0.0.0.0:{port}",
+            "--llama-checkpoint-path",
+            checkpoint_dir,
+            "--decoder-checkpoint-path",
+            f"{checkpoint_dir}/codec.pth",
+            "--decoder-config-name",
+            "modded_dac_vq",
+        ]
+        runtime_opts = request.options.runtime if request.options else None
+        if runtime_opts:
+            cmd_parts.extend(runtime_opts.to_cli_args())
+            extra_env = runtime_opts.extra_env
+        else:
+            extra_env = {}
+
+        env = {**profile.default_env, **request.env, **extra_env}
+
+        download = [
+            f"{self.APP_DIR}/.venv/bin/hf",
+            "download",
+            profile.target_artifact,
+            "--local-dir",
+            checkpoint_dir,
+        ]
+        if profile.target_artifact == FISH_S2_PRO_ARTIFACT:
+            download.extend(["--revision", FISH_S2_PRO_REVISION])
+
+        return RuntimeSpec(
+            name=self.name,
+            docker_image=FISH_SPEECH_S2_IMAGE,
+            setup_commands=[shlex.join(download)],
+            run_command=shlex.join(cmd_parts),
+            run_args=cmd_parts,
+            port=port,
+            env_vars=env,
+            healthcheck_path="/v1/health",
+        )
+
+
 class FluxDiffusersTemplate(RuntimeTemplate):
     """Runtime template for FLUX image synthesis via Diffusers."""
 
@@ -171,10 +246,18 @@ class FluxDiffusersTemplate(RuntimeTemplate):
         cmd = shlex.join(cmd_parts)
         env = {**profile.default_env, **request.env, **extra_env}
 
-        setup_pip = (
-            f"pip install {DIFFUSERS_SPEC} {TRANSFORMERS_SPEC} {ACCELERATE_SPEC} "
-            f"{SENTENCEPIECE_SPEC} {PROTOBUF_SPEC} {FASTAPI_SPEC} {UVICORN_SPEC}"
-        )
+        setup_pip = shlex.join([
+            "pip",
+            "install",
+            DIFFUSERS_SPEC,
+            TRANSFORMERS_SPEC,
+            ACCELERATE_SPEC,
+            SENTENCEPIECE_SPEC,
+            PROTOBUF_SPEC,
+            FASTAPI_SPEC,
+            UVICORN_SPEC,
+            *DIFFUSION_TRANSITIVE_PINS,
+        ])
 
         return RuntimeSpec(
             name=self.name,
@@ -216,11 +299,20 @@ class WanVideoTemplate(RuntimeTemplate):
         cmd = shlex.join(cmd_parts)
         env = {**profile.default_env, **request.env, **extra_env}
 
-        setup_pip = (
-            f"pip install {DIFFUSERS_SPEC} {TRANSFORMERS_SPEC} {ACCELERATE_SPEC} "
-            f"{SENTENCEPIECE_SPEC} {PROTOBUF_SPEC} {FASTAPI_SPEC} {UVICORN_SPEC} "
-            f"{IMAGEIO_SPEC} {IMAGEIO_FFMPEG_SPEC}"
-        )
+        setup_pip = shlex.join([
+            "pip",
+            "install",
+            DIFFUSERS_SPEC,
+            TRANSFORMERS_SPEC,
+            ACCELERATE_SPEC,
+            SENTENCEPIECE_SPEC,
+            PROTOBUF_SPEC,
+            FASTAPI_SPEC,
+            UVICORN_SPEC,
+            IMAGEIO_SPEC,
+            IMAGEIO_FFMPEG_SPEC,
+            *DIFFUSION_TRANSITIVE_PINS,
+        ])
 
         return RuntimeSpec(
             name=self.name,
@@ -237,6 +329,7 @@ class WanVideoTemplate(RuntimeTemplate):
 _BUILTIN_TEMPLATES: dict[str, RuntimeTemplate] = {
     "vllm": VLLMTemplate(),
     "fish-speech": FishSpeechTemplate(),
+    "fish-speech-s2": FishSpeechS2Template(),
     "flux-diffusers": FluxDiffusersTemplate(),
     "wan-video": WanVideoTemplate(),
 }

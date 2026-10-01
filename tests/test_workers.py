@@ -290,28 +290,30 @@ async def test_wan_worker_fail_closed_on_load_error():
         assert "WAN pipeline is not loaded" in gen_resp.json()["detail"]
 
 
-def test_fish_speech_template_conforms_to_official_docs():
-    """Validates that Fish Speech template uses pinned version, decoder path, and /v1/health."""
+def test_legacy_fish_speech_template_keeps_v1_runtime():
+    """The legacy 'fish-speech' template stays on the v1.x image for pre-S2 models.
+
+    S2 models use FishSpeechS2Template (see tests/test_fish_s2_runtime.py).
+    """
     from inferweave.runtimes.manifest import FISH_SPEECH_IMAGE
     from inferweave.runtimes.templates import FishSpeechTemplate
 
     template = FishSpeechTemplate()
     profile = ModelProfile(
-        id="fishaudio/s2-pro",
-        name="Fish Speech S2 Pro",
+        id="fish-speech-1.5",
+        name="Fish Speech 1.5",
         workload_type=WorkloadType.AUDIO,
         default_runtime="fish-speech",
-        hardware=HardwareRequirements(min_vram_gb=24.0),
+        artifact_id="fishaudio/fish-speech-1.5",
+        hardware=HardwareRequirements(min_vram_gb=12.0),
         healthcheck=HealthcheckConfig(port=8080, path="/v1/health"),
     )
-    req = DeploymentRequest(model="fishaudio/s2-pro")
-    spec = template.render(profile, req)
+    spec = template.render(profile, DeploymentRequest(model="fish-speech-1.5"))
 
     assert spec.docker_image == FISH_SPEECH_IMAGE
     assert spec.docker_image == "fishaudio/fish-speech:v1.5.1"
     assert spec.healthcheck_path == "/v1/health"
-    assert "--llama-checkpoint-path checkpoints/fishaudio/s2-pro" in spec.run_command
-    assert "--decoder-checkpoint-path checkpoints/fishaudio/s2-pro/codec.pth" in spec.run_command
+    assert "--llama-checkpoint-path checkpoints/fish-speech-1.5" in spec.run_command
 
 
 def test_wan_video_template_includes_imageio_dependencies():
@@ -331,3 +333,49 @@ def test_wan_video_template_includes_imageio_dependencies():
     assert "imageio" in setup_joined
     assert "imageio-ffmpeg" in setup_joined
 
+
+
+def test_wan_worker_loads_wan_pipeline_without_nonexistent_auto_pipeline(monkeypatch):
+    """Regression: the loader imported diffusers.AutoPipelineForText2Video, which does not exist.
+
+    With only ``WanPipeline`` available (as in the pinned diffusers), load_pipeline must succeed.
+    """
+    import sys
+    import types
+
+    from inferweave.workers.base import WorkerArgs
+    from inferweave.workers.wan import WanWorker
+
+    loaded = {}
+
+    class FakePipe:
+        def to(self, device):
+            loaded["device"] = device
+
+    class FakeWanPipeline:
+        @staticmethod
+        def from_pretrained(model, **kwargs):
+            loaded["model"] = model
+            return FakePipe()
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = fake_torch.float16 = fake_torch.float32 = object()  # type: ignore[attr-defined]
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)  # type: ignore[attr-defined]
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.WanPipeline = FakeWanPipeline  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    worker = WanWorker(WorkerArgs(model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers", device="cpu"))
+    worker.load_pipeline()
+
+    assert worker.load_error is None
+    assert worker.is_loaded is True
+    assert loaded["model"] == "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+
+
+def test_worker_app_version_follows_package_version():
+    import inferweave
+    from inferweave.workers.base import create_base_app
+
+    assert create_base_app(title="t").version == inferweave.__version__

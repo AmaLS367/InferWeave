@@ -1,10 +1,33 @@
 """Domain models and value objects for structured runtime, provider, and deployment options."""
 
+import shlex
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from inferweave.domain.lifecycle import AutostopAction, AutostopPolicy
+
+
+def normalize_extra_cli_args(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalizes user-supplied extra CLI arguments into literal argv tokens.
+
+    A string is tokenized with ``shlex.split`` (quotes group tokens; nothing is ever executed
+    or expanded by a shell). A list/tuple is taken as already-tokenized and each element is
+    kept as one literal token. ``None`` yields no tokens. Anything else is rejected rather than
+    guessed at, so a raw string can never be spread into per-character arguments.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            return shlex.split(value)
+        except ValueError as err:
+            raise ValueError(f"Invalid extra_cli_args string {value!r}: {err}") from err
+    if isinstance(value, list | tuple):
+        return [str(arg) for arg in value]
+    raise TypeError(
+        f"extra_cli_args must be a string, list or tuple of strings, got {type(value).__name__}"
+    )
 
 
 class RuntimeOptions(BaseModel):
@@ -22,6 +45,11 @@ class RuntimeOptions(BaseModel):
         default_factory=dict,
         description="Additional environment variables injected into runtime container",
     )
+
+    @field_validator("extra_cli_args", mode="before")
+    @classmethod
+    def _normalize_extra_cli_args(cls, value: Any) -> list[str]:
+        return normalize_extra_cli_args(value)
 
     def to_cli_args(self) -> list[str]:
         """Converts structured engine arguments into formatted CLI flags."""
@@ -111,17 +139,14 @@ class DeploymentOptions(BaseModel):
         runtime_data = dict(raw.pop("runtime_args", None) or {})
         engine_args = dict(raw.pop("engine_args", None) or {})
         provider_data = dict(raw.pop("provider_args", None) or {})
-        raw_extra = (
-            raw.pop("extra_cli_args", None)
-            or raw.pop("extra_args", None)
-            or []
+        # Legacy top-level aliases and the nested runtime_args form share one normalizer.
+        extra_cli_args = [
+            *normalize_extra_cli_args(raw.pop("extra_cli_args", None)),
+            *normalize_extra_cli_args(raw.pop("extra_args", None)),
+        ]
+        nested_extra_cli_args = normalize_extra_cli_args(
+            runtime_data.get("extra_cli_args")
         )
-        if isinstance(raw_extra, str):
-            import shlex
-
-            extra_cli_args = shlex.split(raw_extra)
-        else:
-            extra_cli_args = [str(arg) for arg in raw_extra]
         extra_env = dict(raw.pop("extra_env", None) or {})
 
         # 1. Process Provider parameters
@@ -206,7 +231,7 @@ class DeploymentOptions(BaseModel):
 
         runtime_options = RuntimeOptions(
             engine_args={**runtime_data.get("engine_args", {}), **engine_args},
-            extra_cli_args=[*runtime_data.get("extra_cli_args", []), *extra_cli_args],
+            extra_cli_args=[*nested_extra_cli_args, *extra_cli_args],
             extra_env={**runtime_data.get("extra_env", {}), **extra_env},
         )
 

@@ -120,7 +120,7 @@ jobs:
         # Run outside the checkout so the source tree cannot shadow the installed package.
         working-directory: ${{ runner.temp }}
         run: |
-          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports
+          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports "$GITHUB_WORKSPACE"/dist/*.whl
           "$RUNNER_TEMP/smoke/bin/inferweave" --version
           "$RUNNER_TEMP/smoke/bin/inferweave" --help
       - name: Check installed wheel is PEP 561 type-discoverable

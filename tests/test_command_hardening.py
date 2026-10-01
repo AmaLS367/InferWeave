@@ -194,3 +194,60 @@ async def test_modal_provider_executes_with_shell_false():
         cmd_arg, kwargs = mock_popen.call_args
         assert cmd_arg[0] == ["python3", "-m", "app", "--param", "with space"]
         assert kwargs.get("shell") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ADVERSARIAL_PAYLOADS)
+async def test_skypilot_run_script_is_built_only_from_quoted_run_args(payload):
+    """SkyPilot's Task.run is a shell string: it must be shlex.join(run_args), never run_command.
+
+    A run_command that diverges from run_args (e.g. carrying an injected fragment) must be
+    ignored, and metacharacters inside structured args must stay quoted literal tokens.
+    """
+    from unittest.mock import MagicMock
+
+    from inferweave.providers.skypilot import SkyPilotProvider
+
+    run_args = ["python3", "-m", "server", "--model", payload, f"--tag={payload}"]
+    runtime = RuntimeSpec(
+        name="probe",
+        docker_image="python:3.11-slim",
+        run_command="python3 -m server && touch /tmp/pwned",  # must NOT reach SkyPilot
+        run_args=run_args,
+        port=8000,
+    )
+    profile = _make_profile("safe-model", "test/model")
+    provider = SkyPilotProvider(cloud_name="runpod")
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        await provider.deploy(
+            DeploymentRequest(model=profile.id, provider="runpod"), profile, runtime
+        )
+
+    _, task_kwargs = mock_sky.Task.call_args
+    run_script = task_kwargs["run"]
+    assert run_script == shlex.join(run_args)
+    assert shlex.split(run_script) == run_args
+
+
+@pytest.mark.parametrize("payload", ADVERSARIAL_PAYLOADS)
+def test_builtin_templates_run_command_is_exactly_joined_run_args(payload):
+    """For every built-in template, the shell form is derived solely from the argv form."""
+    from inferweave.runtimes.templates import _BUILTIN_TEMPLATES
+
+    for name, template in _BUILTIN_TEMPLATES.items():
+        profile = _make_profile("adv", payload, WorkloadType.LLM, name)
+        request = DeploymentRequest(
+            model="adv",
+            custom_args={"extra_cli_args": [payload], "runtime_args": {"extra_cli_args": f"--n {shlex.quote(payload)}"}},
+        )
+        spec = template.render(profile, request)
+        assert spec.run_command == shlex.join(spec.run_args), name
+        assert payload in spec.run_args, name

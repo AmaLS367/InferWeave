@@ -44,7 +44,7 @@ class ModelRegistry:
                 source="huggingface",
                 artifact_id="fishaudio/s2-pro",
                 workload_type=WorkloadType.AUDIO,
-                default_runtime="fish-speech",
+                default_runtime="fish-speech-s2",
                 hardware=HardwareRequirements(
                     min_vram_gb=24.0,
                     recommended_gpus=["L4", "RTX4090", "A100", "H100"],

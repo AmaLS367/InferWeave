@@ -80,7 +80,7 @@ class WanWorker:
 
         try:
             import torch  # type: ignore
-            from diffusers import AutoPipelineForText2Video  # type: ignore
+            from diffusers import WanPipeline  # type: ignore
 
             dtype_map = {
                 "bfloat16": torch.bfloat16,
@@ -108,14 +108,7 @@ class WanWorker:
                     )
 
             logger.info(f"Loading WAN pipeline from '{self.args.model}'...")
-            try:
-                from diffusers import WanPipeline  # type: ignore
-
-                self.pipe = WanPipeline.from_pretrained(self.args.model, **load_kwargs)
-            except (ImportError, AttributeError):
-                self.pipe = AutoPipelineForText2Video.from_pretrained(
-                    self.args.model, **load_kwargs
-                )
+            self.pipe = WanPipeline.from_pretrained(self.args.model, **load_kwargs)
 
             if self.args.device.startswith("cuda") and torch.cuda.is_available():
                 try:
@@ -202,7 +195,6 @@ def create_wan_app(worker: WanWorker) -> Any:
 
     app = create_base_app(
         title="InferWeave WAN Video Worker",
-        version="0.1.0",
         model_id=worker.args.model,
         lifespan=lifespan,
         worker=worker,
