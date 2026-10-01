@@ -219,6 +219,16 @@ INFERWEAVE_RUNPOD_INTEGRATION=1 RUNPOD_API_KEY=... \
   uv run --extra runpod pytest -m integration tests/test_runpod_integration.py -s
 ```
 
+### 🚀 Release Process
+
+Publishing to PyPI is automated via GitHub Actions using PyPI Trusted Publishing (OIDC):
+
+1. Ensure the CI suite is green on `master`.
+2. Set the package version in `src/inferweave/__init__.py`.
+3. Create and push a Git tag: `vX.Y.Z`.
+4. Publish a GitHub Release from that tag.
+5. GitHub Actions (`publish.yml`) verifies artifact metadata, validates that the release tag matches `inferweave.__version__`, and publishes the artifacts to PyPI via Trusted Publishing.
+
 ---
 
 ## 📄 License

@@ -1,0 +1,143 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/inferweave
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: publish
+
+      - name: Verify uv.lock is up to date
+        run: uv lock --check
+
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --no-project python - <<'EOF'
+          import os
+          import sys
+
+          tag = os.environ.get("RELEASE_TAG", "").strip()
+          if not tag:
+              sys.exit("Error: RELEASE_TAG environment variable is empty or not set.")
+
+          if not tag.startswith("v"):
+              sys.exit(f"Error: Release tag '{tag}' does not start with 'v' (expected format: vX.Y.Z).")
+
+          normalized_tag = tag[1:]
+
+          sys.path.insert(0, "src")
+          import inferweave
+
+          pkg_version = inferweave.__version__
+          print(f"Release tag:     {tag}")
+          print(f"Normalized tag:  {normalized_tag}")
+          print(f"Package version: {pkg_version}")
+
+          if normalized_tag != pkg_version:
+              sys.exit(
+                  f"Error: Release tag version mismatch! Tag is '{tag}' (normalized: '{normalized_tag}'), "
+                  f"but inferweave.__version__ is '{pkg_version}'."
+              )
+
+          print("Verification passed: release tag matches package version.")
+          EOF
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Validate built distribution artifacts
+        run: |
+          uv run --no-project python - <<'EOF'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "src")
+          import inferweave
+
+          sys.path.insert(0, ".github/scripts")
+          from wheel_smoke import wheel_version
+
+          pkg_version = inferweave.__version__
+          dist_dir = Path("dist")
+
+          wheels = list(dist_dir.glob("*.whl"))
+          tar_gzs = list(dist_dir.glob("*.tar.gz"))
+
+          print(f"Found wheels: {[w.name for w in wheels]}")
+          print(f"Found tar.gz: {[t.name for t in tar_gzs]}")
+
+          if not wheels:
+              sys.exit("Error: No wheel (.whl) found in dist/")
+          if len(wheels) != 1:
+              sys.exit(f"Error: Expected exactly 1 wheel in dist/, found {len(wheels)}: {wheels}")
+
+          if not tar_gzs:
+              sys.exit("Error: No sdist (.tar.gz) found in dist/")
+          if len(tar_gzs) != 1:
+              sys.exit(f"Error: Expected exactly 1 sdist in dist/, found {len(tar_gzs)}: {tar_gzs}")
+
+          wheel_path = str(wheels[0])
+          metadata_ver = wheel_version(wheel_path)
+          print(f"Wheel METADATA Version: {metadata_ver}")
+
+          if metadata_ver != pkg_version:
+              sys.exit(
+                  f"Error: Wheel METADATA version '{metadata_ver}' does not match "
+                  f"inferweave.__version__ '{pkg_version}'!"
+              )
+
+          expected_wheel_prefix = f"inferweave-{pkg_version}-"
+          if not wheels[0].name.startswith(expected_wheel_prefix):
+              sys.exit(
+                  f"Error: Wheel filename '{wheels[0].name}' does not start with '{expected_wheel_prefix}'"
+              )
+
+          expected_sdist_name = f"inferweave-{pkg_version}.tar.gz"
+          if tar_gzs[0].name != expected_sdist_name:
+              sys.exit(
+                  f"Error: Sdist filename '{tar_gzs[0].name}' does not match expected '{expected_sdist_name}'"
+              )
+
+          print("Verification passed: built distribution artifacts exist and match package version.")
+          EOF
+
+      - name: Check wheel metadata
+        run: uv run --no-project python .github/scripts/wheel_smoke.py metadata dist/*.whl
+
+      - name: Upload build artifacts for audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: inferweave-dist-${{ github.event.release.tag_name }}
+          path: dist/
+          retention-days: 7
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

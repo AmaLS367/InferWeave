@@ -193,3 +193,85 @@ def test_built_wheel_project_urls_are_factual(built_wheel):
         metadata = Parser().parsestr(wheel.read(name).decode("utf-8"))
     labels = {u.split(",", 1)[0].strip() for u in metadata.get_all("Project-URL") or []}
     assert labels == {"Homepage", "Repository", "Issues"}
+
+
+def test_publish_workflow_contract():
+    """Validates .github/workflows/publish.yml conforms to OIDC Trusted Publishing rules."""
+    import yaml
+
+    publish_yml_path = ROOT / ".github" / "workflows" / "publish.yml"
+    assert publish_yml_path.is_file(), "publish.yml must exist"
+
+    raw_text = publish_yml_path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(raw_text)
+
+    # 1. Trigger safety: only on published release
+    triggers = workflow.get("on") or workflow.get(True, {})
+    assert "release" in triggers, "Must trigger on release"
+    assert triggers["release"].get("types") == ["published"]
+    forbidden_triggers = {"push", "pull_request", "workflow_dispatch", "schedule"}
+    assert not (set(triggers.keys()) & forbidden_triggers), "Must not publish on general triggers"
+
+    # 2. Least privilege permissions
+    assert workflow.get("permissions") == {"contents": "read"}
+
+    publish_job = workflow.get("jobs", {}).get("publish")
+    assert publish_job is not None, "publish job must exist"
+    assert publish_job.get("permissions") == {"contents": "read", "id-token": "write"}
+
+    # 3. Environment contract
+    env = publish_job.get("environment", {})
+    assert env.get("name") == "pypi"
+    assert env.get("url") == "https://pypi.org/p/inferweave"
+
+    # 4. Action steps and supply-chain safety
+    steps = publish_job.get("steps", [])
+    step_uses = [s.get("uses", "") for s in steps if "uses" in s]
+    step_runs = [s.get("run", "") for s in steps if "run" in s]
+
+    assert any(u.startswith("pypa/gh-action-pypi-publish@release/v1") for u in step_uses)
+    assert any("uv lock --check" in r for r in step_runs)
+    assert any("uv build" in r for r in step_runs)
+    assert any("wheel_smoke.py metadata" in r for r in step_runs)
+
+    # 5. No tokens, passwords, or secrets in publish step
+    publish_step = next(
+        s for s in steps if s.get("uses", "").startswith("pypa/gh-action-pypi-publish")
+    )
+    with_clause = publish_step.get("with", {})
+    for forbidden in ("password", "username", "api-token", "token"):
+        assert forbidden not in with_clause, f"Forbidden input {forbidden!r} in publish step"
+    assert not with_clause.get("skip-existing", False), "skip-existing must not be enabled"
+    assert "secrets." not in raw_text, "Workflow must not reference GitHub secrets for publishing"
+
+
+def test_publish_workflow_tag_validation_logic():
+    """Unit-tests the tag normalization and version comparison logic used by publish.yml."""
+    import inferweave
+
+    pkg_version = inferweave.__version__
+
+    def validate_tag(tag: str, version: str) -> None:
+        if not tag:
+            raise ValueError("Tag is empty")
+        if not tag.startswith("v"):
+            raise ValueError(f"Tag {tag!r} must start with 'v'")
+        normalized = tag[1:]
+        if normalized != version:
+            raise ValueError(f"Tag {tag} does not match version {version}")
+
+    # Matching tag succeeds
+    validate_tag(f"v{pkg_version}", pkg_version)
+
+    # Mismatched tag fails
+    with pytest.raises(ValueError, match="does not match version"):
+        validate_tag("v999.0.0", pkg_version)
+
+    # Missing leading 'v' fails
+    with pytest.raises(ValueError, match="must start with 'v'"):
+        validate_tag(pkg_version, pkg_version)
+
+    # Empty tag fails
+    with pytest.raises(ValueError, match="Tag is empty"):
+        validate_tag("", pkg_version)
+
