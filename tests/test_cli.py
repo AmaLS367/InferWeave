@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
+import click
 from typer.testing import CliRunner
 
 from inferweave.cli import app
@@ -24,7 +25,8 @@ def test_cli_help():
 def test_cli_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    # Rich may emit ANSI styling (e.g. under FORCE_COLOR); compare the plain text.
+    assert "0.1.0" in click.unstyle(result.stdout)
 
 
 def test_cli_models_list():
