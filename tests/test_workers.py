@@ -295,7 +295,7 @@ def test_legacy_fish_speech_template_keeps_v1_runtime():
 
     S2 models use FishSpeechS2Template (see tests/test_fish_s2_runtime.py).
     """
-    from inferweave.runtimes.manifest import FISH_SPEECH_IMAGE
+    from inferweave.runtimes.manifest import BUILTIN_IMAGE_TAGS, FISH_SPEECH_IMAGE
     from inferweave.runtimes.templates import FishSpeechTemplate
 
     template = FishSpeechTemplate()
@@ -311,7 +311,8 @@ def test_legacy_fish_speech_template_keeps_v1_runtime():
     spec = template.render(profile, DeploymentRequest(model="fish-speech-1.5"))
 
     assert spec.docker_image == FISH_SPEECH_IMAGE
-    assert spec.docker_image == "fishaudio/fish-speech:v1.5.1"
+    assert spec.docker_image.startswith("fishaudio/fish-speech@sha256:")
+    assert BUILTIN_IMAGE_TAGS[spec.docker_image] == "fishaudio/fish-speech:v1.5.1"
     assert spec.healthcheck_path == "/v1/health"
     assert "--llama-checkpoint-path checkpoints/fish-speech-1.5" in spec.run_command
 

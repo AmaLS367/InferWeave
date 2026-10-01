@@ -158,6 +158,9 @@ class FishSpeechS2Template(RuntimeTemplate):
     default port 8080. The official image keeps its uv environment in ``/app/.venv`` and
     expects checkpoints under ``/app/checkpoints``; its entrypoint is bypassed here so the
     structured argv is the only thing executed.
+
+    Beta: upstream ships this runtime as the ``v2.0.0-beta`` pre-release. The ``fishaudio/s2-pro``
+    weights and this runtime are under Fish Audio's own license terms, not InferWeave's Apache-2.0.
     """
 
     APP_DIR = "/app"

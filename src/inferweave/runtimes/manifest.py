@@ -3,7 +3,8 @@
 Reproducibility policy for built-in InferWeave runtimes: the same InferWeave release must
 deploy the same runtime software later. Therefore:
 
-* Container images use explicit version tags (never ``:latest``).
+* Container images are pinned by immutable digest (``repo@sha256:...``), never by a mutable
+  tag, because tags can be repointed upstream.
 * Every direct Python dependency is pinned to an exact ``package==x.y.z`` version.
 * The transitive dependency closure of the diffusion/video worker stack is pinned as well
   (``DIFFUSION_TRANSITIVE_PINS``) so a later ``pip install`` cannot drift to newer
@@ -11,6 +12,7 @@ deploy the same runtime software later. Therefore:
 
 Trade-off: exact pins mean security and bug-fix updates to these packages arrive only with a
 new InferWeave release (re-resolve and re-test the lock, see below) instead of automatically.
+Third-party images, runtimes and model weights keep their upstream licenses (see README).
 Custom user-defined runtimes remain free to specify their own container images, mutable tags,
 or custom setup scripts.
 
@@ -25,15 +27,34 @@ Drop torch itself and its exclusive dependencies (triton, nvidia-*, sympy, mpmat
 jinja2, markupsafe): they are supplied by ``PYTORCH_IMAGE``.
 """
 
-# Base container images (explicit versioned tags, never :latest)
-VLLM_IMAGE = "vllm/vllm-openai:v0.7.3"
+# Base container images, pinned by immutable registry digest (``repo@sha256:...``). The
+# digests below were resolved from Docker Hub for the tag noted next to each one; all target
+# linux/amd64 (GPU clouds). Modal (``Image.from_registry``) and SkyPilot (``image_id="docker:..."``)
+# both consume the digest form verbatim. To bump an image: resolve the new tag's digest
+# (``docker buildx imagetools inspect <repo>:<tag>``), update the constant and
+# ``BUILTIN_IMAGE_TAGS``, and re-run the tests.
+#
+# vllm/vllm-openai:v0.7.3 (linux/amd64 manifest, built 2025-02-20)
+VLLM_IMAGE = "vllm/vllm-openai@sha256:4f4037303e8c7b69439db1077bb849a0823517c0f785b894dc8e96d58ef3a0c2"
 # Legacy Fish Speech v1.x runtime (pre-S2 models). Not compatible with S2 Pro.
-FISH_SPEECH_IMAGE = "fishaudio/fish-speech:v1.5.1"
+# fishaudio/fish-speech:v1.5.1 (OCI index; linux/amd64 manifest sha256:f39aa379c4fe9ccb150cb8eda9adb4b9e77869afd2778c9ebb0cd2b73f35ba05)
+FISH_SPEECH_IMAGE = "fishaudio/fish-speech@sha256:d561529dd89f63f8ae40fe4356da2b0a5e62047f175380b3466ead8b9cebf79f"
 # Official Fish Speech S2 server image (CUDA 12.6, Python 3.12, uv env in /app/.venv, checkpoints
 # expected under /app/checkpoints). Built from upstream tag v2.0.0-beta, the first release with
-# S2 Pro support (amd64 index digest sha256:882a5541959a3dc2ac7e72fee04a8c4e740cb282f2bdb6c282346b021b99bbf0).
-FISH_SPEECH_S2_IMAGE = "fishaudio/fish-speech:server-cuda-v2.0.0-beta"
-PYTORCH_IMAGE = "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime"
+# S2 Pro support. BETA: upstream still publishes v2.0.0-beta as a GitHub pre-release.
+# fishaudio/fish-speech:server-cuda-v2.0.0-beta (OCI index; linux/amd64 manifest sha256:f532bdb9953d9aec7ab8ffcb58146f256ef4a80b8c7af3a3641f3d5a5df3d286)
+FISH_SPEECH_S2_IMAGE = "fishaudio/fish-speech@sha256:882a5541959a3dc2ac7e72fee04a8c4e740cb282f2bdb6c282346b021b99bbf0"
+# pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime (linux/amd64 manifest, built 2024-07-24)
+PYTORCH_IMAGE = "pytorch/pytorch@sha256:393fa73fbcfd290b46483cebc29a284fcc10d5be493e3d4844f9781152c2daa4"
+
+# Human-readable upstream tag that each pinned digest above was resolved from. Informational
+# (and asserted by the tests); the digests are authoritative at deploy time.
+BUILTIN_IMAGE_TAGS: dict[str, str] = {
+    VLLM_IMAGE: "vllm/vllm-openai:v0.7.3",
+    FISH_SPEECH_IMAGE: "fishaudio/fish-speech:v1.5.1",
+    FISH_SPEECH_S2_IMAGE: "fishaudio/fish-speech:server-cuda-v2.0.0-beta",
+    PYTORCH_IMAGE: "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
+}
 
 # Fish Audio S2 Pro weights: Hugging Face repo and the immutable commit that matches
 # FISH_SPEECH_S2_IMAGE (checkpoint layout: sharded safetensors + codec.pth).

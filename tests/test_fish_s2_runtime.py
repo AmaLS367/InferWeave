@@ -21,6 +21,7 @@ from inferweave.models.profile import (
 )
 from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.manifest import (
+    BUILTIN_IMAGE_TAGS,
     FISH_S2_PRO_REVISION,
     FISH_SPEECH_IMAGE,
     FISH_SPEECH_S2_IMAGE,
@@ -48,7 +49,8 @@ def test_s2_runtime_is_not_the_legacy_v1_image(s2_profile):
         s2_profile, DeploymentRequest(model=s2_profile.id)
     )
     assert spec.docker_image == FISH_SPEECH_S2_IMAGE
-    assert spec.docker_image == "fishaudio/fish-speech:server-cuda-v2.0.0-beta"
+    assert spec.docker_image.startswith("fishaudio/fish-speech@sha256:")
+    assert BUILTIN_IMAGE_TAGS[spec.docker_image] == "fishaudio/fish-speech:server-cuda-v2.0.0-beta"
     assert spec.docker_image != FISH_SPEECH_IMAGE
     assert "v1." not in spec.docker_image
 

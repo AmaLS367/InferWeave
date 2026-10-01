@@ -167,11 +167,12 @@ SkyPilot’s underlying execution engine relies on POSIX system primitives (`ter
 
 - [x] **Core Model Registry:** Pre-configured specs for popular Audio, LLM, Image, and Video models with separation of InferWeave IDs and external model repository artifacts.
 - [x] **Runtime Templates:**
-  - LLM: `vLLM` (pinned versioned image `vllm/vllm-openai:v0.7.3`)
-  - Audio: `fish-s2-pro` on `fish-speech-s2` (official `fishaudio/fish-speech:server-cuda-v2.0.0-beta`, weights pinned to an exact `fishaudio/s2-pro` revision); legacy Fish Speech v1.x models stay on `fish-speech` (`fishaudio/fish-speech:v1.5.1`)
-  - Image: `FLUX` via unified worker (pinned PyTorch base image, exact-pinned diffusers stack incl. transitive dependencies)
-  - Video: `WAN` 2.1 via unified worker (pinned PyTorch base image, exact-pinned diffusers/video stack incl. transitive dependencies)
-  - Custom user-defined runtimes may specify arbitrary container images and dependencies
+  - Built-in runtime images are pinned by immutable `@sha256` digest (the upstream tag each digest was resolved from is recorded in `inferweave/runtimes/manifest.py`)
+  - LLM: `vLLM` (`vllm/vllm-openai:v0.7.3`)
+  - Audio: `fish-s2-pro` on `fish-speech-s2` (**beta** — upstream `fishaudio/fish-speech:server-cuda-v2.0.0-beta`, a GitHub pre-release; weights pinned to an exact `fishaudio/s2-pro` revision); legacy Fish Speech v1.x models stay on `fish-speech` (`fishaudio/fish-speech:v1.5.1`)
+  - Image: `FLUX` via unified worker (`pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`, exact-pinned diffusers stack incl. transitive dependencies)
+  - Video: `WAN` 2.1 via unified worker (same PyTorch base image, exact-pinned diffusers/video stack incl. transitive dependencies)
+  - Custom user-defined runtimes may specify arbitrary container images (including mutable tags) and dependencies
 - [x] **Smart Compute Routing:**
   - `provider="auto"` with `strategy="cheapest"`
   - `strategy="free_first"` (spot instances / community compute)
@@ -222,4 +223,14 @@ INFERWEAVE_RUNPOD_INTEGRATION=1 RUNPOD_API_KEY=... \
 
 ## 📄 License
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+InferWeave's source code is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+
+### Third-party licenses
+
+The Apache-2.0 license covers InferWeave's own source code only. It does **not** cover anything InferWeave deploys or references:
+
+- **Model weights** (including those named by the built-in model profiles) keep their upstream licenses.
+- **Container images and third-party runtimes** (vLLM, Fish Speech, PyTorch, and the Python packages installed into them) keep their upstream licenses.
+- You are responsible for reviewing and complying with the upstream terms of every model, image and runtime you deploy. This is not legal advice.
+
+**Fish Audio S2 Pro (`fish-s2-pro`):** the `fishaudio/s2-pro` weights are published under Fish Audio's own license (`fish-audio-research-license` on [Hugging Face](https://huggingface.co/fishaudio/s2-pro)), not Apache-2.0. The built-in S2 runtime is **beta**: it uses the upstream `v2.0.0-beta` pre-release of [fishaudio/fish-speech](https://github.com/fishaudio/fish-speech). Review the upstream model and runtime licenses before any production or commercial use.

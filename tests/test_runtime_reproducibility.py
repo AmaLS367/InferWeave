@@ -1,11 +1,15 @@
 """Tests verifying reproducibility of built-in runtime templates.
 
-Guarantees that built-in templates never regress to mutable `:latest` tags, unconstrained
+Guarantees that built-in templates never regress to mutable image tags (they must use
+immutable ``@sha256:`` digests; custom runtimes may still use tags), unconstrained
 `pip install -U` commands, or version ranges: built-in dependencies are pinned exactly.
 """
 
 import re
 import shlex
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import WorkloadType
@@ -18,6 +22,7 @@ from inferweave.runtimes import manifest
 from inferweave.runtimes.base import RuntimeSpec, RuntimeTemplate
 from inferweave.runtimes.templates import (
     _BUILTIN_TEMPLATES,
+    FishSpeechS2Template,
     FluxDiffusersTemplate,
     WanVideoTemplate,
 )
@@ -34,21 +39,40 @@ def _make_dummy_profile(workload: WorkloadType, runtime: str) -> ModelProfile:
     )
 
 
-def test_builtin_templates_have_no_latest_docker_tags():
-    """Built-in templates must pin specific container tags and forbid :latest."""
+_IMMUTABLE_IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+_MANIFEST_IMAGE_NAMES = ("VLLM_IMAGE", "FISH_SPEECH_IMAGE", "FISH_SPEECH_S2_IMAGE", "PYTORCH_IMAGE")
+
+
+def test_immutable_image_pattern_rejects_mutable_references():
+    """Guards the guard: tag-only references must fail the reproducibility check."""
+    digest = "sha256:" + "a" * 64
+    assert _IMMUTABLE_IMAGE.match(f"vllm/vllm-openai@{digest}")
+    for mutable in (
+        "vllm/vllm-openai:v0.7.3",
+        "vllm/vllm-openai:latest",
+        "vllm/vllm-openai",
+        f"vllm/vllm-openai:v0.7.3@{digest}",
+        "vllm/vllm-openai@sha256:abc123",
+        f"vllm/vllm-openai@sha1:{'a' * 40}",
+    ):
+        assert not _IMMUTABLE_IMAGE.match(mutable), mutable
+
+
+def test_builtin_templates_use_immutable_image_digests():
+    """Every built-in production runtime must reference its image by sha256 digest, not a tag."""
     request = DeploymentRequest(model="test-model")
+    pinned = {getattr(manifest, n) for n in _MANIFEST_IMAGE_NAMES}
     for name, template in _BUILTIN_TEMPLATES.items():
         profile = _make_dummy_profile(WorkloadType.LLM, name)
         spec = template.render(profile, request)
 
-        assert ":latest" not in spec.docker_image, (
-            f"Template '{name}' uses mutable tag in image: {spec.docker_image}"
+        assert _IMMUTABLE_IMAGE.match(spec.docker_image), (
+            f"Template '{name}' image is not digest-pinned (repo@sha256:<64 hex>): "
+            f"{spec.docker_image}"
         )
-        assert not spec.docker_image.endswith("latest"), (
-            f"Template '{name}' ends with mutable 'latest': {spec.docker_image}"
+        assert spec.docker_image in pinned, (
+            f"Template '{name}' bypasses the manifest image pins: {spec.docker_image}"
         )
-        # Must have a tag separator ':'
-        assert ":" in spec.docker_image, f"Template '{name}' has unversioned image: {spec.docker_image}"
 
 
 def test_builtin_templates_have_no_unconstrained_pip_upgrade():
@@ -96,11 +120,75 @@ def test_manifest_specs_are_exact_pins():
         assert _EXACT_PIN.match(pin), f"transitive pin {pin!r} is not exact"
 
 
-def test_manifest_images_have_explicit_non_latest_tags():
-    for name in ("VLLM_IMAGE", "FISH_SPEECH_IMAGE", "FISH_SPEECH_S2_IMAGE", "PYTORCH_IMAGE"):
+def test_manifest_images_are_immutable_digests_with_documented_source_tag():
+    images = [getattr(manifest, name) for name in _MANIFEST_IMAGE_NAMES]
+    assert len(set(images)) == len(images), "built-in runtimes must not share a digest by accident"
+    for name in _MANIFEST_IMAGE_NAMES:
         image = getattr(manifest, name)
-        _, _, tag = image.rpartition(":")
-        assert tag and tag != "latest" and "/" not in tag, f"{name}={image}"
+        assert _IMMUTABLE_IMAGE.match(image), f"{name}={image} is not repo@sha256:<64 hex>"
+
+        # The human-readable upstream tag the digest was resolved from is kept as metadata.
+        source = manifest.BUILTIN_IMAGE_TAGS[image]
+        repo, _, tag = source.rpartition(":")
+        assert repo == image.split("@")[0], f"{name}: source tag {source!r} is for another repo"
+        assert tag and tag != "latest", f"{name}: source tag {source!r} must be a version tag"
+    assert set(manifest.BUILTIN_IMAGE_TAGS) == set(images)
+
+
+def test_fish_s2_runtime_is_documented_as_beta():
+    """Upstream ships the S2 runtime as the v2.0.0-beta pre-release; keep that visible."""
+    assert manifest.BUILTIN_IMAGE_TAGS[manifest.FISH_SPEECH_S2_IMAGE].endswith("v2.0.0-beta")
+    assert "Beta" in (FishSpeechS2Template.__doc__ or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_name", _MANIFEST_IMAGE_NAMES)
+async def test_modal_receives_builtin_digest_reference_unchanged(image_name):
+    """Modal consumes the digest form: it must reach Image.from_registry verbatim."""
+    import modal
+
+    from inferweave.providers.modal_provider import ModalProvider
+
+    image = getattr(manifest, image_name)
+    runtime = RuntimeSpec(name="pinned", docker_image=image, run_command="true", port=8000)
+    profile = _make_dummy_profile(WorkloadType.LLM, "pinned")
+    request = DeploymentRequest(model=profile.id, provider="modal")
+
+    real_from_registry = modal.Image.from_registry
+    with (
+        patch("modal.Image.from_registry", side_effect=real_from_registry) as from_registry,
+        patch("modal.App.deploy", return_value=None),
+        patch("modal.Function.get_web_url", return_value="https://pinned.modal.run"),
+    ):
+        await ModalProvider().deploy(request, profile, runtime)
+
+    from_registry.assert_called_once()
+    assert from_registry.call_args.args[0] == image
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_name", _MANIFEST_IMAGE_NAMES)
+async def test_skypilot_receives_builtin_digest_reference_unchanged(image_name):
+    """SkyPilot consumes the digest form: image_id must be exactly ``docker:<repo>@sha256:...``."""
+    from inferweave.providers.skypilot import SkyPilotProvider
+
+    image = getattr(manifest, image_name)
+    runtime = RuntimeSpec(name="pinned", docker_image=image, run_command="true", port=8000)
+    profile = _make_dummy_profile(WorkloadType.LLM, "pinned")
+    request = DeploymentRequest(model=profile.id, provider="runpod", gpu_type="A100")
+
+    provider = SkyPilotProvider(cloud_name="runpod")
+    mock_sky = MagicMock()
+    mock_sky.launch = MagicMock(return_value=(1, None))
+    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
+    with (
+        patch.object(provider, "_ensure_supported_platform", return_value=None),
+        patch.object(provider, "_get_sky_module", return_value=mock_sky),
+    ):
+        await provider.deploy(request, profile, runtime)
+
+    _, res_kwargs = mock_sky.Resources.call_args
+    assert res_kwargs["image_id"] == f"docker:{image}"
 
 
 def test_transitive_pins_are_unique_and_do_not_conflict_with_direct_specs():
@@ -121,7 +209,7 @@ def test_numpy_stays_on_1x_for_torch_2_4():
     """torch 2.4.0 wheels fail to initialise NumPy 2.x ('_ARRAY_API not found')."""
     (numpy_pin,) = [p for p in manifest.DIFFUSION_TRANSITIVE_PINS if p.startswith("numpy==")]
     assert numpy_pin.split("==")[1].startswith("1.")
-    assert manifest.PYTORCH_IMAGE.startswith("pytorch/pytorch:2.4.0-")
+    assert manifest.BUILTIN_IMAGE_TAGS[manifest.PYTORCH_IMAGE].startswith("pytorch/pytorch:2.4.0-")
 
 
 def test_wan_runtime_installs_diffusers_with_wan_pipeline():

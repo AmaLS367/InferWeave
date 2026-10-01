@@ -14,7 +14,7 @@ class RuntimeSpec(BaseModel):
     """Concrete container configuration produced by a runtime template."""
 
     name: str = Field(..., description="Runtime template identifier, e.g. 'vllm'")
-    docker_image: str = Field(..., description="Container image repository and tag")
+    docker_image: str = Field(..., description="Container image reference: repository with a tag or an immutable @sha256 digest")
     setup_commands: list[str] = Field(
         default_factory=list, description="Commands executed before starting the server"
     )
