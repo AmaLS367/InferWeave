@@ -34,6 +34,14 @@ class ProviderRouter:
         self._last_decision: RoutingDecision | None = None
         self._register_default_providers()
 
+    def adopt_endpoint_auth(self, endpoint_auth: EndpointAuthPort) -> None:
+        """Gives providers that have no endpoint auth of their own the shared resolver."""
+        if self._endpoint_auth is None:
+            self._endpoint_auth = endpoint_auth
+        for provider in self._providers.values():
+            if getattr(provider, "endpoint_auth", False) is None:
+                provider.endpoint_auth = endpoint_auth  # type: ignore[attr-defined]
+
     @property
     def last_decision(self) -> RoutingDecision | None:
         """Returns the most recent RoutingDecision made during routing."""

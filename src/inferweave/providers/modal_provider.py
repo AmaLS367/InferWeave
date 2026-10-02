@@ -44,6 +44,15 @@ class ModalProvider(ComputeProvider):
         self._local_deployments: dict[str, dict[str, Any]] = {}
 
     @property
+    def endpoint_auth(self) -> EndpointAuthPort | None:
+        """Credential resolver used for the deploy-time proxy-token check."""
+        return self._endpoint_auth
+
+    @endpoint_auth.setter
+    def endpoint_auth(self, value: EndpointAuthPort | None) -> None:
+        self._endpoint_auth = value
+
+    @property
     def name(self) -> str:
         return "modal"
 

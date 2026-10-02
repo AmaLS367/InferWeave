@@ -208,6 +208,18 @@ class LifecycleService:
         await self._repository.save(record)
         self._last_persisted_activity[deployment_id] = current_time
 
+    def begin_request(self, deployment_id: str) -> None:
+        """Marks a long-running request as in flight so the idle timer cannot expire under it."""
+        state = self._states.get(deployment_id)
+        if state:
+            state.in_flight_requests += 1
+
+    def end_request(self, deployment_id: str) -> None:
+        """Marks an in-flight request as finished (never below zero)."""
+        state = self._states.get(deployment_id)
+        if state and state.in_flight_requests > 0:
+            state.in_flight_requests -= 1
+
     def record_activity(self, deployment_id: str, now: datetime | None = None) -> None:
         """Records client activity or request handling on the specified deployment, resetting idle timer."""
         current_time = now or datetime.now(UTC)

@@ -71,6 +71,8 @@ class InferWeave:
         self.endpoint_auth: EndpointAuthPort = endpoint_auth or default_endpoint_auth()
         self.registry = registry or ModelRegistry()
         self.router = router or ProviderRouter(endpoint_auth=self.endpoint_auth)
+        if router is not None and endpoint_auth is not None:
+            self.router.adopt_endpoint_auth(endpoint_auth)
         self.healthcheck_service = healthcheck_service or HealthcheckService()
         self.lifecycle_service = lifecycle_service or LifecycleService(
             healthcheck_service=self.healthcheck_service,
@@ -346,6 +348,8 @@ class InferWeave:
                 workload_type=profile.workload_type,
                 transport=transport,
                 on_activity=lambda: lifecycle.touch_activity(deployment.id),
+                on_request_start=lambda: lifecycle.begin_request(deployment.id),
+                on_request_end=lambda: lifecycle.end_request(deployment.id),
             )
 
     async def attach(self, deployment_id: str) -> Deployment:

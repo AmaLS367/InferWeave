@@ -22,6 +22,7 @@ from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.healthcheck import ProbeResult
 from inferweave.domain.options import DeploymentOptions, RuntimeOptions
 from inferweave.models.enums import DeploymentState
+from inferweave.providers.router import ProviderRouter
 
 SECRETS = (TEST_PROXY_TOKEN_ID, TEST_PROXY_TOKEN_SECRET)
 WAV = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 16
@@ -331,3 +332,27 @@ async def test_sdk_level_endpoint_auth_satisfies_modal_provider_check(
     weave = make_weave(db_path, endpoint_auth=auth)
     dep = await deploy_on_modal(weave)
     assert dep.endpoint_url == ENDPOINT
+
+
+@pytest.mark.asyncio
+async def test_sdk_level_endpoint_auth_reaches_a_user_supplied_router(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_ID")
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_SECRET")
+    auth = ModalProxyAuth(token_id="wk-from-code", token_secret="ws-from-code")
+    weave = InferWeave(router=ProviderRouter(), endpoint_auth=auth)
+    dep = await deploy_on_modal(weave)
+    assert dep.endpoint_url == ENDPOINT
+
+
+@pytest.mark.asyncio
+async def test_router_provider_with_its_own_auth_is_not_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_ID")
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_SECRET")
+    own = ModalProxyAuth(token_id="wk-own", token_secret="ws-own")
+    router = ProviderRouter(endpoint_auth=own)
+    InferWeave(router=router, endpoint_auth=ModalProxyAuth(token_id="wk-sdk", token_secret="ws-sdk"))
+    assert router.get("modal").endpoint_auth is own  # type: ignore[attr-defined]

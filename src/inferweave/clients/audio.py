@@ -40,7 +40,9 @@ def _is_valid_audio(data: bytes, audio_format: str) -> bool:
     if audio_format == "wav":
         return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
     if audio_format == "mp3":
-        return data[:3] == b"ID3" or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0)
+        return data[:3] == b"ID3" or (
+            len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+        )
     return True  # pcm is headerless
 
 

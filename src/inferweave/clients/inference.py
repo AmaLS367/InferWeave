@@ -25,6 +25,9 @@ class InferenceClient:
       and again **when it finishes, whether it succeeded or failed**. A request that merely
       hits a cold or failing endpoint is still real demand, and a long render must not leave
       the deployment looking idle for its whole duration.
+    * While a call is running it is also tracked as *in flight*, and a deployment with an
+      in-flight request is never idle, however long the request takes. The idle timer
+      restarts when the call ends.
     * Calls rejected up front (``UnsupportedWorkloadError``) are not activity.
     * Individual retry attempts are not counted separately; they sit inside the call.
     * Activity reporting is best-effort: a failing callback never fails an inference call.
@@ -36,11 +39,15 @@ class InferenceClient:
         workload_type: WorkloadType | None,
         transport: InferenceTransport,
         on_activity: ActivityCallback | None = None,
+        on_request_start: Callable[[], None] | None = None,
+        on_request_end: Callable[[], None] | None = None,
     ) -> None:
         self.deployment_id = deployment_id
         self.workload_type = workload_type
         self._transport = transport
         self._on_activity = on_activity
+        self._on_request_start = on_request_start
+        self._on_request_end = on_request_end
         self._audio = FishSpeechClient(transport)
         self._image = ImageGenerationClient(transport)
 
@@ -69,11 +76,23 @@ class InferenceClient:
 
     @asynccontextmanager
     async def _activity(self) -> AsyncIterator[None]:
-        await self._report_activity()
+        self._notify(self._on_request_start)
         try:
+            await self._report_activity()
             yield
         finally:
+            self._notify(self._on_request_end)
             await self._report_activity()
+
+    def _notify(self, callback: Callable[[], None] | None) -> None:
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "In-flight tracking failed for deployment '%s': %s", self.deployment_id, err
+            )
 
     async def synthesize(
         self,

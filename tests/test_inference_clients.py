@@ -544,3 +544,51 @@ async def test_cold_start_through_deployment_handle_retries_with_configured_poli
     dep = await deploy_on_modal(weave)
     assert await dep.synthesize("hello") == WAV
     assert attempts["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_single_byte_mp3_response_is_invalid_not_index_error():
+    rec = Recorder(httpx.Response(200, content=b"\xff", headers={"content-type": "audio/mpeg"}))
+    with pytest.raises(InvalidInferenceResponseError):
+        await FishSpeechClient(make_transport(rec)).synthesize("hi", format="mp3")
+
+
+@pytest.mark.asyncio
+async def test_in_flight_request_is_never_idle_then_timer_restarts_after_it(db_path: Path):
+    seen: dict[str, object] = {}
+    weave_a = make_weave(db_path)
+    dep = await deploy_on_modal(weave_a, destroy_after_idle_mins=10)
+    lifecycle = weave_a.lifecycle_service
+
+    async def slow_render(request: httpx.Request) -> httpx.Response:
+        # The request outlives the whole 10 minute destroy window while still running.
+        later = datetime.now(UTC) + timedelta(hours=1)
+        seen["idle_during"] = lifecycle.is_idle(dep.id, now=later)
+        seen["stopped_during"] = await lifecycle.check_and_autostop(dep.id, now=later)
+        return wav_response()
+
+    weave = make_weave(db_path, handler=slow_render)
+    handle = await weave.attach(dep.id)
+    lifecycle = weave.lifecycle_service
+    assert await handle.synthesize("hello") == WAV
+
+    assert seen == {"idle_during": False, "stopped_during": False}
+    state = lifecycle.get_state(dep.id)
+    assert state is not None and state.in_flight_requests == 0
+    # Once the call has ended the destroy timer runs again, counted from the call's end.
+    assert lifecycle.is_idle(dep.id, now=datetime.now(UTC) + timedelta(hours=1)) is True
+    await weave.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_request_releases_in_flight_marker(db_path: Path):
+    weave_a = make_weave(db_path)
+    dep = await deploy_on_modal(weave_a, destroy_after_idle_mins=10)
+
+    weave = make_weave(db_path, handler=lambda _: httpx.Response(422, text="bad"))
+    handle = await weave.attach(dep.id)
+    with pytest.raises(InferenceError):
+        await handle.synthesize("hello")
+    state = weave.lifecycle_service.get_state(dep.id)
+    assert state is not None and state.in_flight_requests == 0
+    await weave.close()
