@@ -70,6 +70,9 @@ def check_metadata(wheel_path: str) -> None:
     if httpx_specs != {frozenset({">=0.28.1", "<1.0"})}:
         sys.exit(f"httpx must be constrained to '>=0.28.1,<1.0', got: {mandatory}")
 
+    if not any(r.lower().startswith("msgpack") for r in mandatory):
+        sys.exit("MessagePack must be a mandatory runtime dependency for audio inference")
+
     version = wheel_version(wheel_path)
     print(f"Wheel METADATA Version: {version}")
 
@@ -104,17 +107,23 @@ def check_metadata(wheel_path: str) -> None:
     print("Metadata OK: SkyPilot and Modal only via extras, httpx<1.0 bounded, modal range tested, py.typed packaged.")
 
 
-def check_imports(wheel_path: str | None = None) -> None:
+def check_imports(wheel_path: str | None = None, *, with_modal: bool = False) -> None:
     import importlib.metadata
     import importlib.util
     from importlib.metadata import entry_points
 
-    for sdk in ("sky", "modal"):
+    for sdk in (("sky",) if with_modal else ("sky", "modal")):
         if importlib.util.find_spec(sdk) is not None:
             sys.exit(f"'{sdk}' is installed; the base wheel must not pull provider SDKs")
+    if with_modal and importlib.util.find_spec("modal") is None:
+        sys.exit("Modal extra smoke requires the Modal SDK to be installed")
 
     import inferweave
     from inferweave import InferWeave
+
+    for name in inferweave.__all__:
+        if getattr(inferweave, name) is None:
+            sys.exit(f"Missing public export: {name}")
 
     if not inferweave.__version__:
         sys.exit("inferweave.__version__ is empty")
@@ -166,8 +175,13 @@ def check_typed() -> None:
     if not (package_dir / "py.typed").is_file():
         sys.exit(f"{package_dir} has no py.typed; installed package is not type-discoverable")
 
-    snippet = """from inferweave import InferWeave
+    snippet = """from typing import assert_type
+from inferweave import InferWeave, Deployment, InferenceConfig, ReferenceAudio
 reveal_type(InferWeave().list_deployments())
+async def inference(deployment: Deployment) -> None:
+    assert_type(await deployment.synthesize("hi", references=[ReferenceAudio(b"audio", "text")]), bytes)
+    assert_type(await deployment.render("fox"), list[bytes])
+    assert_type(await InferWeave(inference_config=InferenceConfig()).attach("id"), Deployment)
 """
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe.py"
@@ -180,6 +194,8 @@ reveal_type(InferWeave().list_deployments())
             check=False,
         )
     print(result.stdout)
+    if result.returncode != 0:
+        sys.exit(f"Installed API type check failed: {result.stderr}")
     if "py.typed" in result.stdout or "missing library stubs" in result.stdout:
         sys.exit("mypy does not treat the installed inferweave as a typed package")
     if "list[inferweave.models.deployment.Deployment]" not in result.stdout:
@@ -192,6 +208,8 @@ if __name__ == "__main__":
         check_metadata(sys.argv[2])
     elif len(sys.argv) in (2, 3) and sys.argv[1] == "imports":
         check_imports(sys.argv[2] if len(sys.argv) == 3 else None)
+    elif len(sys.argv) in (2, 3) and sys.argv[1] == "imports-modal":
+        check_imports(sys.argv[2] if len(sys.argv) == 3 else None, with_modal=True)
     elif len(sys.argv) == 2 and sys.argv[1] == "typed":
         check_typed()
     else:

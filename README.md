@@ -29,29 +29,68 @@ Deploying open-weight AI models into production is notoriously complex:
 
 **InferWeave hides all infrastructural complexity behind a unified Python interface:**
 
+Configure account and Proxy Token credentials using the [TTS tutorial](docs/tutorials/first-tts-on-modal.md), then:
+
+<!-- example: tts -->
 ```python
+"""Run with python examples/tts.py after configuring Modal and proxy credentials."""
+
 import asyncio
+from pathlib import Path
+
 from inferweave import InferWeave
 
 
-async def main():
+async def main() -> None:
     weave = InferWeave()
+    deployment = None
+    try:
+        deployment = await weave.deploy(
+            model="fish-s2-pro",
+            provider="modal",
+            custom_args={"cleanup_on_failure": True},
+        )
+        audio = await deployment.synthesize("Hello from InferWeave", format="wav")
+        Path("speech.wav").write_bytes(audio)
+    finally:
+        try:
+            if deployment is not None:
+                await deployment.stop()
+        finally:
+            await weave.close()
 
-    # Deploy an audio voice model directly to RunPod
-    deployment = await weave.deploy(
-        model="fish-s2-pro",
-        provider="runpod",
-    )
 
-    print(f"Endpoint live at: {deployment.endpoint_url}")
-
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
 
 InferWeave automatically handles model profile detection, VRAM budgeting, container runtime templates, healthcheck polling, and endpoint proxying.
 
 ---
+
+## Inference, recovery and lifecycle
+
+`await weave.attach(id)` rebuilds a handle after restart; `await weave.find(model=...,
+provider=...)` reuses a unique active deployment from SQLite. Ambiguity raises
+`AmbiguousDeploymentError`. Mount the database directory in persistent services.
+
+Modal endpoints are protected by default. SDK credentials provision resources; separate
+`MODAL_PROXY_TOKEN_ID`/`MODAL_PROXY_TOKEN_SECRET` authenticate probes/inference.
+Scale-to-zero releases idle GPU containers while keeping the app reusable;
+`destroy_after_idle_mins` stops the entire app. `close()` releases local resources.
+
+## Documentation and examples
+
+- [First TTS on Modal](docs/tutorials/first-tts-on-modal.md)
+- [Generate images](docs/how-to/generate-an-image.md)
+- [Recover deployments](docs/how-to/reuse-deployments-across-restarts.md)
+- [Secure endpoints](docs/how-to/secure-your-endpoint.md)
+- [Handle cold starts](docs/how-to/handle-cold-starts.md)
+- [Long-lived services](docs/how-to/run-in-a-long-lived-service.md)
+- [API](docs/reference/client-api.md), [configuration](docs/reference/configuration.md), [models](docs/reference/supported-models.md)
+- [Architecture](docs/explanation/architecture.md), [lifecycle and cost](docs/explanation/lifecycle-and-cost.md)
+- [Runnable examples](examples/README.md), [changelog](CHANGELOG.md)
 
 ## 🏗️ Architecture
 
@@ -74,7 +113,7 @@ InferWeave automatically handles model profile detection, VRAM budgeting, contai
 │ • LLM (vLLM)  │                       │   RunPod/Vast │
 │ • Image (FLUX)│                       │   AWS/GCP/etc.│
 │ • Video (WAN) │                       │ • Modal       │
-│ • Custom      │                       │ • Local GPU   │
+│ • Custom      │                       │ • Cloud GPUs  │
 └───────────────┘                       └───────────────┘
 ```
 
@@ -177,7 +216,7 @@ SkyPilot’s underlying execution engine relies on POSIX system primitives (`ter
   - `provider="auto"` with `strategy="cheapest"`
   - `strategy="free_first"` (spot instances / community compute)
   - Latency and VRAM-aware GPU matching and validation.
-- [ ] **Unified Client Protocol:** Standardized `.generate()`, `.synthesize()`, and `.render()` methods.
+- [x] **Unified Client Protocol:** Audio `.synthesize()` and image `.render()` with typed errors, authentication, retries and activity tracking. Unified LLM/video inference remains future work.
 - [x] **Lifecycle Management:** Auto-shutdown on idle, healthcheck polling, and persistent cross-process deployment state repository (`~/.inferweave/deployments.db`, SQLite with WAL mode, configurable via `INFERWEAVE_DEPLOYMENTS_PATH`).
 
 ---
@@ -191,13 +230,14 @@ InferWeave uses [`uv`](https://docs.astral.sh/uv/) for lightning-fast dependency
 git clone https://github.com/AmaLS367/InferWeave.git
 cd InferWeave
 
-# Setup virtual environment with all extras and dev dependencies
-uv sync --all-extras --group dev
+# Install extras needed for mocked tests and dev tools
+uv sync --extra modal --extra workers --group dev
 
 # Run linting and type checking
 uv run ruff check .
 uv run mypy src
-uv run pytest -m "not integration"
+uv run pytest -m "not integration" --strict-markers -ra
+uv run python examples/simulate.py
 ```
 
 #### Live integration tests (opt-in, spend real money)
@@ -207,8 +247,19 @@ cleanly unless explicitly enabled and configured:
 
 | Test | Required environment |
 | --- | --- |
-| `tests/test_modal_integration.py` | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` |
+| `tests/test_modal_integration.py` | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET` |
 | `tests/test_runpod_integration.py` | `INFERWEAVE_RUNPOD_INTEGRATION=1`, `RUNPOD_API_KEY` (or `~/.runpod/config.toml`), `inferweave[runpod]` on Linux/macOS/WSL2 |
+
+For local testing, copy [`.env.example`](.env.example) to `.env` and fill in the
+four Modal credentials. `.env` is ignored by Git. The library does not load it
+automatically; `uv` can load it for the test process:
+
+```bash
+uv run --env-file .env --extra modal pytest -m integration tests/test_modal_integration.py --strict-markers -ra
+```
+
+This test checks protected access, TTS output, recovery with a fresh SDK and
+deployment cleanup. It provisions a real GPU and incurs charges.
 
 The RunPod test also reads optional `INFERWEAVE_RUNPOD_GPU` (default `L4`),
 `INFERWEAVE_RUNPOD_MODEL` (default `facebook/opt-125m`), `INFERWEAVE_RUNPOD_READY_TIMEOUT_SECS`,

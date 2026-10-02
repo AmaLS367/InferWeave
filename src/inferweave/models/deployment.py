@@ -302,7 +302,10 @@ class Deployment:
         )
 
     def __repr__(self) -> str:
+        from inferweave.clients.transport import safe_endpoint
+
+        endpoint = safe_endpoint(self.endpoint_url) if self.endpoint_url else None
         return (
             f"<Deployment id='{self.id}' model='{self.model}' "
-            f"provider='{self.provider}' state='{self.state}' endpoint='{self.endpoint_url}'>"
+            f"provider='{self.provider}' state='{self.state}' endpoint='{endpoint}'>"
         )

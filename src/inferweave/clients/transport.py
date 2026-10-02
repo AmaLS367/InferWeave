@@ -7,6 +7,7 @@ an unauthenticated endpoint. It is deliberately usable on its own with ``httpx.M
 
 import asyncio
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -47,6 +48,10 @@ class InferenceConfig:
     retry_statuses: tuple[int, ...] = (502, 503)
 
     def __post_init__(self) -> None:
+        durations = (self.timeout_seconds, self.connect_timeout_seconds,
+                     self.backoff_base_seconds, self.backoff_max_seconds)
+        if not all(math.isfinite(value) for value in durations):
+            raise ValueError("Inference timeouts and backoff durations must be finite.")
         if self.timeout_seconds <= 0 or self.connect_timeout_seconds <= 0:
             raise ValueError("Inference timeouts must be positive.")
         if self.max_retries < 0:
@@ -61,7 +66,7 @@ def redact(text: str, secrets: Mapping[str, str] | list[str] | tuple[str, ...]) 
     """Replaces every known secret value in ``text`` with a placeholder."""
     values = secrets.values() if isinstance(secrets, Mapping) else secrets
     for value in values:
-        if value and len(value) >= 4:
+        if value:
             text = text.replace(value, "[REDACTED]")
     return text
 
@@ -102,7 +107,7 @@ class InferenceTransport:
     def __repr__(self) -> str:
         return (
             f"InferenceTransport(deployment_id={self.deployment_id!r}, "
-            f"endpoint={self._endpoint_fn()!r})"
+            f"endpoint={safe_endpoint(endpoint) if (endpoint := self._endpoint_fn()) else None!r})"
         )
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -226,6 +231,8 @@ class InferenceTransport:
             InferenceError: any other failure (including 4xx and refused redirects).
         """
         cfg = self.config
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("Inference timeout must be positive and finite.")
         request_timeout = httpx.Timeout(
             timeout if timeout is not None else cfg.timeout_seconds,
             connect=cfg.connect_timeout_seconds,

@@ -4,9 +4,11 @@ import logging
 import time
 from types import TracebackType
 from typing import Self
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from inferweave.clients.transport import redact, safe_endpoint
 from inferweave.domain.healthcheck import HealthEvaluator, ProbeResult
 from inferweave.ports.healthcheck import HealthcheckProbePort
 
@@ -56,54 +58,40 @@ class HttpxHealthcheckProbeAdapter(HealthcheckProbePort):
         timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 3.0))
 
         try:
-            response = await client.request(
-                method=method.upper(),
-                url=url,
-                timeout=timeout,
-                headers=headers or {},
-            )
+            origin = urlsplit(url)[:2]
+            for _ in range(6):
+                response = await client.request(
+                    method=method.upper(), url=url, timeout=timeout,
+                    headers=headers or {}, follow_redirects=False,
+                )
+                location = response.headers.get("location")
+                if not response.is_redirect or not location:
+                    break
+                target = urljoin(url, location)
+                if urlsplit(target)[:2] != origin:
+                    raise httpx.HTTPError("Refusing a cross-origin health probe redirect.")
+                url = target
+            else:
+                raise httpx.HTTPError("Too many health probe redirects.")
             latency = (time.perf_counter() - start) * 1000.0
             return self._evaluator.evaluate_probe(
                 status_code=response.status_code,
                 latency_ms=latency,
                 expected_status_codes=expected_status_codes,
             )
-        except httpx.TimeoutException as err:
-            latency = (time.perf_counter() - start) * 1000.0
-            logger.debug("Probe to '%s' timed out after %.2fms: %s", url, latency, err)
-            return self._evaluator.evaluate_probe(
-                latency_ms=latency,
-                error=err,
-                expected_status_codes=expected_status_codes,
-            )
-        except httpx.ConnectError as err:
-            latency = (time.perf_counter() - start) * 1000.0
-            logger.debug(
-                "Probe to '%s' failed to connect (%.2fms): %s", url, latency, err
-            )
-            return self._evaluator.evaluate_probe(
-                latency_ms=latency,
-                error=err,
-                expected_status_codes=expected_status_codes,
-            )
-        except httpx.HTTPError as err:
-            latency = (time.perf_counter() - start) * 1000.0
-            logger.debug("Probe to '%s' HTTP error (%.2fms): %s", url, latency, err)
-            return self._evaluator.evaluate_probe(
-                latency_ms=latency,
-                error=err,
-                expected_status_codes=expected_status_codes,
-            )
         except Exception as err:  # noqa: BLE001
             latency = (time.perf_counter() - start) * 1000.0
-            logger.debug(
-                "Probe to '%s' unexpected error (%.2fms): %s", url, latency, err
-            )
-            return self._evaluator.evaluate_probe(
-                latency_ms=latency,
-                error=err,
+            result = self._evaluator.evaluate_probe(
+                latency_ms=latency, error=err,
                 expected_status_codes=expected_status_codes,
             )
+            result.error_message = (result.error_message or "").replace(url, safe_endpoint(url))
+            result.error_message = redact(result.error_message, headers or {})
+            logger.debug(
+                "Probe to '%s' failed (%.2fms): %s", safe_endpoint(url), latency,
+                result.error_message,
+            )
+            return result
 
     async def close(self) -> None:
         """Closes the underlying HTTP client if managed internally."""

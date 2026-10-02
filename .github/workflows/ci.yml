@@ -123,6 +123,16 @@ jobs:
           "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports "$GITHUB_WORKSPACE"/dist/*.whl
           "$RUNNER_TEMP/smoke/bin/inferweave" --version
           "$RUNNER_TEMP/smoke/bin/inferweave" --help
+          uv pip check --python "$RUNNER_TEMP/smoke/bin/python"
+          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/examples/simulate.py"
+      - name: Install and smoke test Modal extra in a separate clean environment
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --no-config "$RUNNER_TEMP/smoke-modal" --python 3.12
+          WHEEL=$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)
+          uv pip install --no-config --python "$RUNNER_TEMP/smoke-modal/bin/python" "${WHEEL}[modal]"
+          "$RUNNER_TEMP/smoke-modal/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports-modal "$WHEEL"
+          uv pip check --python "$RUNNER_TEMP/smoke-modal/bin/python"
       - name: Check installed wheel is PEP 561 type-discoverable
         # mypy is only installed after the import smoke test so it cannot mask eager imports.
         working-directory: ${{ runner.temp }}

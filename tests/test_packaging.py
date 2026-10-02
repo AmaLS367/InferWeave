@@ -181,6 +181,7 @@ def test_pyproject_metadata_completeness():
         "Homepage": "https://github.com/AmaLS367/InferWeave",
         "Repository": "https://github.com/AmaLS367/InferWeave",
         "Issues": "https://github.com/AmaLS367/InferWeave/issues",
+        "Changelog": "https://github.com/AmaLS367/InferWeave/blob/master/CHANGELOG.md",
     }, "Only factual URLs; add Changelog only together with a real changelog document"
     assert "Typing :: Typed" in project.get("classifiers", [])
 
@@ -192,7 +193,8 @@ def test_built_wheel_project_urls_are_factual(built_wheel):
         name = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
         metadata = Parser().parsestr(wheel.read(name).decode("utf-8"))
     labels = {u.split(",", 1)[0].strip() for u in metadata.get_all("Project-URL") or []}
-    assert labels == {"Homepage", "Repository", "Issues"}
+    assert labels == {"Homepage", "Repository", "Issues", "Changelog"}
+    assert (ROOT / "CHANGELOG.md").is_file()
 
 
 def test_publish_workflow_contract():
@@ -275,3 +277,70 @@ def test_publish_workflow_tag_validation_logic():
     with pytest.raises(ValueError, match="Tag is empty"):
         validate_tag("", pkg_version)
 
+
+
+def test_release_keeps_all_0_1_public_exports():
+    """Snapshot of the published v0.1.0 public surface."""
+    import inferweave
+
+    legacy = {
+        "AsyncioWatchdogAdapter",
+        "AutostopAction",
+        "AutostopPolicy",
+        "AutostopWatchdogPort",
+        "ComputeProviderPort",
+        "Deployment",
+        "DeploymentError",
+        "DeploymentLifecycleEvaluator",
+        "DeploymentNotFoundError",
+        "DeploymentOptions",
+        "DeploymentRecord",
+        "DeploymentRepositoryPort",
+        "DeploymentRequest",
+        "DeploymentState",
+        "DeploymentStatus",
+        "GpuSpec",
+        "HardwareRequirements",
+        "HardwareValidator",
+        "HealthEvaluator",
+        "HealthcheckConfig",
+        "HealthcheckError",
+        "HealthcheckFailedError",
+        "HealthcheckProbePort",
+        "HealthcheckService",
+        "HealthcheckTimeoutError",
+        "HttpxHealthcheckProbeAdapter",
+        "InMemoryDeploymentRepository",
+        "InferWeave",
+        "InferWeaveError",
+        "InstanceOffer",
+        "InsufficientVramError",
+        "JsonDeploymentRepository",
+        "LifecycleService",
+        "LifecycleState",
+        "MockHealthcheckProbeAdapter",
+        "MockWatchdogAdapter",
+        "ModelNotFoundError",
+        "ModelProfile",
+        "ModelRegistry",
+        "NoFeasibleProviderError",
+        "ProbeOutcome",
+        "ProbeResult",
+        "ProviderNotFoundError",
+        "ProviderOptions",
+        "ProviderPlatformError",
+        "ProviderType",
+        "RankedOffer",
+        "ReadinessReport",
+        "ReadinessState",
+        "RoutingConstraints",
+        "RoutingDecision",
+        "RuntimeOptions",
+        "SqliteDeploymentRepository",
+        "UnknownGpuError",
+        "VramCheckResult",
+        "WorkloadType",
+    }
+    assert legacy <= set(inferweave.__all__)
+    for name in legacy:
+        assert getattr(inferweave, name) is not None

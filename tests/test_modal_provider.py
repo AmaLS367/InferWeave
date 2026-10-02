@@ -7,6 +7,7 @@ against a mocked Modal SDK, without executing live deployments on Modal cloud.
 import inspect
 import tomllib
 from pathlib import Path
+from threading import get_ident
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -67,12 +68,17 @@ async def test_modal_provider_deploy_success(sample_profile, sample_runtime):
         num_gpus=1,
         autostop_mins=15,
     )
+    event_loop_thread = get_ident()
+
+    def get_web_url():
+        assert get_ident() != event_loop_thread
+        return "https://workspace--iw-modal-test.modal.run"
 
     with patch("modal.App.deploy") as mock_deploy:
         mock_deploy.return_value = None
         with patch(
             "modal.Function.get_web_url",
-            return_value="https://workspace--iw-modal-test.modal.run",
+            side_effect=get_web_url,
         ):
             deployment = await provider.deploy(request, sample_profile, sample_runtime)
 
@@ -99,6 +105,84 @@ async def test_modal_provider_dry_run(sample_profile, sample_runtime):
         mock_deploy.assert_not_called()
         assert deployment.state == DeploymentState.PROVISIONING
         assert "dryrun" in (deployment.endpoint_url or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_setup_commands", [True, False])
+async def test_modal_image_build_steps_do_not_follow_local_mounts(
+    sample_profile, sample_runtime, has_setup_commands
+):
+    """Validate Modal's build-before-mount contract without contacting the cloud."""
+    import modal
+
+    run_commands = modal.Image.run_commands
+    env = modal.Image.env
+    entrypoint = modal.Image.entrypoint
+    add_source = modal.Image.add_local_python_source
+    function = modal.App.function
+    images = []
+    mounted_images = set()
+    entrypoints = []
+    if not has_setup_commands:
+        sample_runtime = sample_runtime.model_copy(update={"setup_commands": []})
+
+    def mounted_source(image, *args, **kwargs):
+        mounted = add_source(image, *args, **kwargs)
+        mounted_images.add(mounted)
+        return mounted
+
+    def validated_commands(image, *args, **kwargs):
+        # Modal rejects these chains during remote image resolution, after mounts load.
+        assert image not in mounted_images, "Build commands cannot follow local mounts"
+        return run_commands(image, *args, **kwargs)
+
+    def validated_env(image, *args, **kwargs):
+        assert image not in mounted_images, "Image ENV cannot follow local mounts"
+        return env(image, *args, **kwargs)
+
+    def capture_image(app, *args, **kwargs):
+        images.append(kwargs["image"])
+        return function(app, *args, **kwargs)
+
+    def validated_entrypoint(image, commands):
+        assert image not in mounted_images, "Image ENTRYPOINT cannot follow local mounts"
+        entrypoints.append(commands)
+        return entrypoint(image, commands)
+
+    with (
+        patch("modal.Image.run_commands", validated_commands),
+        patch("modal.Image.env", validated_env),
+        patch("modal.Image.entrypoint", validated_entrypoint),
+        patch("modal.Image.add_local_python_source", mounted_source),
+        patch("modal.App.function", capture_image),
+    ):
+        await ModalProvider().deploy(
+            DeploymentRequest(model=sample_profile.id, provider="modal", dry_run=True),
+            sample_profile,
+            sample_runtime,
+        )
+    assert len(images) == 1 and images[0] in mounted_images
+    assert entrypoints == [[]]  # InferWeave's structured argv starts the server.
+
+
+@pytest.mark.asyncio
+async def test_modal_provider_applies_runtime_registry_setup(sample_profile, sample_runtime):
+    """Bootstrap directives reach registry import before Modal inspects Python."""
+    import modal
+
+    commands = ["USER root", "RUN ln -sf /usr/bin/python3 /usr/local/bin/python"]
+    sample_runtime = sample_runtime.model_copy(
+        update={"metadata": {"modal_setup_dockerfile_commands": commands}}
+    )
+    with patch("modal.Image.from_registry", wraps=modal.Image.from_registry) as from_registry:
+        await ModalProvider().deploy(
+            DeploymentRequest(model=sample_profile.id, provider="modal", dry_run=True),
+            sample_profile,
+            sample_runtime,
+        )
+    from_registry.assert_called_once_with(
+        sample_runtime.docker_image, setup_dockerfile_commands=commands
+    )
 
 
 async def _deploy_live(provider, sample_profile, sample_runtime):
