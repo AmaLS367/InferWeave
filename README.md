@@ -250,6 +250,17 @@ cleanly unless explicitly enabled and configured:
 | `tests/test_modal_integration.py` | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET` |
 | `tests/test_runpod_integration.py` | `INFERWEAVE_RUNPOD_INTEGRATION=1`, `RUNPOD_API_KEY` (or `~/.runpod/config.toml`), `inferweave[runpod]` on Linux/macOS/WSL2 |
 
+For local testing, copy [`.env.example`](.env.example) to `.env` and fill in the
+four Modal credentials. `.env` is ignored by Git. The library does not load it
+automatically; `uv` can load it for the test process:
+
+```bash
+uv run --env-file .env --extra modal pytest -m integration tests/test_modal_integration.py --strict-markers -ra
+```
+
+This test checks protected access, TTS output, recovery with a fresh SDK and
+deployment cleanup. It provisions a real GPU and incurs charges.
+
 The RunPod test also reads optional `INFERWEAVE_RUNPOD_GPU` (default `L4`),
 `INFERWEAVE_RUNPOD_MODEL` (default `facebook/opt-125m`), `INFERWEAVE_RUNPOD_READY_TIMEOUT_SECS`,
 `INFERWEAVE_RUNPOD_AUTOSTOP_MINS` and `INFERWEAVE_RUNPOD_ALLOW_SPOT`; see the module docstring.
