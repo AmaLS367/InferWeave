@@ -137,7 +137,7 @@ class FishSpeechClient:
         if (
             "json" in content_type
             or "msgpack" in content_type
-            or "text/html" in content_type
+            or content_type.startswith("text/")
             or not _is_valid_audio(audio, format)
         ):
             raise InvalidInferenceResponseError(

@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from inferweave.adapters.healthcheck.httpx_probe import HttpxHealthcheckProbeAdapter
+from inferweave.clients.transport import safe_endpoint
 from inferweave.core.exceptions import HealthcheckError, HealthcheckTimeoutError
 from inferweave.domain.healthcheck import (
     HealthEvaluator,
@@ -136,7 +137,7 @@ class HealthcheckService:
         logger.info(
             "Starting readiness polling for deployment '%s' at '%s' (timeout=%ss, interval=%ss)",
             deployment_id or "unknown",
-            probe_url,
+            safe_endpoint(probe_url),
             total_timeout,
             config.probe_interval_seconds,
         )
@@ -196,7 +197,7 @@ class HealthcheckService:
                 logger.info(
                     "Deployment '%s' readiness verified at '%s' in %.2fs (%d probes)",
                     deployment_id or "unknown",
-                    probe_url,
+                    safe_endpoint(probe_url),
                     elapsed,
                     len(history),
                 )
@@ -223,11 +224,11 @@ class HealthcheckService:
             "Deployment '%s' readiness probe timed out after %.2fs at '%s'. Last error: %s",
             deployment_id or "unknown",
             elapsed,
-            probe_url,
+            safe_endpoint(probe_url),
             last_error,
         )
         raise HealthcheckTimeoutError(
-            endpoint_url=probe_url,
+            endpoint_url=safe_endpoint(probe_url),
             timeout_seconds=total_timeout,
             total_probes=len(history),
             last_error=last_error,

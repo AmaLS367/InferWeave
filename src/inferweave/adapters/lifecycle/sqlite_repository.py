@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from inferweave.domain.deployment_record import DeploymentRecord
@@ -30,7 +31,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
         """Initializes database directory and tables."""
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._get_connection() as conn:
+            with closing(self._get_connection()) as conn, conn:
                 conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute("PRAGMA synchronous=NORMAL;")
                 conn.execute(
@@ -63,7 +64,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
     def _save_sync(self, record: DeploymentRecord) -> None:
         sanitized = record.to_sanitized_record()
         data_json = sanitized.model_dump_json()
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO deployments (
@@ -99,7 +100,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
             conn.commit()
 
     def _get_sync(self, deployment_id: str) -> DeploymentRecord | None:
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn, conn:
             cursor = conn.execute("SELECT data_json FROM deployments WHERE id = ?;", (deployment_id,))
             row = cursor.fetchone()
             if not row:
@@ -112,7 +113,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
 
     def _list_all_sync(self) -> list[DeploymentRecord]:
         records: list[DeploymentRecord] = []
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn, conn:
             cursor = conn.execute("SELECT data_json FROM deployments ORDER BY created_at DESC;")
             for row in cursor.fetchall():
                 try:
@@ -122,12 +123,12 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
         return records
 
     def _delete_sync(self, deployment_id: str) -> None:
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn, conn:
             conn.execute("DELETE FROM deployments WHERE id = ?;", (deployment_id,))
             conn.commit()
 
     def _clear_sync(self) -> None:
-        with self._get_connection() as conn:
+        with closing(self._get_connection()) as conn, conn:
             conn.execute("DELETE FROM deployments;")
             conn.commit()
 

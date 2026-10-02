@@ -271,6 +271,7 @@ async def test_read_timeout_is_not_retried_and_raises_timeout_error():
     [
         httpx.Response(200, content=b"", headers={"content-type": "audio/wav"}),
         httpx.Response(200, content=b"<html>proxy error</html>", headers={"content-type": "text/html"}),
+        httpx.Response(200, content=b"proxy error", headers={"content-type": "text/plain"}),
         httpx.Response(200, json={"error": "nope"}),
         httpx.Response(200, content=b"not a wav file at all", headers={"content-type": "audio/wav"}),
     ],
