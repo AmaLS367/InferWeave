@@ -1,0 +1,8 @@
+version: 2
+
+secret:
+  # The lazy-export map in __init__.py pairs class names containing "Auth" with module paths
+  # (e.g. "ModalProxyAuth": ("inferweave.adapters.auth", "ModalProxyAuth")), which the generic
+  # "Authentication Tuple" detector flags. They are identifiers, not credentials.
+  ignored-paths:
+    - src/inferweave/__init__.py
