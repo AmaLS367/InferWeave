@@ -130,17 +130,23 @@ class ModalProvider(ComputeProvider):
             await self._repository.save(record)
 
         # Build container image dynamically from runtime template spec
-        image = modal.Image.from_registry(runtime.docker_image)
+        image = modal.Image.from_registry(
+            runtime.docker_image,
+            setup_dockerfile_commands=runtime.metadata.get(
+                "modal_setup_dockerfile_commands", []
+            ),
+        ).entrypoint([])
+        if runtime.setup_commands:
+            image = image.run_commands(*runtime.setup_commands)
+        if runtime.env_vars:
+            image = image.env(runtime.env_vars)
+        # Local sources are mounted at container startup. Modal forbids subsequent
+        # image build steps, so this must follow all RUN/ENV layers.
         if hasattr(image, "add_local_python_source"):
             try:
                 image = image.add_local_python_source("inferweave")
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Could not add_local_python_source('inferweave'): %s", exc)
-        if runtime.setup_commands:
-            image = image.run_commands(*runtime.setup_commands)
-        if runtime.env_vars:
-            image = image.env(runtime.env_vars)
-
         app = modal.App(name=deployment_id)
 
         # Map hardware to Modal GPU specification
@@ -223,7 +229,9 @@ class ModalProvider(ComputeProvider):
         await asyncio.to_thread(_deploy_sync)
 
         # Retrieve live HTTPS web endpoint URL assigned by Modal
-        endpoint_url = getattr(serve, "get_web_url", lambda: None)()
+        endpoint_url = await asyncio.to_thread(
+            getattr(serve, "get_web_url", lambda: None)
+        )
         if not endpoint_url:
             endpoint_url = f"https://{deployment_id}.modal.run"
 

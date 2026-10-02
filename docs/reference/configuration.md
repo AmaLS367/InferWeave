@@ -48,6 +48,12 @@ prefer SDK parameters and avoid specifying both forms.
 `extra_cli_args` is literal tokens or shlex-parsed string, not shell code.
 `extra_env` merges runtime variables; `provider_args` are backend-specific.
 Not all providers honor all settings. Built-in templates pin images/dependencies.
+Modal clears the inherited image entrypoint and launches `RuntimeSpec.run_args`.
+Local Python source is mounted after all image build steps. Custom templates can
+set `RuntimeSpec.metadata['modal_setup_dockerfile_commands']` to a list of
+Dockerfile directives passed to `Image.from_registry()` before runtime setup.
+The Fish S2 template uses this to expose the image's system `python3` as `python`
+for Modal; its model server still runs under `/app/.venv/bin/python`.
 SkyPilot also receives native legacy idle/autodown; Modal scaling is independent
 of InferWeave's local watchdog. See [lifecycle](../explanation/lifecycle-and-cost.md).
 

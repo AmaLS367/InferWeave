@@ -218,6 +218,14 @@ class FishSpeechS2Template(RuntimeTemplate):
             port=port,
             env_vars=env,
             healthcheck_path="/v1/health",
+            metadata={
+                # The CUDA image has system python3/pip but no `python` on PATH.
+                # Modal's control process needs it; the model keeps /app/.venv.
+                "modal_setup_dockerfile_commands": [
+                    "USER root",
+                    "RUN ln -sf /usr/bin/python3 /usr/local/bin/python",
+                ],
+            },
         )
 
 

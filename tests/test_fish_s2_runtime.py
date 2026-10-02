@@ -63,6 +63,10 @@ def test_s2_render_matches_upstream_deployment(s2_profile):
     assert spec.name == "fish-speech-s2"
     assert spec.port == 8080
     assert spec.healthcheck_path == "/v1/health"
+    assert spec.metadata["modal_setup_dockerfile_commands"] == [
+        "USER root",
+        "RUN ln -sf /usr/bin/python3 /usr/local/bin/python",
+    ]
 
     # Checkpoint layout follows the HF repo name (checkpoints/s2-pro), not the profile id.
     assert spec.run_args == [

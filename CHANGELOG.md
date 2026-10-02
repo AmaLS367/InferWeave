@@ -15,6 +15,8 @@
   and reject non-finite inference timeout/backoff settings.
 - Close SQLite connections deterministically to prevent leaked file handles,
   particularly during Windows recovery/cleanup.
+- Fix Modal image construction: mount local source after build steps, clear the
+  inherited server entrypoint, and expose system Python in the Fish S2 image.
 
 Compatibility: existing imports, provider options, old SQLite records and
 `autostop_mins` remain supported. The alias defaults to 30 minutes but no longer
