@@ -63,10 +63,17 @@ unified high-level inference methods.
 
 ## Secret scanner scope
 
-GitGuardian's Authentication Tuple detector flags auth class/module identifiers.
-The path exception is limited to the six declarative pairs in `_auth_exports.py`;
-the entrypoint and auth implementations remain scanned. Do not put credentials
-in this map. [GitGuardian configuration](https://docs.gitguardian.com/ggshield-docs/configuration)
-supports exact-match fingerprints and path exclusions; existing scanner fingerprints
-are unavailable locally, so the small path exception is used rather than inventing
-hashes or disabling a detector globally.
+GitGuardian's Authentication Tuple detector mistakes auth class/module identifiers
+in the lazy export map for credentials. The existing `__init__.py` path exception
+is retained; auth implementations and all other files remain scanned. Never store
+credentials in this entrypoint.
+
+[ggshield configuration](https://docs.gitguardian.com/ggshield-docs/configuration)
+supports path exclusions and exact occurrence fingerprints, but no line-scoped
+rule. A smaller declaration-only module with a local path exclusion was tested;
+the GitHub app still reported all six identifier pairs. Local ggshield exclusions
+[are not shared with the dashboard](https://docs.gitguardian.com/ggshield-docs/reference/secret/ignore).
+A reliable narrower rule therefore needs scanner-generated fingerprints for CLI
+use and separate dashboard incident configuration for the GitHub app. Neither is
+available in this release workflow. Preserve the original export map and exception
+rather than disabling the Authentication Tuple detector or obscuring identifiers.

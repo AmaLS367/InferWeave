@@ -1,0 +1,50 @@
+name: Examples and documentation
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "README.md"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "README.md"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/examples.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Examples (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Run unchanged examples and executable docs without cloud SDKs
+        run: uv run --no-sync python examples/simulate.py
