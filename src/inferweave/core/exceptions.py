@@ -36,6 +36,10 @@ class ProviderNotFoundError(InferWeaveError):
         self.provider_name = provider_name
 
 
+class ProviderAuthError(InferWeaveError):
+    """Raised when required provider/endpoint credentials are missing or unusable."""
+
+
 class ProviderPlatformError(InferWeaveError):
     """Raised when a provider cannot run on the current host platform."""
 
@@ -153,3 +157,80 @@ class UnknownGpuError(InferWeaveError):
             f"Unknown GPU specification: '{gpu_name}'. Could not determine VRAM capacity."
         )
         self.gpu_name = gpu_name
+
+
+class DeploymentNotActiveError(DeploymentError):
+    """Raised when a deployment cannot be attached because it is stopped, failed, or a dry run."""
+
+    def __init__(self, deployment_id: str, reason: str) -> None:
+        super().__init__(
+            f"Deployment '{deployment_id}' cannot be attached: {reason}",
+            deployment_id=deployment_id,
+        )
+        self.reason = reason
+
+
+class AmbiguousDeploymentError(DeploymentError):
+    """Raised when a ``find()`` query matches more than one active deployment."""
+
+    def __init__(
+        self, model: str | None, provider: str | None, candidate_ids: list[str]
+    ) -> None:
+        criteria = ", ".join(
+            f"{k}='{v}'" for k, v in (("model", model), ("provider", provider)) if v
+        )
+        super().__init__(
+            f"Found {len(candidate_ids)} active deployments matching {criteria or 'the query'}: "
+            f"{', '.join(candidate_ids)}. Use attach(deployment_id) to pick one explicitly."
+        )
+        self.model = model
+        self.provider = provider
+        self.candidate_ids = list(candidate_ids)
+
+
+class InferenceError(DeploymentError):
+    """Base exception for failures while invoking a deployment's inference API.
+
+    Messages and attributes never contain credentials: ``response_body`` is truncated and has
+    known secret values redacted before it is stored.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        deployment_id: str | None = None,
+        status_code: int | None = None,
+        endpoint: str | None = None,
+        response_body: str | None = None,
+    ) -> None:
+        super().__init__(message, deployment_id=deployment_id)
+        self.status_code = status_code
+        self.endpoint = endpoint
+        self.response_body = response_body
+
+
+class EndpointNotReadyError(InferenceError):
+    """Raised when the endpoint is missing, stopped, or still unavailable after bounded retries."""
+
+
+class InferenceTimeoutError(InferenceError):
+    """Raised when an inference request exceeds its configured timeout."""
+
+
+class UnsupportedWorkloadError(InferenceError):
+    """Raised when an inference method does not match the deployment's workload type."""
+
+    def __init__(
+        self,
+        message: str,
+        deployment_id: str | None = None,
+        workload_type: str | None = None,
+        operation: str | None = None,
+    ) -> None:
+        super().__init__(message, deployment_id=deployment_id)
+        self.workload_type = workload_type
+        self.operation = operation
+
+
+class InvalidInferenceResponseError(InferenceError):
+    """Raised when the endpoint returns a response that violates the expected API contract."""

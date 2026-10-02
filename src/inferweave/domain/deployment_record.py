@@ -5,7 +5,38 @@ from datetime import UTC, datetime
 from pydantic import BaseModel, Field
 
 from inferweave.domain.options import DeploymentOptions
-from inferweave.models.enums import DeploymentState
+from inferweave.models.enums import DeploymentState, WorkloadType
+
+_SENSITIVE_KEY_TERMS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "api-key",
+    "apikey",
+    "credential",
+    "authorization",
+    "bearer",
+    "modal-key",
+    "modal_key",
+)
+_REDACTED = "[REDACTED]"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lower_k = key.lower()
+    return any(term in lower_k for term in _SENSITIVE_KEY_TERMS)
+
+
+def _redact_value(value: object) -> object:
+    """Redacts a value stored under a sensitive key, recursing into containers."""
+    if isinstance(value, dict):
+        return {k: _REDACTED for k in value}
+    if isinstance(value, list | tuple):
+        return [_REDACTED for _ in value]
+    if isinstance(value, str):
+        return _REDACTED
+    return value
 
 
 class DeploymentRecord(BaseModel):
@@ -45,6 +76,17 @@ class DeploymentRecord(BaseModel):
     is_dry_run: bool = Field(
         default=False,
         description="True if this deployment is a simulated dry-run",
+    )
+    workload_type: WorkloadType | None = Field(
+        default=None,
+        description="Workload category of the deployed model (None for records written by older versions)",
+    )
+    last_activity_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Most recent recorded user activity (inference calls); persisted so the idle "
+            "destroy timer survives process restarts. None for records written by older versions."
+        ),
     )
 
     def mark_healthy(
@@ -92,6 +134,18 @@ class DeploymentRecord(BaseModel):
             DeploymentState.DEGRADED,
         }
 
+    def is_attachable(self) -> bool:
+        """Returns True if a live handle can be rebuilt for this deployment.
+
+        Stopped and failed deployments are terminal and dry runs have no real endpoint.
+        UNHEALTHY deployments stay attachable: a Modal app scaled to zero fails probes
+        until its container wakes up, yet the deployment is very much alive.
+        """
+        return not self.is_dry_run and self.state not in {
+            DeploymentState.STOPPED,
+            DeploymentState.FAILED,
+        }
+
     def to_sanitized_record(self) -> "DeploymentRecord":
         """Returns a copy of the record with sensitive credentials and tokens redacted for disk storage."""
         sanitized = self.model_copy(deep=True)
@@ -118,12 +172,15 @@ class DeploymentRecord(BaseModel):
                     extra_args["secrets"] = "[REDACTED]"
 
             for key in list(extra_args.keys()):
-                lower_k = key.lower()
-                if any(term in lower_k for term in ("token", "secret", "password", "api_key")):
-                    if isinstance(extra_args[key], str):
-                        extra_args[key] = "[REDACTED]"
-                    elif isinstance(extra_args[key], dict):
-                        extra_args[key] = {k: "[REDACTED]" for k in extra_args[key]}
+                if key == "secrets":
+                    continue  # already redacted above, keeping variable names
+                if _is_sensitive_key(key):
+                    extra_args[key] = _redact_value(extra_args[key])
+                elif key.lower() == "headers" and isinstance(extra_args[key], dict):
+                    extra_args[key] = {
+                        hk: (_REDACTED if _is_sensitive_key(str(hk)) else hv)
+                        for hk, hv in extra_args[key].items()
+                    }
 
             sanitized.options.provider.extra_provider_args = extra_args
 
@@ -131,9 +188,8 @@ class DeploymentRecord(BaseModel):
         if sanitized.options.runtime and sanitized.options.runtime.extra_env:
             env_copy = dict(sanitized.options.runtime.extra_env)
             for k in list(env_copy.keys()):
-                lower_k = k.lower()
-                if any(term in lower_k for term in ("token", "secret", "password", "key")):
-                    env_copy[k] = "[REDACTED]"
+                if _is_sensitive_key(k) or "key" in k.lower() or "auth" in k.lower():
+                    env_copy[k] = _REDACTED
             sanitized.options.runtime.extra_env = env_copy
 
         return sanitized

@@ -15,8 +15,10 @@ from inferweave.domain.lifecycle import (
     DeploymentLifecycleEvaluator,
     LifecycleState,
 )
+from inferweave.domain.options import DeploymentOptions
 from inferweave.models.deployment import DeploymentStatus
-from inferweave.models.enums import DeploymentState
+from inferweave.models.enums import DeploymentState, WorkloadType
+from inferweave.ports.auth import EndpointAuthPort
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 from inferweave.ports.lifecycle import AutostopWatchdogPort
 
@@ -32,6 +34,8 @@ class LifecycleService:
         repository: DeploymentRepositoryPort | None = None,
         healthcheck_service: Any | None = None,
         provider_resolver: Callable[[str], Any] | None = None,
+        endpoint_auth: EndpointAuthPort | None = None,
+        activity_persist_interval_seconds: float = 30.0,
     ) -> None:
         self._watchdog = watchdog_port or AsyncioWatchdogAdapter()
         self._repository: DeploymentRepositoryPort = (
@@ -42,6 +46,20 @@ class LifecycleService:
         self._states: dict[str, LifecycleState] = {}
         self._deployments: dict[str, Any] = {}
         self._providers: dict[str, Any] = {}
+        self._endpoint_auth = endpoint_auth
+        # Persisting `last_activity_at` on every request would turn each inference call into a
+        # database write. Writes are therefore throttled; the in-memory timer is always exact.
+        self._activity_persist_interval = activity_persist_interval_seconds
+        self._last_persisted_activity: dict[str, datetime] = {}
+
+    @property
+    def endpoint_auth(self) -> EndpointAuthPort | None:
+        """Auth resolver used to authenticate readiness probes made during status refresh."""
+        return self._endpoint_auth
+
+    @endpoint_auth.setter
+    def endpoint_auth(self, value: EndpointAuthPort | None) -> None:
+        self._endpoint_auth = value
 
     @property
     def repository(self) -> DeploymentRepositoryPort:
@@ -56,8 +74,14 @@ class LifecycleService:
         schedule_watchdog: bool = True,
         is_dry_run: bool = False,
         provider: Any | None = None,
+        workload_type: WorkloadType | None = None,
+        options: DeploymentOptions | None = None,
     ) -> LifecycleState:
-        """Registers a deployment for lifecycle tracking, stores its record, and schedules watchdog."""
+        """Registers a freshly created deployment, stores/updates its record, and schedules watchdog.
+
+        If the provider already persisted a record for this deployment (options, timestamps), that
+        record is updated in place rather than replaced, so persisted information is preserved.
+        """
         current_time = now or datetime.now(UTC)
         state = LifecycleState(
             deployment_id=deployment.id,
@@ -70,16 +94,30 @@ class LifecycleService:
         if provider:
             self._providers[deployment.id] = provider
 
-        # Schedule or sync record in repository
-        record = DeploymentRecord(
-            id=deployment.id,
-            model=deployment.model,
-            provider=deployment.provider,
-            state=deployment.state,
-            endpoint_url=deployment.endpoint_url,
-            created_at=current_time,
-            is_dry_run=is_dry_run,
-        )
+        # Update the provider-persisted record in place, or create one if the provider wrote none
+        record = await self._repository.get(deployment.id)
+        if record is None:
+            record = DeploymentRecord(
+                id=deployment.id,
+                model=deployment.model,
+                provider=deployment.provider,
+                state=deployment.state,
+                endpoint_url=deployment.endpoint_url,
+                created_at=current_time,
+                is_dry_run=is_dry_run,
+            )
+        else:
+            record.state = deployment.state
+            record.endpoint_url = deployment.endpoint_url or record.endpoint_url
+            record.is_dry_run = record.is_dry_run or is_dry_run
+        if options is not None:
+            record.options = options.model_copy(deep=True)
+        # The effective idle policy is persisted so a restarted process can restore the timer.
+        record.options.autostop = policy
+        record.last_activity_at = current_time
+        if workload_type is not None:
+            record.workload_type = workload_type
+        self._last_persisted_activity[deployment.id] = current_time
 
         # Synchronous write for fast in-memory availability
         if hasattr(self._repository, "_records"):
@@ -87,25 +125,88 @@ class LifecycleService:
 
         await self._repository.save(record)
 
-        if (
-            schedule_watchdog
-            and policy.enabled
-            and policy.idle_minutes is not None
-            and policy.idle_minutes > 0
-        ):
-            # Check cadence: sample every 1/4th of the idle duration, capped between 1s and 60s
-            interval = min(60.0, max(1.0, float(policy.idle_minutes * 60) / 4.0))
-
-            async def _watchdog_callback() -> None:
-                await self.check_and_autostop(deployment.id)
-
-            await self._watchdog.schedule_check(
-                deployment_id=deployment.id,
-                interval_seconds=interval,
-                callback=_watchdog_callback,
-            )
+        if schedule_watchdog:
+            await self._schedule_watchdog(deployment.id, policy)
 
         return state
+
+    async def _schedule_watchdog(
+        self, deployment_id: str, policy: AutostopPolicy
+    ) -> None:
+        """Schedules the periodic destroy-timer check for a policy with an enabled idle limit."""
+        if not (
+            policy.enabled and policy.idle_minutes is not None and policy.idle_minutes > 0
+        ):
+            return
+        # Check cadence: sample every 1/4th of the idle duration, capped between 1s and 60s
+        interval = min(60.0, max(1.0, float(policy.idle_minutes * 60) / 4.0))
+
+        async def _watchdog_callback() -> None:
+            await self.check_and_autostop(deployment_id)
+
+        await self._watchdog.schedule_check(
+            deployment_id=deployment_id,
+            interval_seconds=interval,
+            callback=_watchdog_callback,
+        )
+
+    async def rehydrate_deployment(
+        self,
+        record: DeploymentRecord,
+        deployment: Any,
+        provider: Any | None = None,
+        now: datetime | None = None,
+        schedule_watchdog: bool = True,
+    ) -> LifecycleState:
+        """Re-registers a deployment recovered from its persisted record (e.g. after a restart).
+
+        Unlike ``register_deployment`` this never rewrites identity, options, timestamps or state.
+        The idle timer resumes from the persisted ``last_activity_at`` so a process restart does
+        not reset a long destroy timer. Legacy records without that field start a fresh timer
+        now, and the timestamp is persisted so later restarts no longer reset it.
+        """
+        current_time = now or datetime.now(UTC)
+        last_activity = record.last_activity_at or current_time
+        state = LifecycleState(
+            deployment_id=record.id,
+            created_at=record.created_at,
+            last_activity_at=last_activity,
+            policy=record.options.autostop,
+        )
+        self._states[record.id] = state
+        self._deployments[record.id] = deployment
+        if provider:
+            self._providers[record.id] = provider
+        self._last_persisted_activity[record.id] = last_activity
+
+        if record.last_activity_at is None:
+            record.last_activity_at = last_activity
+            await self._repository.save(record)
+
+        if schedule_watchdog:
+            await self._schedule_watchdog(record.id, record.options.autostop)
+        return state
+
+    async def touch_activity(
+        self, deployment_id: str, now: datetime | None = None
+    ) -> None:
+        """Records real user activity and persists it (throttled) so it survives restarts."""
+        current_time = now or datetime.now(UTC)
+        self.record_activity(deployment_id, now=current_time)
+        last_persisted = self._last_persisted_activity.get(deployment_id)
+        if (
+            last_persisted is not None
+            and 0
+            <= (current_time - last_persisted).total_seconds()
+            < self._activity_persist_interval
+        ):
+            return
+        record = await self._repository.get(deployment_id)
+        if record is None or record.state == DeploymentState.STOPPED:
+            return
+        record.last_activity_at = current_time
+        await self._repository.save(record)
+        self._last_persisted_activity[deployment_id] = current_time
 
     def record_activity(self, deployment_id: str, now: datetime | None = None) -> None:
         """Records client activity or request handling on the specified deployment, resetting idle timer."""
@@ -365,10 +466,22 @@ class LifecycleService:
             in {DeploymentState.STARTING, DeploymentState.HEALTHY}
         ):
             try:
-                probe_res = await self._healthcheck_service.check_health(
-                    endpoint_url=endpoint_url,
-                    config=healthcheck_config,
+                auth_headers = (
+                    self._endpoint_auth.headers_for(raw_status.provider, endpoint_url)
+                    if self._endpoint_auth is not None
+                    else {}
                 )
+                if auth_headers:
+                    probe_res = await self._healthcheck_service.check_health(
+                        endpoint_url=endpoint_url,
+                        config=healthcheck_config,
+                        extra_headers=auth_headers,
+                    )
+                else:
+                    probe_res = await self._healthcheck_service.check_health(
+                        endpoint_url=endpoint_url,
+                        config=healthcheck_config,
+                    )
                 probe_healthy = probe_res.is_healthy
                 if probe_healthy:
                     self.record_activity(deployment_id)
@@ -428,6 +541,7 @@ class LifecycleService:
         """Unregisters deployment from lifecycle monitoring and cancels background watchdog tasks."""
         self._states.pop(deployment_id, None)
         self._deployments.pop(deployment_id, None)
+        self._last_persisted_activity.pop(deployment_id, None)
         await self._watchdog.cancel_check(deployment_id)
 
     async def close(self) -> None:

@@ -3073,6 +3073,7 @@ name = "inferweave"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "msgpack" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -3136,6 +3137,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1,<1.0" },
     { name = "modal", marker = "extra == 'all'", specifier = ">=1.6,<1.7" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.6,<1.7" },
+    { name = "msgpack", specifier = ">=1.1.0,<2.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=13.0.0" },

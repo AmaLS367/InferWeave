@@ -6,17 +6,25 @@ import shlex
 import uuid
 from typing import Any
 
+from inferweave.adapters.auth import default_endpoint_auth
+from inferweave.core.exceptions import ProviderAuthError
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.lifecycle import AutostopAction
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState, ProviderType
 from inferweave.models.profile import ModelProfile
+from inferweave.ports.auth import EndpointAuthPort
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 from inferweave.providers.base import ComputeProvider
 from inferweave.runtimes.base import RuntimeSpec
 
 logger = logging.getLogger(__name__)
+
+# Default Modal scale-to-zero window. Deliberately independent of the InferWeave destroy timer
+# (``AutostopPolicy.idle_minutes``): scale-to-zero only frees GPU containers while the app stays
+# deployed, whereas the destroy timer stops the whole app.
+DEFAULT_SCALEDOWN_WINDOW_SECONDS = 1800
 
 
 class ModalProvider(ComputeProvider):
@@ -26,8 +34,13 @@ class ModalProvider(ComputeProvider):
     deployments directly via the Modal Python SDK with native container definition.
     """
 
-    def __init__(self, repository: DeploymentRepositoryPort | None = None) -> None:
+    def __init__(
+        self,
+        repository: DeploymentRepositoryPort | None = None,
+        endpoint_auth: EndpointAuthPort | None = None,
+    ) -> None:
         self._repository = repository
+        self._endpoint_auth = endpoint_auth
         self._local_deployments: dict[str, dict[str, Any]] = {}
 
     @property
@@ -37,6 +50,22 @@ class ModalProvider(ComputeProvider):
     @property
     def provider_type(self) -> ProviderType:
         return ProviderType.MODAL
+
+    def _ensure_proxy_credentials(self) -> None:
+        """Fails fast when proxy auth is on but no credentials exist to reach the endpoint.
+
+        Without tokens the deployment would be created but unreachable by InferWeave's own
+        readiness probes and inference calls.
+        """
+        auth = self._endpoint_auth or default_endpoint_auth()
+        if not auth.is_configured_for(self.name):
+            raise ProviderAuthError(
+                "Modal endpoints are protected with proxy auth, but no proxy token was found. "
+                "Create a token in the Modal workspace settings and export "
+                "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET (or pass endpoint_auth= "
+                "to InferWeave), or deliberately opt out with "
+                "custom_args={'requires_proxy_auth': False}."
+            )
 
     def _get_modal_module(self):
         """Lazy loads the modal SDK module."""
@@ -58,6 +87,12 @@ class ModalProvider(ComputeProvider):
         """Configures and launches a serverless deployment on Modal."""
         modal = self._get_modal_module()
 
+        requires_proxy_auth = (
+            request.options.provider.requires_proxy_auth if request.options else True
+        )
+        if requires_proxy_auth and not request.dry_run:
+            self._ensure_proxy_credentials()
+
         deployment_id = (
             f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
         )
@@ -75,6 +110,7 @@ class ModalProvider(ComputeProvider):
                 request.custom_args, request.autostop_mins
             ),
             is_dry_run=request.dry_run,
+            workload_type=profile.workload_type,
         )
         self._local_deployments[deployment_id] = {
             "model": profile.id,
@@ -110,10 +146,11 @@ class ModalProvider(ComputeProvider):
         # Configure container scaling and timeout parameters from options
         provider_opts = request.options.provider if request.options else None
         scaledown_window = (
-            (request.autostop_mins * 60)
-            if request.autostop_mins
-            else (provider_opts.scaledown_window_seconds if provider_opts else 1800)
+            provider_opts.scaledown_window_seconds
+            if provider_opts and provider_opts.scaledown_window_seconds is not None
+            else DEFAULT_SCALEDOWN_WINDOW_SECONDS
         )
+
         timeout_secs = (
             provider_opts.timeout_seconds
             if (provider_opts and provider_opts.timeout_seconds)
@@ -143,7 +180,11 @@ class ModalProvider(ComputeProvider):
 
         # Register containerized web server function listening on runtime port
         @app.function(**fn_kwargs)
-        @modal.web_server(port=runtime.port, startup_timeout=300)
+        @modal.web_server(
+            port=runtime.port,
+            startup_timeout=300,
+            requires_proxy_auth=requires_proxy_auth,
+        )
         def serve():
             import subprocess
 

@@ -14,6 +14,26 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "JsonDeploymentRepository": ("inferweave.adapters.lifecycle", "JsonDeploymentRepository"),
     "MockWatchdogAdapter": ("inferweave.adapters.lifecycle", "MockWatchdogAdapter"),
     "SqliteDeploymentRepository": ("inferweave.adapters.lifecycle", "SqliteDeploymentRepository"),
+    # Auth, clients, inference errors
+    "CompositeEndpointAuth": ("inferweave.adapters.auth", "CompositeEndpointAuth"),
+    "ModalProxyAuth": ("inferweave.adapters.auth", "ModalProxyAuth"),
+    "NoEndpointAuth": ("inferweave.adapters.auth", "NoEndpointAuth"),
+    "StaticHeaderAuth": ("inferweave.adapters.auth", "StaticHeaderAuth"),
+    "FishSpeechClient": ("inferweave.clients", "FishSpeechClient"),
+    "ImageGenerationClient": ("inferweave.clients", "ImageGenerationClient"),
+    "InferenceClient": ("inferweave.clients", "InferenceClient"),
+    "InferenceConfig": ("inferweave.clients", "InferenceConfig"),
+    "InferenceTransport": ("inferweave.clients", "InferenceTransport"),
+    "ReferenceAudio": ("inferweave.clients", "ReferenceAudio"),
+    "AmbiguousDeploymentError": ("inferweave.core.exceptions", "AmbiguousDeploymentError"),
+    "DeploymentNotActiveError": ("inferweave.core.exceptions", "DeploymentNotActiveError"),
+    "EndpointNotReadyError": ("inferweave.core.exceptions", "EndpointNotReadyError"),
+    "InferenceError": ("inferweave.core.exceptions", "InferenceError"),
+    "InferenceTimeoutError": ("inferweave.core.exceptions", "InferenceTimeoutError"),
+    "InvalidInferenceResponseError": ("inferweave.core.exceptions", "InvalidInferenceResponseError"),
+    "ProviderAuthError": ("inferweave.core.exceptions", "ProviderAuthError"),
+    "UnsupportedWorkloadError": ("inferweave.core.exceptions", "UnsupportedWorkloadError"),
+    "EndpointAuthPort": ("inferweave.ports.auth", "EndpointAuthPort"),
     # Core Exceptions
     "DeploymentError": ("inferweave.core.exceptions", "DeploymentError"),
     "DeploymentNotFoundError": ("inferweave.core.exceptions", "DeploymentNotFoundError"),
@@ -71,14 +91,17 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 }
 
 __all__ = [
+    "AmbiguousDeploymentError",
     "AsyncioWatchdogAdapter",
     "AutostopAction",
     "AutostopPolicy",
     "AutostopWatchdogPort",
+    "CompositeEndpointAuth",
     "ComputeProviderPort",
     "Deployment",
     "DeploymentError",
     "DeploymentLifecycleEvaluator",
+    "DeploymentNotActiveError",
     "DeploymentNotFoundError",
     "DeploymentOptions",
     "DeploymentRecord",
@@ -86,6 +109,9 @@ __all__ = [
     "DeploymentRequest",
     "DeploymentState",
     "DeploymentStatus",
+    "EndpointAuthPort",
+    "EndpointNotReadyError",
+    "FishSpeechClient",
     "GpuSpec",
     "HardwareRequirements",
     "HardwareValidator",
@@ -97,22 +123,32 @@ __all__ = [
     "HealthcheckService",
     "HealthcheckTimeoutError",
     "HttpxHealthcheckProbeAdapter",
+    "ImageGenerationClient",
     "InMemoryDeploymentRepository",
     "InferWeave",
     "InferWeaveError",
+    "InferenceClient",
+    "InferenceConfig",
+    "InferenceError",
+    "InferenceTimeoutError",
+    "InferenceTransport",
     "InstanceOffer",
     "InsufficientVramError",
+    "InvalidInferenceResponseError",
     "JsonDeploymentRepository",
     "LifecycleService",
     "LifecycleState",
     "MockHealthcheckProbeAdapter",
     "MockWatchdogAdapter",
+    "ModalProxyAuth",
     "ModelNotFoundError",
     "ModelProfile",
     "ModelRegistry",
+    "NoEndpointAuth",
     "NoFeasibleProviderError",
     "ProbeOutcome",
     "ProbeResult",
+    "ProviderAuthError",
     "ProviderNotFoundError",
     "ProviderOptions",
     "ProviderPlatformError",
@@ -120,11 +156,14 @@ __all__ = [
     "RankedOffer",
     "ReadinessReport",
     "ReadinessState",
+    "ReferenceAudio",
     "RoutingConstraints",
     "RoutingDecision",
     "RuntimeOptions",
     "SqliteDeploymentRepository",
+    "StaticHeaderAuth",
     "UnknownGpuError",
+    "UnsupportedWorkloadError",
     "VramCheckResult",
     "WorkloadType",
 ]
@@ -147,6 +186,12 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:
+    from inferweave.adapters.auth import (
+        CompositeEndpointAuth,
+        ModalProxyAuth,
+        NoEndpointAuth,
+        StaticHeaderAuth,
+    )
     from inferweave.adapters.healthcheck import (
         HttpxHealthcheckProbeAdapter,
         MockHealthcheckProbeAdapter,
@@ -158,19 +203,35 @@ if TYPE_CHECKING:
         MockWatchdogAdapter,
         SqliteDeploymentRepository,
     )
+    from inferweave.clients import (
+        FishSpeechClient,
+        ImageGenerationClient,
+        InferenceClient,
+        InferenceConfig,
+        InferenceTransport,
+        ReferenceAudio,
+    )
     from inferweave.core.exceptions import (
+        AmbiguousDeploymentError,
         DeploymentError,
+        DeploymentNotActiveError,
         DeploymentNotFoundError,
+        EndpointNotReadyError,
         HealthcheckError,
         HealthcheckFailedError,
         HealthcheckTimeoutError,
+        InferenceError,
+        InferenceTimeoutError,
         InferWeaveError,
         InsufficientVramError,
+        InvalidInferenceResponseError,
         ModelNotFoundError,
         NoFeasibleProviderError,
+        ProviderAuthError,
         ProviderNotFoundError,
         ProviderPlatformError,
         UnknownGpuError,
+        UnsupportedWorkloadError,
     )
     from inferweave.domain.deployment_record import DeploymentRecord
     from inferweave.domain.hardware_validator import HardwareValidator
@@ -211,6 +272,7 @@ if TYPE_CHECKING:
         RoutingDecision,
         VramCheckResult,
     )
+    from inferweave.ports.auth import EndpointAuthPort
     from inferweave.ports.deployment_repository import DeploymentRepositoryPort
     from inferweave.ports.healthcheck import HealthcheckProbePort
     from inferweave.ports.lifecycle import AutostopWatchdogPort
@@ -219,4 +281,3 @@ if TYPE_CHECKING:
     from inferweave.sdk import InferWeave
     from inferweave.services.healthcheck_service import HealthcheckService
     from inferweave.services.lifecycle_service import LifecycleService
-

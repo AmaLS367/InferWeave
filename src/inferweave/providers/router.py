@@ -10,6 +10,7 @@ from inferweave.core.exceptions import (
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
 from inferweave.models.routing import RoutingDecision
+from inferweave.ports.auth import EndpointAuthPort
 from inferweave.providers.base import ComputeProvider
 from inferweave.providers.modal_provider import ModalProvider
 from inferweave.providers.skypilot import SkyPilotProvider
@@ -24,7 +25,9 @@ class ProviderRouter:
         self,
         routing_service: SmartRoutingService | None = None,
         hardware_service: HardwareValidationService | None = None,
+        endpoint_auth: EndpointAuthPort | None = None,
     ) -> None:
+        self._endpoint_auth = endpoint_auth
         self._providers: dict[str, ComputeProvider] = {}
         self._routing_service = routing_service or SmartRoutingService()
         self._hardware_service = hardware_service or HardwareValidationService()
@@ -174,4 +177,4 @@ class ProviderRouter:
             self.register(SkyPilotProvider(cloud_name=cloud))
 
         # Independent serverless provider
-        self.register(ModalProvider())
+        self.register(ModalProvider(endpoint_auth=self._endpoint_auth))
