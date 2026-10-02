@@ -39,7 +39,7 @@ def sample_runtime():
 
 
 @pytest.mark.asyncio
-async def test_modal_provider_autostop_scaledown_window_and_timeout(
+async def test_modal_provider_scaledown_window_is_decoupled_from_autostop_and_timeout(
     sample_profile, sample_runtime
 ):
     provider = ModalProvider()
@@ -70,8 +70,9 @@ async def test_modal_provider_autostop_scaledown_window_and_timeout(
             mock_function.assert_called_once()
             call_kwargs = mock_function.call_args[1]
 
-            # Verify scaledown_window is 15 * 60 = 900 seconds
-            assert call_kwargs.get("scaledown_window") == 900
+            # autostop_mins is InferWeave's full-destroy timer; it must NOT drive Modal's
+            # scale-to-zero window (that is scaledown_window_seconds, default 1800s).
+            assert call_kwargs.get("scaledown_window") == 1800
             # Verify timeout is the custom 7200, NOT the old hardcoded autostop timer
             assert call_kwargs.get("timeout") == 7200
             # Verify cpu and memory

@@ -93,7 +93,18 @@ class ProviderOptions(BaseModel):
     scaledown_window_seconds: int | None = Field(
         default=None,
         ge=0,
-        description="Idle container timeout before down-scaling to zero replicas (Modal)",
+        description=(
+            "Modal scale-to-zero: idle seconds before GPU containers shut down while the app "
+            "stays deployed and wakes on the next request. Independent of the InferWeave "
+            "destroy timer (``AutostopPolicy.idle_minutes``). None uses the provider default."
+        ),
+    )
+    requires_proxy_auth: bool = Field(
+        default=True,
+        description=(
+            "Modal: protect the web endpoint with Modal proxy auth (Modal-Key/Modal-Secret "
+            "headers). Set False only to deliberately publish an unauthenticated endpoint."
+        ),
     )
     timeout_seconds: int | None = Field(
         default=None,
@@ -185,8 +196,16 @@ class DeploymentOptions(BaseModel):
         )
         autodown = raw.pop("autodown", provider_data.pop("autodown", False))
 
-        # 2. Process Autostop parameters
-        mins = raw.pop("autostop_mins", autostop_mins)
+        requires_proxy_auth = bool(
+            raw.pop(
+                "requires_proxy_auth", provider_data.pop("requires_proxy_auth", True)
+            )
+        )
+
+        # 2. Process Autostop parameters. ``destroy_after_idle_mins`` is the preferred name for
+        # the InferWeave full-destroy idle timer; ``autostop_mins`` is its legacy alias.
+        legacy_mins = raw.pop("autostop_mins", autostop_mins)
+        mins = raw.pop("destroy_after_idle_mins", legacy_mins)
         if mins == 0 or mins == "0":
             mins = None
             autostop_enabled = False
@@ -243,6 +262,7 @@ class DeploymentOptions(BaseModel):
             scaledown_window_seconds=scaledown_window,
             timeout_seconds=timeout_seconds,
             autodown=autodown,
+            requires_proxy_auth=requires_proxy_auth,
             extra_provider_args=provider_data,
         )
 

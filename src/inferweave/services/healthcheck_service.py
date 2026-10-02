@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from inferweave.adapters.healthcheck.httpx_probe import HttpxHealthcheckProbeAdapter
@@ -56,8 +56,22 @@ class HealthcheckService:
 
         return urlunsplit((scheme, netloc, final_path, parts.query, parts.fragment))
 
+    @staticmethod
+    def merge_headers(
+        config: HealthcheckConfig, extra_headers: Mapping[str, str] | None
+    ) -> dict[str, str]:
+        """Combines static config headers with runtime auth headers without mutating the config.
+
+        Runtime headers (credentials resolved by an auth provider) win on conflicts and never
+        flow back into the model's shared ``HealthcheckConfig``.
+        """
+        return {**config.headers, **(extra_headers or {})}
+
     async def check_health(
-        self, endpoint_url: str, config: HealthcheckConfig
+        self,
+        endpoint_url: str,
+        config: HealthcheckConfig,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> ProbeResult:
         """Executes a single probe check against an endpoint."""
         probe_url = self.build_probe_url(endpoint_url, config)
@@ -65,7 +79,7 @@ class HealthcheckService:
             url=probe_url,
             method=config.method,
             timeout_seconds=config.request_timeout_seconds,
-            headers=config.headers,
+            headers=self.merge_headers(config, extra_headers),
             expected_status_codes=config.expected_status_codes,
         )
 
@@ -76,6 +90,8 @@ class HealthcheckService:
         deployment_id: str | None = None,
         on_poll: Callable[[ReadinessReport], None] | None = None,
         timeout_override: float | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        headers_provider: Callable[[], Mapping[str, str]] | None = None,
     ) -> ReadinessReport:
         """Polls the endpoint until it responds with a healthy status or timeout expires.
 
@@ -85,6 +101,8 @@ class HealthcheckService:
             deployment_id: Optional deployment ID for diagnostics and logging.
             on_poll: Optional callback invoked after every probe attempt.
             timeout_override: Optional custom timeout in seconds overriding config.timeout_seconds.
+            extra_headers: Runtime (auth) headers merged over ``config.headers`` for every probe.
+            headers_provider: Like ``extra_headers`` but re-evaluated before each probe.
 
         Returns:
             ReadinessReport: Final report indicating successful readiness.
@@ -145,7 +163,10 @@ class HealthcheckService:
                 url=probe_url,
                 method=config.method,
                 timeout_seconds=probe_timeout,
-                headers=config.headers,
+                headers=self.merge_headers(
+                    config,
+                    headers_provider() if headers_provider is not None else extra_headers,
+                ),
                 expected_status_codes=config.expected_status_codes,
             )
             history.append(probe_result)

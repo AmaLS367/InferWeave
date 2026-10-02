@@ -56,6 +56,7 @@ class LifecycleState(BaseModel):
     policy: AutostopPolicy = Field(default_factory=AutostopPolicy)
     is_stopped: bool = Field(default=False)
     stopped_at: datetime | None = Field(default=None)
+    in_flight_requests: int = Field(default=0, ge=0)
 
 
 class DeploymentLifecycleEvaluator:
@@ -74,6 +75,8 @@ class DeploymentLifecycleEvaluator:
     def is_idle(cls, state: LifecycleState, now: datetime | None = None) -> bool:
         """Determines if the deployment has been inactive longer than its policy threshold."""
         if not state.policy.enabled or state.policy.idle_minutes is None:
+            return False
+        if state.in_flight_requests > 0:
             return False
         idle_secs = cls.calculate_idle_seconds(state, now)
         threshold_secs = float(state.policy.idle_minutes * 60)

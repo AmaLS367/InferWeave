@@ -10,6 +10,7 @@ from inferweave.core.exceptions import (
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
 from inferweave.models.routing import RoutingDecision
+from inferweave.ports.auth import EndpointAuthPort
 from inferweave.providers.base import ComputeProvider
 from inferweave.providers.modal_provider import ModalProvider
 from inferweave.providers.skypilot import SkyPilotProvider
@@ -24,12 +25,22 @@ class ProviderRouter:
         self,
         routing_service: SmartRoutingService | None = None,
         hardware_service: HardwareValidationService | None = None,
+        endpoint_auth: EndpointAuthPort | None = None,
     ) -> None:
+        self._endpoint_auth = endpoint_auth
         self._providers: dict[str, ComputeProvider] = {}
         self._routing_service = routing_service or SmartRoutingService()
         self._hardware_service = hardware_service or HardwareValidationService()
         self._last_decision: RoutingDecision | None = None
         self._register_default_providers()
+
+    def adopt_endpoint_auth(self, endpoint_auth: EndpointAuthPort) -> None:
+        """Gives providers that have no endpoint auth of their own the shared resolver."""
+        if self._endpoint_auth is None:
+            self._endpoint_auth = endpoint_auth
+        for provider in self._providers.values():
+            if getattr(provider, "endpoint_auth", False) is None:
+                provider.endpoint_auth = endpoint_auth  # type: ignore[attr-defined]
 
     @property
     def last_decision(self) -> RoutingDecision | None:
@@ -174,4 +185,4 @@ class ProviderRouter:
             self.register(SkyPilotProvider(cloud_name=cloud))
 
         # Independent serverless provider
-        self.register(ModalProvider())
+        self.register(ModalProvider(endpoint_auth=self._endpoint_auth))

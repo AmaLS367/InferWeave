@@ -1,13 +1,17 @@
 """Deployment request, status, and live deployment handle definitions."""
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, model_validator
 
 from inferweave.domain.options import DeploymentOptions
-from inferweave.models.enums import DeploymentState
+from inferweave.models.enums import DeploymentState, WorkloadType
+
+if TYPE_CHECKING:
+    from inferweave.clients.audio import ReferenceAudio
+    from inferweave.clients.inference import InferenceClient
 
 
 class DeploymentRequest(BaseModel):
@@ -89,6 +93,8 @@ class Deployment:
         record_activity_fn: Callable[[], None] | None = None,
         is_idle_fn: Callable[[], bool] | None = None,
         last_activity_fn: Callable[[], datetime | None] | None = None,
+        workload_type: WorkloadType | None = None,
+        inference_client: "InferenceClient | None" = None,
     ) -> None:
         self._status = status
         self._stop_fn = stop_fn
@@ -99,6 +105,8 @@ class Deployment:
         self._record_activity_fn = record_activity_fn
         self._is_idle_fn = is_idle_fn
         self._last_activity_fn = last_activity_fn
+        self._workload_type = workload_type
+        self._inference_client = inference_client
 
     @property
     def id(self) -> str:
@@ -119,6 +127,11 @@ class Deployment:
     @property
     def endpoint_url(self) -> str | None:
         return self._status.endpoint_url
+
+    @property
+    def workload_type(self) -> WorkloadType | None:
+        """Workload category of the deployed model (audio, image, ...), if known."""
+        return self._workload_type
 
     @property
     def is_healthy(self) -> bool:
@@ -188,6 +201,105 @@ class Deployment:
             self._status = await self._wait_ready_fn(timeout_seconds)
             return self._status
         return self._status
+
+    def _inference(self, operation: str, expected: WorkloadType) -> "InferenceClient":
+        from inferweave.core.exceptions import (
+            EndpointNotReadyError,
+            InferenceError,
+            UnsupportedWorkloadError,
+        )
+
+        if self._workload_type is not None and self._workload_type != expected:
+            raise UnsupportedWorkloadError(
+                f"{operation}() requires a '{expected.value}' deployment, but "
+                f"'{self.id}' has workload type '{self._workload_type.value}'.",
+                deployment_id=self.id,
+                workload_type=self._workload_type.value,
+                operation=operation,
+            )
+        if self._status.state == DeploymentState.STOPPED:
+            raise EndpointNotReadyError(
+                f"Cannot call {operation}(): deployment '{self.id}' is stopped.",
+                deployment_id=self.id,
+            )
+        if self._inference_client is None:
+            raise InferenceError(
+                f"Cannot call {operation}(): deployment '{self.id}' has no inference client "
+                "(dry-run deployments have no live endpoint).",
+                deployment_id=self.id,
+            )
+        return self._inference_client
+
+    async def synthesize(
+        self,
+        text: str,
+        reference_id: str | None = None,
+        format: str = "wav",
+        *,
+        references: "Sequence[ReferenceAudio]" = (),
+        seed: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        repetition_penalty: float | None = None,
+        chunk_length: int | None = None,
+        max_new_tokens: int | None = None,
+        normalize: bool | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
+        """Synthesizes speech (audio deployments only) and returns the raw audio bytes.
+
+        Counts as deployment activity (see ``InferenceClient``). Cold-start failures (connection
+        errors, HTTP 502/503) are retried with bounded backoff, so calling a Modal deployment
+        that scaled to zero simply takes longer instead of failing.
+
+        Raises:
+            UnsupportedWorkloadError: the deployment is not an audio workload.
+            EndpointNotReadyError: stopped, no endpoint, or still unavailable after retries.
+            InferenceError: any other request failure (4xx, refused redirect, ...).
+            InferenceTimeoutError: the request timed out.
+            InvalidInferenceResponseError: the response violated the API contract.
+        """
+        return await self._inference("synthesize", WorkloadType.AUDIO).synthesize(
+            text,
+            reference_id=reference_id,
+            format=format,
+            references=references,
+            seed=seed,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            chunk_length=chunk_length,
+            max_new_tokens=max_new_tokens,
+            normalize=normalize,
+            timeout=timeout,
+        )
+
+    async def render(
+        self,
+        prompt: str,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int | None = None,
+        seed: int | None = None,
+        n: int = 1,
+        *,
+        guidance_scale: float | None = None,
+        timeout: float | None = None,
+    ) -> list[bytes]:
+        """Renders ``n`` images (image deployments only) and returns their raw bytes.
+
+        Same activity, retry and error semantics as ``synthesize``.
+        """
+        return await self._inference("render", WorkloadType.IMAGE).render(
+            prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            seed=seed,
+            n=n,
+            guidance_scale=guidance_scale,
+            timeout=timeout,
+        )
 
     def __repr__(self) -> str:
         return (
