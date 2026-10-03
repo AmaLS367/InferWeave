@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 - Add optional Lightning AI container Deployment provider, shared TTS/image inference,
   user-key Bearer auth, typed autoscaling/resource metadata, recovery and verified
