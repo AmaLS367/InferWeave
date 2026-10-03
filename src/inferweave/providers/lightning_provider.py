@@ -433,12 +433,12 @@ class LightningProvider(ComputeProvider):
         else:
             try:
                 status = data.get("status") or {}
-                desired = str(data.get("desired_state", "")).upper()
-                if data.get("deleted_at") or desired in ("STOPPED", "DELETED"):
+                desired = str(data.get("desired_state", "")).upper().removeprefix("DEPLOYMENT_STATE_")
+                if data.get("deleted_at") or desired in ("STOPPED", "DELETED", "FROZEN", "BALANCE_STOPPED"):
                     record.mark_stopped()
-                elif int(status.get("failing_replicas") or 0) > 0:
+                elif desired in ("FAILED", "SHADOW_BANNED") or int(status.get("failing_replicas") or 0) > 0:
                     record.state = DeploymentState.FAILED
-                elif int(status.get("pending_replicas") or 0) > 0:
+                elif desired == "PENDING" or int(status.get("pending_replicas") or 0) > 0:
                     record.state = DeploymentState.PROVISIONING
                 else:
                     # Zero idle replicas remain a deployed, attachable endpoint.

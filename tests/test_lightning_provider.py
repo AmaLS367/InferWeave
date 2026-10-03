@@ -155,6 +155,15 @@ async def test_deploy_shared_runtime_auth_metadata_and_stop(cloud, tmp_path):
     ("RUNNING", 0, 1, DeploymentState.FAILED),
     ("STOPPED", 0, 0, DeploymentState.STOPPED),
     ("DELETED", 0, 0, DeploymentState.STOPPED),
+    ("DEPLOYMENT_STATE_RUNNING", 0, 0, DeploymentState.STARTING),
+    ("DEPLOYMENT_STATE_STOPPED", 0, 0, DeploymentState.STOPPED),
+    ("DEPLOYMENT_STATE_DELETED", 0, 0, DeploymentState.STOPPED),
+    ("DEPLOYMENT_STATE_PENDING", 0, 0, DeploymentState.PROVISIONING),
+    ("DEPLOYMENT_STATE_FAILED", 0, 0, DeploymentState.FAILED),
+    ("DEPLOYMENT_STATE_SCALED_TO_0", 0, 0, DeploymentState.STARTING),
+    ("DEPLOYMENT_STATE_FROZEN", 0, 0, DeploymentState.STOPPED),
+    ("DEPLOYMENT_STATE_BALANCE_STOPPED", 0, 0, DeploymentState.STOPPED),
+    ("DEPLOYMENT_STATE_SHADOW_BANNED", 0, 0, DeploymentState.FAILED),
 ])
 @pytest.mark.asyncio
 async def test_status_never_claims_application_healthy(cloud, state, pending, failing, expected):
