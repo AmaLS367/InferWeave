@@ -27,7 +27,7 @@ import zipfile
 from email.parser import Parser
 from pathlib import Path
 
-OPTIONAL_PROVIDER_SDKS = ("skypilot", "modal")
+OPTIONAL_PROVIDER_SDKS = ("skypilot", "modal", "lightning-sdk")
 
 _PEP440_VERSION = re.compile(r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -82,12 +82,12 @@ def check_metadata(wheel_path: str) -> None:
 
     extras = set(metadata.get_all("Provides-Extra") or [])
     expected = {
-        "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast", "clouds", "modal", "workers", "all",
+        "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast", "clouds", "modal", "lightning", "workers", "all",
     }
     if missing := expected - extras:
         sys.exit(f"Missing expected extras: {sorted(missing)}")
 
-    for extra, sdk in [(e, "skypilot") for e in sorted(expected - {"modal", "workers", "all"})] + [("modal", "modal")]:
+    for extra, sdk in [(e, "skypilot") for e in sorted(expected - {"modal", "lightning", "workers", "all"})] + [("modal", "modal"), ("lightning", "lightning-sdk")]:
         if not any(r.lower().startswith(sdk) and f"extra == '{extra}'" in r for r in requires):
             sys.exit(f"Extra '{extra}' does not provide '{sdk}'")
 
@@ -104,19 +104,28 @@ def check_metadata(wheel_path: str) -> None:
     if modal_specs != {frozenset({">=1.6", "<1.7"})}:
         sys.exit(f"Modal must be bounded to '>=1.6,<1.7', got: {modal_reqs}")
 
-    print("Metadata OK: SkyPilot and Modal only via extras, httpx<1.0 bounded, modal range tested, py.typed packaged.")
+    lightning_reqs = [r for r in requires if "extra == 'lightning'" in r and r.startswith("lightning-sdk")]
+    lightning_specs = {frozenset(r.replace(" ", "").split(";")[0][len("lightning-sdk"):].split(",")) for r in lightning_reqs}
+    if lightning_specs != {frozenset({">=2026.10.1", "<2026.10.2"})}:
+        sys.exit("Lightning extra must be bounded to the verified SDK release")
+
+    print("Metadata OK: provider SDKs optional, httpx bounded, Modal/Lightning ranges tested, py.typed packaged.")
 
 
-def check_imports(wheel_path: str | None = None, *, with_modal: bool = False) -> None:
+def check_imports(wheel_path: str | None = None, *, with_modal: bool = False, with_lightning: bool = False) -> None:
     import importlib.metadata
     import importlib.util
     from importlib.metadata import entry_points
 
-    for sdk in (("sky",) if with_modal else ("sky", "modal")):
+    allowed = {"modal"} if with_modal else {"lightning_sdk"} if with_lightning else set()
+    for sdk in {"sky", "modal", "lightning_sdk"} - allowed:
         if importlib.util.find_spec(sdk) is not None:
             sys.exit(f"'{sdk}' is installed; the base wheel must not pull provider SDKs")
     if with_modal and importlib.util.find_spec("modal") is None:
         sys.exit("Modal extra smoke requires the Modal SDK to be installed")
+
+    if with_lightning and importlib.util.find_spec("lightning_sdk") is None:
+        sys.exit("Lightning extra smoke requires the Lightning SDK")
 
     import inferweave
     from inferweave import InferWeave
@@ -142,7 +151,7 @@ def check_imports(wheel_path: str | None = None, *, with_modal: bool = False) ->
 
     weave = InferWeave()
     providers = weave.router.list_providers()
-    if "modal" not in providers or "runpod" not in providers:
+    if not {"modal", "runpod", "lightning"}.issubset(providers):
         sys.exit(f"Default providers not registered: {providers}")
 
     (script,) = [ep for ep in entry_points(group="console_scripts") if ep.name == "inferweave"]
@@ -150,7 +159,7 @@ def check_imports(wheel_path: str | None = None, *, with_modal: bool = False) ->
     if not callable(app):
         sys.exit("inferweave console script does not resolve to a callable")
 
-    leaked = [m for m in ("sky", "modal") if m in sys.modules]
+    leaked = [m for m in ("sky", "modal", "lightning_sdk") if m in sys.modules]
     if leaked:
         sys.exit(f"Provider SDKs imported eagerly: {leaked}")
 
@@ -210,6 +219,8 @@ if __name__ == "__main__":
         check_imports(sys.argv[2] if len(sys.argv) == 3 else None)
     elif len(sys.argv) in (2, 3) and sys.argv[1] == "imports-modal":
         check_imports(sys.argv[2] if len(sys.argv) == 3 else None, with_modal=True)
+    elif len(sys.argv) in (2, 3) and sys.argv[1] == "imports-lightning":
+        check_imports(sys.argv[2] if len(sys.argv) == 3 else None, with_lightning=True)
     elif len(sys.argv) == 2 and sys.argv[1] == "typed":
         check_typed()
     else:
