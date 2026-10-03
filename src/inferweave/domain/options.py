@@ -3,7 +3,7 @@
 import shlex
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from inferweave.domain.lifecycle import AutostopAction, AutostopPolicy
 
@@ -70,6 +70,21 @@ class RuntimeOptions(BaseModel):
         return args
 
 
+class LightningOptions(BaseModel):
+    """Supported Lightning Deployment settings; credentials come only from the environment."""
+
+    teamspace: str | None = Field(default=None, pattern=r"^[^/\s]+/[^/\s]+$")
+    min_replicas: int = Field(default=0, ge=0)
+    max_replicas: int = Field(default=1, ge=1)
+    idle_threshold_seconds: int = Field(default=300, ge=1)
+
+    @model_validator(mode="after")
+    def _replica_bounds(self) -> "LightningOptions":
+        if self.min_replicas > self.max_replicas:
+            raise ValueError("Lightning min_replicas must not exceed max_replicas")
+        return self
+
+
 class ProviderOptions(BaseModel):
     """Configuration options for cloud infrastructure and compute backends."""
 
@@ -119,6 +134,7 @@ class ProviderOptions(BaseModel):
         default_factory=dict,
         description="Provider-specific pass-through parameters (e.g. cpu, memory, secrets)",
     )
+    lightning: LightningOptions = Field(default_factory=LightningOptions)
 
 
 class DeploymentOptions(BaseModel):
@@ -150,6 +166,7 @@ class DeploymentOptions(BaseModel):
         runtime_data = dict(raw.pop("runtime_args", None) or {})
         engine_args = dict(raw.pop("engine_args", None) or {})
         provider_data = dict(raw.pop("provider_args", None) or {})
+        lightning = raw.pop("lightning", provider_data.pop("lightning", {}))
         # Legacy top-level aliases and the nested runtime_args form share one normalizer.
         extra_cli_args = [
             *normalize_extra_cli_args(raw.pop("extra_cli_args", None)),
@@ -264,6 +281,7 @@ class DeploymentOptions(BaseModel):
             autodown=autodown,
             requires_proxy_auth=requires_proxy_auth,
             extra_provider_args=provider_data,
+            lightning=LightningOptions.model_validate(lightning),
         )
 
         autostop_policy = AutostopPolicy(

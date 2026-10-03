@@ -12,6 +12,7 @@ from inferweave.models.profile import ModelProfile
 from inferweave.models.routing import RoutingDecision
 from inferweave.ports.auth import EndpointAuthPort
 from inferweave.providers.base import ComputeProvider
+from inferweave.providers.lightning_provider import LightningProvider
 from inferweave.providers.modal_provider import ModalProvider
 from inferweave.providers.skypilot import SkyPilotProvider
 from inferweave.services.hardware_service import HardwareValidationService
@@ -186,3 +187,4 @@ class ProviderRouter:
 
         # Independent serverless provider
         self.register(ModalProvider(endpoint_auth=self._endpoint_auth))
+        self.register(LightningProvider(endpoint_auth=self._endpoint_auth))

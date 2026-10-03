@@ -12,6 +12,16 @@ from inferweave.models.enums import DeploymentState
 runner = CliRunner()
 
 
+def test_cli_registers_lightning_and_dry_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERWEAVE_DEPLOYMENTS_PATH", str(tmp_path / "cli.db"))
+    result = runner.invoke(app, ["providers"])
+    assert result.exit_code == 0
+    assert "lightning" in result.stdout and "Lightning SDK" in result.stdout
+    result = runner.invoke(app, ["deploy", "fish-s2-pro", "--provider", "lightning", "--dry-run"])
+    assert result.exit_code == 0, result.stdout
+    assert "lightning" in result.stdout and "provisioning" in result.stdout
+
+
 def test_cli_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

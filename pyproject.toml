@@ -68,6 +68,9 @@ vast = [
 modal = [
     "modal>=1.6,<1.7",
 ]
+lightning = [
+    "lightning-sdk>=2026.10.1,<2026.10.2",
+]
 clouds = [
     "skypilot[kubernetes,aws,gcp,azure,oci,nebius,lambda,runpod,fluidstack,paperspace,cudo,ibm,scp,seeweb,shadeform,vast,verda]>=0.13.0",
 ]
@@ -88,6 +91,18 @@ dev = [
 ]
 
 [tool.uv]
+conflicts = [
+    [{extra = "lightning"}, {extra = "all"}],
+    [{extra = "lightning"}, {extra = "clouds"}],
+    [{extra = "lightning"}, {extra = "runpod"}],
+    [{extra = "lightning"}, {extra = "aws"}],
+    [{extra = "lightning"}, {extra = "gcp"}],
+    [{extra = "lightning"}, {extra = "azure"}],
+    [{extra = "lightning"}, {extra = "lambda"}],
+    [{extra = "lightning"}, {extra = "nebius"}],
+    [{extra = "lightning"}, {extra = "kubernetes"}],
+    [{extra = "lightning"}, {extra = "vast"}],
+]
 prerelease = "allow"
 # Lockfile-only. prerelease="allow" is required because SkyPilot's Azure dependency chain
 # (via azure-cli) strictly pins Azure SDK beta releases (e.g. azure-batch==15.0.0b1).

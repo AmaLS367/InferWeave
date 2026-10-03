@@ -18,6 +18,7 @@ class ProviderType(str, Enum):
 
     SKYPILOT = "skypilot"
     MODAL = "modal"
+    LIGHTNING = "lightning"
     LOCAL_DOCKER = "docker"
     AUTO = "auto"
 
