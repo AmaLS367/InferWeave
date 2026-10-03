@@ -8,7 +8,7 @@ Application -> InferWeave -> ModelRegistry / ProviderRouter / runtime templates
                        -> HealthcheckService -> authenticated HTTP probe
 Deployment             -> InferenceClient -> FishSpeechClient / ImageGenerationClient
                                          -> InferenceTransport -> authenticated HTTP
-ProviderRouter         -> ModalProvider | SkyPilotProvider per registered cloud
+ProviderRouter         -> ModalProvider | LightningProvider | SkyPilotProvider per registered cloud
 ```
 
 ## Registry, routing and runtimes
@@ -32,7 +32,7 @@ window controls containers; stop controls the app. Persistent records allow
 provider status/stop recovery. SkyPilot manages registered cloud launch,
 stop/down and normalized status. SDKs load lazily; SkyPilot provisioning on
 native Windows needs WSL2/POSIX, while Modal supports native Windows.
-Base installs import APIs without either SDK. No local-Docker or Hugging Face
+Base installs import APIs without provider SDKs. No local-Docker or Hugging Face
 provisioning adapter is implemented.
 
 `LifecycleService` defaults to SQLite/WAL; JSON/in-memory adapters are injectable.
@@ -43,8 +43,20 @@ rejects ambiguity. Neither automatically checks live provider truth.
 
 ## Auth, health, lifecycle and inference
 
+`LightningProvider` translates the shared `RuntimeSpec` into one public-image
+container Deployment, with sequential setup, foreground server and bundled worker
+sources. It creates no Studio/snapshot. Synchronous SDK operations run in threads;
+cancellation drains creation before cleanup. Full deletion uses the official CLI
+shipped in that SDK because `Deployment.delete()` calls the model HTTP endpoint.
+Deletion is confirmed independently. No private Lightning APIs are used.
+Typed record metadata holds only name, teamspace, resource ID and ownership.
+The provider binds to existing lifecycle storage; SDK deploy/attach/find, inference,
+application health and activity callbacks remain shared. Credentials resolve from
+environment/auth only; `include_credentials=False` prevents model injection.
+See [Lightning](../how-to/use-lightning.md).
+
 `EndpointAuthPort` resolves runtime headers, not persisted secrets. Resolvers
-cover Modal Proxy Tokens, static headers, composites/no auth. Readiness,
+cover Modal Proxy Tokens, Lightning user-key Bearer auth, static headers, composites/no auth. Readiness,
 explicit/status probes and recovered inference share them. Redirects never
 forward auth across origins.
 

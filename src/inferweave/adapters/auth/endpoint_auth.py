@@ -94,6 +94,27 @@ class ModalProxyAuth(EndpointAuthPort):
         return f"ModalProxyAuth(configured={all(self._tokens())})"
 
 
+class LightningEndpointAuth(EndpointAuthPort):
+    """Lightning ApiKeyAuth endpoints accept the user API key as a Bearer token.
+
+    Only Lightning's managed endpoint host receives the key. Custom domains require an
+    explicit StaticHeaderAuth resolver. Keys are resolved for each request, including attach.
+    """
+
+    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+        if provider.lower() != "lightning":
+            return {}
+        if endpoint_url and urlsplit(endpoint_url).scheme != "https":
+            return {}
+        if not _host_matches(endpoint_url, (".cloudspaces.litng.ai",)):
+            return {}
+        key = os.environ.get("LIGHTNING_API_KEY")
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    def __repr__(self) -> str:
+        return f"LightningEndpointAuth(configured={bool(os.environ.get('LIGHTNING_API_KEY'))})"
+
+
 class CompositeEndpointAuth(EndpointAuthPort):
     """Merges the headers produced by several auth providers (later ones win)."""
 
@@ -112,4 +133,4 @@ class CompositeEndpointAuth(EndpointAuthPort):
 
 def default_endpoint_auth() -> EndpointAuthPort:
     """Environment-driven auth used when the SDK is not given an explicit resolver."""
-    return CompositeEndpointAuth(ModalProxyAuth())
+    return CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())

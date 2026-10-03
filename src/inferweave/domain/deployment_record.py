@@ -39,12 +39,22 @@ def _redact_value(value: object) -> object:
     return value
 
 
+class LightningDeploymentMetadata(BaseModel):
+    """Nonsensitive resource identity for Lightning recovery and ownership checks."""
+
+    name: str
+    teamspace: str
+    resource_id: str | None = None
+    owned: bool = True
+
+
 class DeploymentRecord(BaseModel):
     """Domain model tracking deployment identity, metadata, and operational lifecycle state."""
 
     id: str = Field(..., description="Unique deployment identifier")
     model: str = Field(..., description="Model identifier or HuggingFace ID")
     provider: str = Field(..., description="Compute infrastructure provider name")
+    lightning: LightningDeploymentMetadata | None = None
     state: DeploymentState = Field(
         default=DeploymentState.PENDING,
         description="Current operational lifecycle state",

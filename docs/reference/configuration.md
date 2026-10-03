@@ -8,7 +8,11 @@
 | `SqliteDeploymentRepository(db_path=...)` | Overrides environment; inject via `LifecycleService(repository=...)` |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | SDK credentials; Modal also reads `modal setup` profiles |
 | `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET` | HTTP Proxy Token pair, resolved per request |
-| `endpoint_auth=` | Default `CompositeEndpointAuth(ModalProxyAuth())` |
+| `LIGHTNING_USER_ID`, `LIGHTNING_API_KEY` | User SDK credentials; same key authenticates Lightning HTTP endpoints as Bearer |
+| `LIGHTNING_TEAMSPACE` | Selected `owner/teamspace` for Lightning, unless typed option overrides it |
+| `LIGHTNING_ORG` | Optional owner for a bare teamspace; unnecessary with a full slug |
+| `INFERWEAVE_LIGHTNING_INTEGRATION` | Unset/`0` skips paid Lightning tests; `1` explicitly opts in |
+| `endpoint_auth=` | Default `CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())` |
 
 There is no `.env` loader. Export/load values before creating the SDK.
 Recovery does not load secrets from SQLite. See [security](../how-to/secure-your-endpoint.md).
@@ -27,7 +31,7 @@ does not accept `options=`.
 | `wait_for_ready` | `True`; poll model endpoint after launch |
 | `dry_run` | `False`; `True` simulates without live inference |
 | `custom_args['requires_proxy_auth']` | `True` for Modal; `False` exposes HTTP endpoint |
-| `custom_args['cleanup_on_failure']` | `False`; `True` stops after readiness timeout |
+| `custom_args['cleanup_on_failure']` | `False`; `True` stops after readiness timeout; Lightning always cleans failed deploy/readiness |
 | `custom_args['timeout_seconds']` | Modal function timeout: 86400; separate from client/readiness |
 | `custom_args['cpu']`, `['memory']` | Modal resource overrides |
 | `custom_args['allow_spot']` | `True`; permit spot routing offers |
@@ -58,6 +62,16 @@ SkyPilot also receives native legacy idle/autodown; Modal scaling is independent
 of InferWeave's local watchdog. See [lifecycle](../explanation/lifecycle-and-cost.md).
 
 ## Inference and readiness
+
+Lightning settings use `custom_args={"lightning": {...}}`, mapped to typed
+`LightningOptions`: `teamspace=None` (environment slug), `min_replicas=0`,
+`max_replicas=1`, `idle_threshold_seconds=300`. Minimum must not exceed maximum.
+Replica scaling is independent of `destroy_after_idle_mins`.
+Deployment is on-demand (`spot=False`), endpoints always require user `ApiKeyAuth`,
+and SDK credential injection is disabled. Generic Modal scale/timeout/proxy-auth
+opt-out, and arbitrary provider pass-through are not Lightning settings.
+See [Lightning](../how-to/use-lightning.md) for machine mappings, separate installation,
+CLI deletion and initial-readiness timeout configuration.
 
 `InferWeave(inference_config=InferenceConfig(...))` controls both clients:
 

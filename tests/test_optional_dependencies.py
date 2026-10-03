@@ -22,7 +22,7 @@ _BLOCK_PROVIDER_SDKS = textwrap.dedent(
     import sys
     from importlib.abc import MetaPathFinder
 
-    BLOCKED = ("sky", "modal", "modal_proto")
+    BLOCKED = ("sky", "modal", "modal_proto", "lightning_sdk")
 
     class _Blocker(MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
@@ -57,12 +57,13 @@ def test_core_import_surface_works_without_provider_sdks(tmp_path):
         assert inferweave.__version__
         weave = InferWeave()
         assert "modal" in weave.router.list_providers()
+        assert "lightning" in weave.router.list_providers()
         assert "runpod" in weave.router.list_providers()
 
         import inferweave.cli
         assert inferweave.cli.app is not None
 
-        leaked = [m for m in ("sky", "modal") if m in sys.modules]
+        leaked = [m for m in ("sky", "modal", "lightning_sdk") if m in sys.modules]
         assert not leaked, f"provider SDKs imported eagerly: {leaked}"
         print("OK")
         """,
@@ -124,10 +125,41 @@ def test_missing_modal_raises_actionable_install_hint():
         provider._get_modal_module()
 
 
+def test_missing_lightning_raises_actionable_install_hint():
+    from inferweave.providers.lightning_provider import LightningProvider
+
+    with (
+        patch.dict(sys.modules, {"lightning_sdk": None}),
+        pytest.raises(ImportError, match=r"pip install 'inferweave\[lightning\]'"),
+    ):
+        LightningProvider()._sdk()
+
+
+def test_lightning_dry_run_works_without_sdk_or_credentials(tmp_path):
+    result = _run_without_provider_sdks(
+        """
+        import asyncio
+        from inferweave import InferWeave, DeploymentState
+        async def main():
+            weave = InferWeave()
+            deployment = await weave.deploy("fish-s2-pro", provider="lightning", dry_run=True)
+            assert deployment.state == DeploymentState.PROVISIONING
+            assert "lightning_sdk" not in sys.modules
+            await deployment.stop()
+            await weave.close()
+        asyncio.run(main())
+        print("OK")
+        """,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
 def test_pyproject_keeps_provider_sdks_out_of_base_dependencies():
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
     base = [dep.lower() for dep in project["dependencies"]]
-    assert not any(dep.startswith(("skypilot", "modal")) for dep in base), base
+    assert not any(dep.startswith(("skypilot", "modal", "lightning-sdk")) for dep in base), base
 
     extras = project["optional-dependencies"]
     for extra in ("runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "clouds"):

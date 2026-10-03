@@ -63,7 +63,7 @@ jobs:
           enable-cache: true
           cache-suffix: typecheck
       - name: Install
-        run: uv sync --locked --extra modal --extra workers --group dev
+        run: uv sync --locked --extra modal --extra workers --extra lightning --group dev
       - name: Mypy
         run: uv run --no-sync mypy src
 
@@ -84,10 +84,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-suffix: test-py${{ matrix.python-version }}
-      # Modal + worker extras are needed by the mocked unit tests. SkyPilot is
+      # Modal, Lightning and worker extras support the mocked unit tests. SkyPilot is
       # deliberately not installed: unit tests must not depend on it.
       - name: Install
-        run: uv sync --locked --extra modal --extra workers --group dev
+        run: uv sync --locked --extra modal --extra workers --extra lightning --group dev
       - name: Pytest (unit, no live cloud tests)
         run: uv run --no-sync pytest -m "not integration" --strict-markers -ra
 
@@ -133,6 +133,14 @@ jobs:
           uv pip install --no-config --python "$RUNNER_TEMP/smoke-modal/bin/python" "${WHEEL}[modal]"
           "$RUNNER_TEMP/smoke-modal/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports-modal "$WHEEL"
           uv pip check --python "$RUNNER_TEMP/smoke-modal/bin/python"
+      - name: Install and smoke test Lightning extra in a separate clean environment
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --no-config "$RUNNER_TEMP/smoke-lightning" --python 3.12
+          WHEEL=$(find "$GITHUB_WORKSPACE/dist" -name '*.whl' -print -quit)
+          uv pip install --no-config --python "$RUNNER_TEMP/smoke-lightning/bin/python" "${WHEEL}[lightning]"
+          "$RUNNER_TEMP/smoke-lightning/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports-lightning "$WHEEL"
+          uv pip check --python "$RUNNER_TEMP/smoke-lightning/bin/python"
       - name: Check installed wheel is PEP 561 type-discoverable
         # mypy is only installed after the import smoke test so it cannot mask eager imports.
         working-directory: ${{ runner.temp }}

@@ -171,6 +171,19 @@ def test_pyproject_constrains_modal_to_tested_range():
     assert not spec.specifier.contains("2.0.0")
 
 
+def test_lightning_extra_is_bounded_and_separate_from_skypilot():
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    (dependency,) = [Requirement(d) for d in extras["lightning"]]
+    assert dependency.name == "lightning-sdk"
+    assert dependency.specifier.contains("2026.10.1")
+    assert not dependency.specifier.contains("2026.10.2")
+    assert extras["all"] == ["inferweave[clouds,modal,workers]"]
+    conflicts = data["tool"]["uv"]["conflicts"]
+    for name in ("all", "clouds", "runpod", "aws", "gcp", "azure", "lambda", "nebius", "kubernetes", "vast"):
+        assert [{"extra": "lightning"}, {"extra": name}] in conflicts
+
+
 def test_pyproject_metadata_completeness():
     """Ensures mandatory PyPI metadata is factual, valid, and fully declared."""
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]

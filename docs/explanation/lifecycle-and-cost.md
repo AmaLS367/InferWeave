@@ -1,5 +1,22 @@
 # Lifecycle and cost
 
+## Lightning scaling and full deletion
+
+Lightning defaults to zero minimum replicas, one maximum and a 300-second replica
+idle threshold. Scale-to-zero preserves an authenticated reusable endpoint.
+A positive minimum can consume credits continuously. `destroy_after_idle_mins`
+is independent: explicit stop/watchdog destruction delete the owned Deployment
+and confirm its absence. The SDK's scale-down-only `stop()` is not used for full
+termination. No Studio is created. Startup/downloads and replicas can consume
+credits; review current [Lightning pricing](https://lightning.ai/pricing).
+
+Lightning attempts cleanup on provisioning and SDK deploy/readiness failures;
+cancellation drains creation first. Cleanup failure preserves the original error
+and logs only the deployment ID for retry with `weave.stop(id)`.
+`close()` releases local monitoring, not remote compute. Recovered idle activity
+and local in-flight protection use the shared lifecycle service.
+See [Lightning guide](../how-to/use-lightning.md) for timeouts and paid tests.
+
 **Modal container scale-to-zero:** `scaledown_window_seconds` (default 1800)
 controls warm idle time after input. The app/URL remain after GPU containers
 disappear. New requests reload runtime/weights. Modal manages this remotely,

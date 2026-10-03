@@ -63,7 +63,7 @@ def deploy(
         typer.Option(
             "--provider",
             "-p",
-            help="Target provider ('runpod', 'aws', 'modal', 'auto')",
+            help="Target provider ('runpod', 'aws', 'modal', 'lightning', 'auto')",
         ),
     ] = "auto",
     strategy: Annotated[
@@ -309,6 +309,7 @@ def list_providers() -> None:
     provider_meta: dict[str, tuple[str, str]] = {
         "runpod": ("SkyPilot", "RunPod GPU Cloud instances"),
         "modal": ("Modal SDK", "Modal Serverless GPU Functions & Web Endpoints"),
+        "lightning": ("Lightning SDK", "Lightning AI container Deployments"),
         "aws": ("SkyPilot", "Amazon Web Services EC2 GPU instances"),
         "gcp": ("SkyPilot", "Google Cloud Platform Compute Engine GPUs"),
         "azure": ("SkyPilot", "Microsoft Azure GPU Virtual Machines"),

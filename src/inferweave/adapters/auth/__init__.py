@@ -2,6 +2,7 @@
 
 from inferweave.adapters.auth.endpoint_auth import (
     CompositeEndpointAuth,
+    LightningEndpointAuth,
     ModalProxyAuth,
     NoEndpointAuth,
     StaticHeaderAuth,
@@ -10,6 +11,7 @@ from inferweave.adapters.auth.endpoint_auth import (
 
 __all__ = [
     "CompositeEndpointAuth",
+    "LightningEndpointAuth",
     "ModalProxyAuth",
     "NoEndpointAuth",
     "StaticHeaderAuth",

@@ -85,6 +85,8 @@ class InferWeave:
         self._inference_http_client = inference_http_client
         self._active_deployments: dict[str, Deployment] = {}
         self._attach_lock = asyncio.Lock()
+        for name in self.router.list_providers():
+            self.router.get(name).bind_repository(self.lifecycle_service.repository)
 
     async def deploy(
         self,
@@ -187,41 +189,55 @@ class InferWeave:
             runtime=runtime_spec,
         )
 
-        # 6. Wire lifecycle management and autostop callbacks
-        autostop_policy = (
-            request.options.autostop
-            if request.options
-            else AutostopPolicy(idle_minutes=request.autostop_mins)
-        )
-        await self.lifecycle_service.register_deployment(
-            deployment=deployment,
-            policy=autostop_policy,
-            is_dry_run=request.dry_run,
-            provider=compute_provider,
-            workload_type=profile.workload_type,
-            options=request.options,
-        )
-        self._wire_deployment(
-            deployment,
-            profile=profile,
-            provider=compute_provider,
-            autostop_mins=autostop_policy.idle_minutes,
-            cleanup_on_failure=bool(
-                request.options and getattr(request.options, "cleanup_on_failure", False)
-            ),
-            enable_inference=not request.dry_run,
-        )
+        try:
+            # 6. Wire lifecycle management and autostop callbacks
+            autostop_policy = (
+                request.options.autostop
+                if request.options
+                else AutostopPolicy(idle_minutes=request.autostop_mins)
+            )
+            await self.lifecycle_service.register_deployment(
+                deployment=deployment,
+                policy=autostop_policy,
+                is_dry_run=request.dry_run,
+                provider=compute_provider,
+                workload_type=profile.workload_type,
+                options=request.options,
+            )
+            self._wire_deployment(
+                deployment,
+                profile=profile,
+                provider=compute_provider,
+                autostop_mins=autostop_policy.idle_minutes,
+                cleanup_on_failure=bool(
+                    request.options and getattr(request.options, "cleanup_on_failure", False)
+                ),
+                enable_inference=not request.dry_run,
+            )
 
-        # 7. Track active deployment
-        self._active_deployments[deployment.id] = deployment
+            # 7. Track active deployment
+            self._active_deployments[deployment.id] = deployment
 
-        # 8. Actively poll for readiness if wait_for_ready is enabled
-        if (
-            request.wait_for_ready
-            and not request.dry_run
-            and profile.healthcheck.enabled
-        ):
-            await deployment.wait_for_ready()
+            # 8. Actively poll for readiness if wait_for_ready is enabled
+            if (
+                request.wait_for_ready
+                and not request.dry_run
+                and profile.healthcheck.enabled
+            ):
+                await deployment.wait_for_ready()
+
+        except BaseException:
+            if compute_provider.cleanup_failed_deployment:
+                try:
+                    await self.lifecycle_service.stop_deployment(
+                        deployment.id, provider=compute_provider,
+                    )
+                    self._active_deployments.pop(deployment.id, None)
+                    if deployment._inference_client is not None:
+                        await deployment._inference_client.aclose()
+                except Exception:  # noqa: BLE001 - cleanup must preserve the original failure
+                    logger.error("Failed to clean up deployment %s; retry stop using its ID.", deployment.id)
+            raise
 
         return deployment
 

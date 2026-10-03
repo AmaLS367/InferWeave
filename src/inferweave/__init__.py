@@ -16,6 +16,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SqliteDeploymentRepository": ("inferweave.adapters.lifecycle", "SqliteDeploymentRepository"),
     # Auth, clients, inference errors
     "CompositeEndpointAuth": ("inferweave.adapters.auth", "CompositeEndpointAuth"),
+    "LightningEndpointAuth": ("inferweave.adapters.auth", "LightningEndpointAuth"),
     "ModalProxyAuth": ("inferweave.adapters.auth", "ModalProxyAuth"),
     "NoEndpointAuth": ("inferweave.adapters.auth", "NoEndpointAuth"),
     "StaticHeaderAuth": ("inferweave.adapters.auth", "StaticHeaderAuth"),
@@ -61,6 +62,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "LifecycleState": ("inferweave.domain.lifecycle", "LifecycleState"),
     "DeploymentOptions": ("inferweave.domain.options", "DeploymentOptions"),
     "ProviderOptions": ("inferweave.domain.options", "ProviderOptions"),
+    "LightningOptions": ("inferweave.domain.options", "LightningOptions"),
     "RuntimeOptions": ("inferweave.domain.options", "RuntimeOptions"),
     # Models
     "Deployment": ("inferweave.models.deployment", "Deployment"),
@@ -138,6 +140,8 @@ __all__ = [
     "JsonDeploymentRepository",
     "LifecycleService",
     "LifecycleState",
+    "LightningEndpointAuth",
+    "LightningOptions",
     "MockHealthcheckProbeAdapter",
     "MockWatchdogAdapter",
     "ModalProxyAuth",
@@ -188,6 +192,7 @@ def __dir__() -> list[str]:
 if TYPE_CHECKING:
     from inferweave.adapters.auth import (
         CompositeEndpointAuth,
+        LightningEndpointAuth,
         ModalProxyAuth,
         NoEndpointAuth,
         StaticHeaderAuth,
@@ -250,6 +255,7 @@ if TYPE_CHECKING:
     )
     from inferweave.domain.options import (
         DeploymentOptions,
+        LightningOptions,
         ProviderOptions,
         RuntimeOptions,
     )

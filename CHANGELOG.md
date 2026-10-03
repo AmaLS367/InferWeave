@@ -2,6 +2,12 @@
 
 ## 0.2.0 (unreleased)
 
+- Add optional Lightning AI container Deployment provider, shared TTS/image inference,
+  user-key Bearer auth, typed autoscaling/resource metadata, recovery and verified
+  full deletion/failure cleanup without Studios. Add opt-in L4 live testing.
+  SDK 2026.10.1 requires a separate environment from SkyPilot because of upstream
+  Click bounds; `all` retains its previous composition.
+
 - Recover persisted deployments with `attach()` and unique-match `find()`.
 - Synthesize Fish Speech audio/render FLUX images with typed errors, references,
   per-call options, timeouts and bounded cold-start retries.
