@@ -1,5 +1,12 @@
 # Supported models
 
+Lightning AI deploys the same container runtimes with `provider="lightning"`.
+Fish S2 Pro uses L4 (24 GB) in the opt-in live TTS/recovery test; T4 is too small.
+FLUX shares the generic translation and existing `render()` transport with offline
+coverage; real FLUX validation remains separate. Setup/weights repeat on cold replicas.
+Machine support does not guarantee account entitlement or availability.
+See [Lightning guide](../how-to/use-lightning.md) for mappings and limits.
+
 Built-in registry (custom profiles may add models).
 
 | InferWeave model | Workload | Runtime | Inference endpoint/protocol | Deployment method | Status/notes |

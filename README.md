@@ -82,6 +82,27 @@ Scale-to-zero releases idle GPU containers while keeping the app reusable;
 
 ## Documentation and examples
 
+Lightning AI uses the same deployment, inference and recovery API:
+
+```python
+weave = InferWeave()
+deployment = await weave.deploy("fish-s2-pro", provider="lightning")
+audio = await deployment.synthesize("Hello from Lightning AI")
+await deployment.stop()
+await weave.close()
+```
+
+Install `pip install "inferweave[lightning]"` and configure `LIGHTNING_USER_ID`,
+`LIGHTNING_API_KEY` and `LIGHTNING_TEAMSPACE=owner/teamspace` locally.
+The user API key also authenticates inference; scoped keys are unsupported.
+Lightning creates one container Deployment with no Studio; stop deletes it.
+Read the [Lightning guide](docs/how-to/use-lightning.md) for first-pull readiness,
+autoscaling, restart recovery and opt-in paid tests.
+The verified SDK is `lightning-sdk==2026.10.1` (Python 3.11/3.12).
+Its Click requirement conflicts with SkyPilot, so use a separate environment.
+`inferweave[all]` retains SkyPilot, Modal and workers; it excludes Lightning.
+
+- [Use Lightning AI](docs/how-to/use-lightning.md)
 - [First TTS on Modal](docs/tutorials/first-tts-on-modal.md)
 - [Generate images](docs/how-to/generate-an-image.md)
 - [Recover deployments](docs/how-to/reuse-deployments-across-restarts.md)
@@ -154,7 +175,7 @@ pip install "inferweave[workers]"
 # All cloud providers supported by SkyPilot
 pip install "inferweave[clouds]"
 
-# Complete suite (all cloud engines + Modal + workers runtime)
+# SkyPilot cloud engines + Modal + workers runtime (Lightning uses a separate environment)
 pip install "inferweave[all]"
 ```
 

@@ -21,6 +21,7 @@ import httpx
 import msgpack
 
 from inferweave import (
+    CompositeEndpointAuth,
     Deployment,
     DeploymentState,
     DeploymentStatus,
@@ -32,6 +33,7 @@ from inferweave import (
     ModelRegistry,
     ProviderType,
     SqliteDeploymentRepository,
+    StaticHeaderAuth,
 )
 from inferweave.providers.base import ComputeProvider
 from inferweave.providers.router import ProviderRouter
@@ -116,9 +118,17 @@ def simulated_weave() -> InferWeave:
     repository = SqliteDeploymentRepository()
     router = ProviderRouter()
     router.register(SimulatedProvider(repository))
+    lightning = SimulatedProvider(repository)
+    lightning.name = "lightning"
+    lightning.provider_type = ProviderType.LIGHTNING
+    router.register(lightning)
     client = httpx.AsyncClient(transport=httpx.MockTransport(response))
     health = HealthcheckService(probe_port=HttpxHealthcheckProbeAdapter(client=client))
-    auth = ModalProxyAuth(token_id="simulation-id", token_secret="simulation-secret")
+    auth = CompositeEndpointAuth(
+        ModalProxyAuth(token_id="simulation-id", token_secret="simulation-secret"),
+        StaticHeaderAuth({"Modal-Key": "simulation-id", "Modal-Secret": "simulation-secret"},
+                         providers=("lightning",)),
+    )
     lifecycle = LifecycleService(
         repository=repository,
         healthcheck_service=health,
@@ -176,7 +186,7 @@ def run_source(source: str, filename: str) -> None:
 
 
 def main() -> None:
-    for name in ("tts", "image", "reuse"):
+    for name in ("tts", "image", "reuse", "lightning_tts"):
         path = ROOT / "examples" / f"{name}.py"
         run_source(path.read_text(encoding="utf-8"), str(path))
         print(f"Example OK: {name}")
