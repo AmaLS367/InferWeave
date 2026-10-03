@@ -261,7 +261,7 @@ class LightningProvider(ComputeProvider):
         # Platform credentials must never become model environment variables or SDK
         # command-history arguments. Models do not need them.
         platform_keys = {"LIGHTNING_API_KEY", "LIGHTNING_USER_ID", "LIGHTNING_AUTH_TOKEN"}
-        credentials = {os.getenv(key) for key in platform_keys} - {None, ""}
+        credentials = {value for key in platform_keys if (value := os.getenv(key))}
 
         def contains_credentials(value: Any) -> bool:
             if isinstance(value, dict):
@@ -271,9 +271,9 @@ class LightningProvider(ComputeProvider):
                 )
             if isinstance(value, (list, tuple)):
                 return any(contains_credentials(item) for item in value)
-            return isinstance(value, str) and value in credentials
+            return isinstance(value, str) and any(secret in value for secret in credentials)
 
-        if contains_credentials(options.model_dump()) or contains_credentials(runtime.env_vars):
+        if contains_credentials(options.model_dump()) or contains_credentials(runtime.model_dump()):
             raise ProviderAuthError(
                 "Lightning platform credentials must not be injected into runtimes or persisted options."
             )

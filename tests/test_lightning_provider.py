@@ -98,7 +98,7 @@ def cloud(monkeypatch):
     machine = SimpleNamespace(**{
         name + (f"_X_{count}" if count > 1 else ""): name + (f"_X_{count}" if count > 1 else "")
         for name in ("T4", "L4", "L40S", "A100_40GB", "A100_80GB", "H100", "H200", "B200")
-        for count in (1, 2, 4, 8)
+        for count in ((1, 8) if name == "B200" else (1, 2, 4, 8))
     })
     sdk = SimpleNamespace(Machine=machine, Deployment=Remote)
     config = SimpleNamespace(ApiKeyAuth=Config, HttpHealthCheck=Config, AutoScaleConfig=Config)
@@ -199,14 +199,18 @@ async def test_external_scaledown_still_allows_full_delete(cloud):
 @pytest.mark.parametrize("gpu,count,machine", [
     ("L4", 1, "L4"), ("L40S", 2, "L40S_X_2"),
     ("A100-40GB", 1, "A100_40GB"), ("A100-80GB", 4, "A100_80GB_X_4"),
-    ("H100", 1, "H100"), ("H200", 8, "H200_X_8"), ("B200", 1, "B200"),
+    ("H100", 1, "H100"), ("H200", 1, "H200"),
+    ("H200", 2, "H200_X_2"), ("H200", 4, "H200_X_4"),
+    ("H200", 8, "H200_X_8"), ("B200", 1, "B200"), ("B200", 8, "B200_X_8"),
 ])
 def test_machine_mapping(gpu, count, machine):
     request, profile, _ = recipe(gpu_type=gpu, num_gpus=count)
     assert LightningProvider.machine_name(request, profile) == machine
 
 
-@pytest.mark.parametrize("gpu,count", [("RTX4090", 1), ("A10G", 1), ("L4", 3), ("B200", 2)])
+@pytest.mark.parametrize("gpu,count", [
+    ("RTX4090", 1), ("A10G", 1), ("L4", 3), ("B200", 2), ("B200", 4),
+])
 def test_unsupported_machine_is_typed(gpu, count):
     request, profile, _ = recipe(gpu_type=gpu, num_gpus=count)
     with pytest.raises(ProviderPlatformError, match="cannot be represented"):
@@ -319,6 +323,44 @@ async def test_platform_credentials_rejected_before_option_persistence(cloud, cu
         await provider.deploy(*recipe(custom_args=custom_args))
     assert KEY not in str(error.value)
     assert not provider._records and not cloud.calls
+
+
+@pytest.mark.parametrize("credential_name", [
+    "LIGHTNING_API_KEY", "LIGHTNING_USER_ID", "LIGHTNING_AUTH_TOKEN",
+])
+@pytest.mark.parametrize("location", ["cli", "engine", "options_env", "runtime_env", "setup"])
+@pytest.mark.asyncio
+async def test_embedded_credentials_rejected_before_persistence(
+    cloud, monkeypatch, credential_name, location,
+):
+    monkeypatch.setenv("LIGHTNING_AUTH_TOKEN", "test-auth-token")
+    credential = {"LIGHTNING_API_KEY": KEY, "LIGHTNING_USER_ID": "test-user",
+                  "LIGHTNING_AUTH_TOKEN": "test-auth-token"}[credential_name]
+    value = f"prefix-{credential}-suffix"
+    custom_args = {
+        "cli": {"extra_cli_args": [f"--token={value}"]},
+        "engine": {"engine_args": {"token": f"Bearer {value}"}},
+        "options_env": {"extra_env": {"OTHER_NAME": f"Bearer {value}"}},
+    }.get(location, {})
+    request, profile, runtime = recipe(custom_args=custom_args)
+    if location == "runtime_env":
+        runtime.env_vars["OTHER_NAME"] = f"Bearer {value}"
+    elif location == "setup":
+        runtime.setup_commands.append(f"echo {value}")
+    provider = LightningProvider()
+    with pytest.raises(ProviderAuthError, match="persisted options") as error:
+        await provider.deploy(request, profile, runtime)
+    assert credential not in str(error.value)
+    assert not provider._records and not cloud.calls
+
+
+@pytest.mark.asyncio
+async def test_unrelated_runtime_secrets_are_allowed(cloud):
+    provider = LightningProvider()
+    dep = await provider.deploy(*recipe(env={"MODEL_TOKEN": "unrelated-model-secret"}))
+    assert dep.id in provider._records
+    assert next(c[1] for c in cloud.calls if c[0] == "start")["env"]["MODEL_TOKEN"] == "unrelated-model-secret"
+    await provider.stop(dep.id)
 
 
 @pytest.mark.parametrize("provider,url,applied", [
@@ -483,7 +525,12 @@ async def test_cold_start_retry_keeps_auth_and_activity(cloud, tmp_path):
         await weave.close()
 
 
-def test_installed_sdk_public_contract(monkeypatch):
+@pytest.mark.parametrize("gpu,count", [
+    (gpu, count)
+    for gpu in ("T4", "L4", "L40S", "A100-40GB", "A100-80GB", "H100", "H200", "B200")
+    for count in ((1, 8) if gpu == "B200" else (1, 2, 4, 8))
+])
+def test_installed_sdk_public_contract(monkeypatch, gpu, count):
     import importlib.util
     import inspect
 
@@ -498,8 +545,13 @@ def test_installed_sdk_public_contract(monkeypatch):
     assert {"teamspace", "name"} <= set(inspect.signature(sdk.Deployment).parameters)
     assert hasattr(config, "ApiKeyAuth")
     assert config.HttpHealthCheck(path="/health", port=8000).port == 8000
-    for name in ("T4", "L4", "L40S", "A100_40GB", "A100_80GB", "H100", "H200", "B200"):
-        assert getattr(sdk.Machine, name)
+    request, profile, _ = recipe(gpu_type=gpu, num_gpus=count)
+    # Use a small model requirement so T4 mapping is tested independently of Fish VRAM.
+    profile = profile.model_copy(deep=True)
+    profile.hardware.min_vram_gb = 1
+    machine = getattr(sdk.Machine, LightningProvider.machine_name(request, profile))
+    assert machine.accelerator_count == count
+    assert machine.family == gpu.split("-")[0]
 
 
 def test_paid_integration_requires_explicit_opt_in(monkeypatch):
@@ -525,7 +577,7 @@ async def test_readiness_failure_cleans_resources(cloud, tmp_path):
     try:
         with pytest.raises(HealthcheckTimeoutError):
             await weave.deploy("fish-s2-pro", provider="lightning")
-        assert not cloud.resources
+        await assert_failed_deployment_cleaned(weave, cloud)
     finally:
         await weave.close()
 
@@ -541,7 +593,75 @@ async def test_health_auth_failure_cleans_resources(cloud, tmp_path, monkeypatch
     try:
         with pytest.raises(ProviderAuthError):
             await weave.deploy("fish-s2-pro", provider="lightning")
+        await assert_failed_deployment_cleaned(weave, cloud)
+    finally:
+        await weave.close()
+
+
+async def assert_failed_deployment_cleaned(weave, cloud):
+    assert not cloud.resources
+    assert weave.list_deployments() == []
+    [record] = await weave.list_records()
+    assert record.state == DeploymentState.STOPPED
+    state = weave.lifecycle_service.get_state(record.id)
+    assert state.is_stopped and state.stopped_at is not None
+    watchdog = weave.lifecycle_service._watchdog
+    assert record.id not in watchdog.scheduled_checks
+    assert record.id in watchdog.cancelled_checks
+    assert not await weave.lifecycle_service.check_and_autostop(
+        record.id, now=datetime.now(UTC) + timedelta(hours=2),
+    )
+    assert len([c for c in cloud.calls if c[0] == "cli" and c[1][1] == "delete"]) == 1
+
+
+@pytest.mark.parametrize("stage", ["cancel", "registration", "wiring"])
+@pytest.mark.asyncio
+async def test_post_provision_failure_cleans_lifecycle(cloud, tmp_path, monkeypatch, stage):
+    weave = make_weave(tmp_path / "state.db")
+
+    async def fail(*args, **kwargs):
+        if stage == "cancel":
+            raise asyncio.CancelledError
+        raise RuntimeError("registration failed")
+
+    if stage == "registration":
+        monkeypatch.setattr(weave.lifecycle_service._watchdog, "schedule_check", fail)
+    elif stage == "wiring":
+        def fail_wiring(*args, **kwargs):
+            raise RuntimeError("registration failed")
+        monkeypatch.setattr(weave, "_wire_deployment", fail_wiring)
+    else:
+        monkeypatch.setattr(weave.healthcheck_service, "wait_for_ready", fail)
+    try:
+        with pytest.raises(asyncio.CancelledError if stage == "cancel" else RuntimeError):
+            await weave.deploy("fish-s2-pro", provider="lightning")
+        await assert_failed_deployment_cleaned(weave, cloud)
+    finally:
+        await weave.close()
+
+
+@pytest.mark.asyncio
+async def test_readiness_cleanup_failure_preserves_error_and_retry(cloud, tmp_path, monkeypatch):
+    weave = make_weave(tmp_path / "state.db")
+    original_error = ProviderAuthError("endpoint denied")
+
+    async def fail(*args, **kwargs):
+        raise original_error
+
+    monkeypatch.setattr(weave.healthcheck_service, "wait_for_ready", fail)
+    cloud.switches.delete_error = True
+    try:
+        with pytest.raises(ProviderAuthError) as caught:
+            await weave.deploy("fish-s2-pro", provider="lightning")
+        assert caught.value is original_error
+        [deployment] = weave.list_deployments()
+        assert cloud.resources
+        assert not weave.lifecycle_service.get_state(deployment.id).is_stopped
+        assert (await weave.lifecycle_service.get_record(deployment.id)).state != DeploymentState.STOPPED
+        cloud.switches.delete_error = False
+        await weave.stop(deployment.id)
         assert not cloud.resources
+        assert weave.lifecycle_service.get_state(deployment.id).is_stopped
     finally:
         await weave.close()
 

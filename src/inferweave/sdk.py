@@ -229,7 +229,12 @@ class InferWeave:
         except BaseException:
             if compute_provider.cleanup_failed_deployment:
                 try:
-                    await compute_provider.stop(deployment.id)
+                    await self.lifecycle_service.stop_deployment(
+                        deployment.id, provider=compute_provider,
+                    )
+                    self._active_deployments.pop(deployment.id, None)
+                    if deployment._inference_client is not None:
+                        await deployment._inference_client.aclose()
                 except Exception:  # noqa: BLE001 - cleanup must preserve the original failure
                     logger.error("Failed to clean up deployment %s; retry stop using its ID.", deployment.id)
             raise
