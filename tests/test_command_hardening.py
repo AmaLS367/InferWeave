@@ -5,11 +5,14 @@ identifiers, structured engine arguments, and extra_cli_args cannot create unexp
 command injection or break execution semantics.
 """
 
+import json
 import shlex
 from unittest.mock import patch
 
 import pytest
 
+from inferweave.accounts import ProviderAccount
+from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import WorkloadType
@@ -19,6 +22,7 @@ from inferweave.models.profile import (
     ModelProfile,
 )
 from inferweave.providers.modal_provider import ModalProvider
+from inferweave.providers.skypilot import SkyPilotProvider
 from inferweave.runtimes.base import RuntimeSpec
 from inferweave.runtimes.templates import (
     FishSpeechTemplate,
@@ -169,6 +173,9 @@ async def test_modal_provider_executes_with_shell_false():
         port=8000,
     )
     request = DeploymentRequest(model=profile.id, provider="modal", dry_run=False)
+    record = DeploymentRecord(
+        id="iw-modal-safe", model=profile.id, provider="modal", resource=ResourceRef(name="iw-modal-safe")
+    )
 
     captured_serve_fn = None
 
@@ -185,7 +192,9 @@ async def test_modal_provider_executes_with_shell_false():
         patch("modal.web_server", side_effect=fake_web_server),
         patch("subprocess.Popen") as mock_popen,
     ):
-        await provider.deploy(request, profile, runtime)
+        await provider.provision(
+            record, request, profile, runtime, ProviderAccount.ambient("modal")
+        )
         assert captured_serve_fn is not None
 
         # Call the captured serve function to verify subprocess.Popen execution
@@ -196,45 +205,57 @@ async def test_modal_provider_executes_with_shell_false():
         assert kwargs.get("shell") is False
 
 
+class _RecordingRunner:
+    """Fake SkyPilot WorkerRunner capturing the JSON request the provider would send."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict, dict]] = []
+
+    async def run(self, operation, payload, *, env, secrets=None, timeout, deployment_id=None, account_id=""):
+        self.requests.append((operation, json.loads(json.dumps(payload)), dict(secrets or {})))
+        return {"endpoint": "http://1.2.3.4:8000"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", ADVERSARIAL_PAYLOADS)
-async def test_skypilot_run_script_is_built_only_from_quoted_run_args(payload):
+async def test_skypilot_run_script_is_built_only_from_quoted_run_args(payload, tmp_path):
     """SkyPilot's Task.run is a shell string: it must be shlex.join(run_args), never run_command.
 
     A run_command that diverges from run_args (e.g. carrying an injected fragment) must be
     ignored, and metacharacters inside structured args must stay quoted literal tokens.
     """
-    from unittest.mock import MagicMock
-
-    from inferweave.providers.skypilot import SkyPilotProvider
-
     run_args = ["python3", "-m", "server", "--model", payload, f"--tag={payload}"]
+    injected = "python3 -m server && touch /tmp/pwned"
     runtime = RuntimeSpec(
         name="probe",
         docker_image="python:3.11-slim",
-        run_command="python3 -m server && touch /tmp/pwned",  # must NOT reach SkyPilot
+        run_command=injected,  # must NOT reach SkyPilot
         run_args=run_args,
         port=8000,
     )
     profile = _make_profile("safe-model", "test/model")
-    provider = SkyPilotProvider(cloud_name="runpod")
-    mock_sky = MagicMock()
-    mock_sky.launch = MagicMock(return_value=(1, None))
-    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
-    mock_sky.clouds.CLOUD_REGISTRY.from_str.return_value = MagicMock()
+    runner = _RecordingRunner()
+    provider = SkyPilotProvider("runpod", state_dir=tmp_path, runner=runner)  # type: ignore[arg-type]
+    request = DeploymentRequest(model=profile.id, provider="runpod")
+    account = ProviderAccount.ambient("runpod")
+    record = DeploymentRecord(
+        id="iw-safe",
+        model=profile.id,
+        provider="runpod",
+        resource=provider.resource_ref("iw-safe", request, account),
+    )
 
-    with (
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        patch.object(provider, "_get_sky_module", return_value=mock_sky),
-    ):
-        await provider.deploy(
-            DeploymentRequest(model=profile.id, provider="runpod"), profile, runtime
-        )
+    # The task spec itself, and the exact payload that is sent to the worker.
+    spec = provider.launch_payload(record, request, profile, runtime)
+    with patch.object(SkyPilotProvider, "_ensure_supported_platform", return_value=None):
+        await provider.provision(record, request, profile, runtime, account)
 
-    _, task_kwargs = mock_sky.Task.call_args
-    run_script = task_kwargs["run"]
-    assert run_script == shlex.join(run_args)
-    assert shlex.split(run_script) == run_args
+    ((operation, sent, _secrets),) = runner.requests
+    assert operation == "launch"
+    for run_script in (spec["run"], sent["run"]):
+        assert run_script == shlex.join(run_args)
+        assert shlex.split(run_script) == run_args
+    assert injected not in json.dumps(sent)
 
 
 @pytest.mark.parametrize("payload", ADVERSARIAL_PAYLOADS)

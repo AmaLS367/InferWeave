@@ -8,14 +8,29 @@ import httpx
 import modal
 import pytest
 from conftest import TEST_PROXY_TOKEN_ID, TEST_PROXY_TOKEN_SECRET
-from support import AUDIO_MODEL, ENDPOINT, deploy_on_modal, make_weave, patched_modal
+from support import (
+    AUDIO_MODEL,
+    ENDPOINT,
+    deploy_on_modal,
+    make_weave,
+    modal_pool,
+    patched_modal,
+)
 
 from inferweave import InferWeave
+from inferweave.accounts import (
+    AccountManager,
+    AccountsConfig,
+    ProviderAccount,
+    ProviderAccounts,
+    lightning_account,
+)
 from inferweave.adapters.auth import (
     CompositeEndpointAuth,
     ModalProxyAuth,
     StaticHeaderAuth,
 )
+from inferweave.adapters.auth.endpoint_auth import LightningEndpointAuth, NoEndpointAuth
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
 from inferweave.core.exceptions import InferenceError, ProviderAuthError
 from inferweave.domain.deployment_record import DeploymentRecord
@@ -356,3 +371,245 @@ async def test_router_provider_with_its_own_auth_is_not_overridden(
     router = ProviderRouter(endpoint_auth=own)
     InferWeave(router=router, endpoint_auth=ModalProxyAuth(token_id="wk-sdk", token_secret="ws-sdk"))
     assert router.get("modal").endpoint_auth is own  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------- per-account endpoint credentials
+
+LIGHTNING_ENDPOINT = "https://dep-x.cloudspaces.litng.ai"
+AMBIENT_MODAL = ProviderAccount.ambient("modal")
+AMBIENT_LIGHTNING = ProviderAccount.ambient("lightning")
+
+
+def _pooled_modal(account_id: str = "a", *, proxy: bool = True) -> ProviderAccount:
+    return modal_pool(account_id, proxy=proxy).resolve("modal", account_id)
+
+
+def _pooled_lightning(account_id: str = "l1") -> ProviderAccount:
+    environ = {"T_LIGHT_UID": "SENTINEL-light-user", "T_LIGHT_KEY": "SENTINEL-light-key"}
+    config = AccountsConfig(
+        {
+            "lightning": ProviderAccounts(
+                accounts=[
+                    lightning_account(
+                        account_id, user_id_env="T_LIGHT_UID", api_key_env="T_LIGHT_KEY"
+                    )
+                ]
+            )
+        }
+    )
+    return AccountManager(config, environ=environ).resolve("lightning", account_id)
+
+
+def test_no_endpoint_auth_ignores_account():
+    auth = NoEndpointAuth()
+    assert auth.headers_for("modal", ENDPOINT) == {}
+    assert auth.headers_for("modal", ENDPOINT, _pooled_modal()) == {}
+    assert not auth.is_configured_for("modal", _pooled_modal())
+
+
+def test_static_header_auth_applies_to_every_account_of_its_providers():
+    auth = StaticHeaderAuth({"X-Api-Key": "abc123456"}, providers=("modal",))
+    for account in (None, AMBIENT_MODAL, _pooled_modal()):
+        assert auth.headers_for("modal", ENDPOINT, account) == {"X-Api-Key": "abc123456"}
+    assert auth.headers_for("runpod", "http://1.2.3.4:8080", _pooled_modal()) == {}
+    assert auth.is_configured_for("modal", _pooled_modal())
+
+
+def test_modal_proxy_auth_pooled_account_uses_its_own_tokens_never_the_env_ones():
+    headers = ModalProxyAuth().headers_for("modal", ENDPOINT, _pooled_modal("a"))
+    assert headers == {
+        "Modal-Key": "SENTINEL-modal-a-proxy-id",
+        "Modal-Secret": "SENTINEL-modal-a-proxy-secret",
+    }
+    assert TEST_PROXY_TOKEN_ID not in headers.values()
+    other = ModalProxyAuth().headers_for("modal", ENDPOINT, _pooled_modal("b"))
+    assert other["Modal-Key"] == "SENTINEL-modal-b-proxy-id"
+
+
+def test_modal_proxy_auth_pooled_account_ignores_explicit_and_getter_tokens():
+    explicit = ModalProxyAuth(token_id="wk-explicit", token_secret="ws-explicit")
+    getter = ModalProxyAuth(token_getter=lambda: ("wk-getter", "ws-getter"))
+    for auth in (explicit, getter):
+        headers = auth.headers_for("modal", ENDPOINT, _pooled_modal("a"))
+        assert headers["Modal-Key"] == "SENTINEL-modal-a-proxy-id"
+
+
+def test_modal_proxy_auth_pooled_account_without_proxy_tokens_gets_nothing():
+    """The ambient env tokens belong to another workspace and must not be borrowed."""
+    account = _pooled_modal("a", proxy=False)
+    assert ModalProxyAuth().headers_for("modal", ENDPOINT, account) == {}
+    assert not ModalProxyAuth().is_configured_for("modal", account)
+
+
+def test_modal_proxy_auth_ambient_account_keeps_env_tokens():
+    expected = {"Modal-Key": TEST_PROXY_TOKEN_ID, "Modal-Secret": TEST_PROXY_TOKEN_SECRET}
+    auth = ModalProxyAuth()
+    assert auth.headers_for("modal", ENDPOINT, AMBIENT_MODAL) == expected
+    assert auth.headers_for("modal", ENDPOINT, None) == expected
+    assert auth.is_configured_for("modal", AMBIENT_MODAL)
+    explicit = ModalProxyAuth(token_id="wk-explicit", token_secret="ws-explicit")
+    assert explicit.headers_for("modal", ENDPOINT, AMBIENT_MODAL)["Modal-Key"] == "wk-explicit"
+
+
+def test_modal_proxy_auth_pooled_account_is_still_host_and_provider_scoped():
+    account = _pooled_modal()
+    auth = ModalProxyAuth()
+    assert auth.headers_for("modal", "https://attacker.example.com", account) == {}
+    assert auth.headers_for("runpod", ENDPOINT, account) == {}
+    assert auth.is_configured_for("modal", account)  # endpoint-less check
+
+
+def test_lightning_endpoint_auth_ambient_uses_env_key(monkeypatch: pytest.MonkeyPatch):
+    auth = LightningEndpointAuth()
+    monkeypatch.delenv("LIGHTNING_API_KEY", raising=False)
+    assert auth.headers_for("lightning", LIGHTNING_ENDPOINT, AMBIENT_LIGHTNING) == {}
+    assert not auth.is_configured_for("lightning", AMBIENT_LIGHTNING)
+    monkeypatch.setenv("LIGHTNING_API_KEY", "env-lightning-key")
+    expected = {"Authorization": "Bearer env-lightning-key"}
+    assert auth.headers_for("lightning", LIGHTNING_ENDPOINT, AMBIENT_LIGHTNING) == expected
+    assert auth.headers_for("lightning", LIGHTNING_ENDPOINT) == expected
+    assert auth.is_configured_for("lightning", AMBIENT_LIGHTNING)
+
+
+def test_lightning_endpoint_auth_pooled_uses_account_key_never_env(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("LIGHTNING_API_KEY", "env-lightning-key")
+    headers = LightningEndpointAuth().headers_for(
+        "lightning", LIGHTNING_ENDPOINT, _pooled_lightning()
+    )
+    assert headers == {"Authorization": "Bearer SENTINEL-light-key"}
+
+
+def test_lightning_endpoint_auth_scoping_applies_to_pooled_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    account = _pooled_lightning()
+    auth = LightningEndpointAuth()
+    assert auth.headers_for("modal", LIGHTNING_ENDPOINT, account) == {}
+    assert auth.headers_for("lightning", "https://attacker.example.com", account) == {}
+    assert auth.headers_for("lightning", "http://dep-x.cloudspaces.litng.ai", account) == {}
+    assert auth.is_configured_for("lightning", account)
+    monkeypatch.delenv("LIGHTNING_API_KEY", raising=False)
+    assert auth.is_configured_for("lightning", account)  # pooled key needs no env
+
+
+def test_composite_auth_passes_the_account_to_every_resolver(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LIGHTNING_API_KEY", "env-lightning-key")
+    auth = CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())
+    assert auth.headers_for("modal", ENDPOINT, _pooled_modal("a")) == {
+        "Modal-Key": "SENTINEL-modal-a-proxy-id",
+        "Modal-Secret": "SENTINEL-modal-a-proxy-secret",
+    }
+    assert auth.headers_for("lightning", LIGHTNING_ENDPOINT, _pooled_lightning()) == {
+        "Authorization": "Bearer SENTINEL-light-key"
+    }
+    assert auth.headers_for("lightning", LIGHTNING_ENDPOINT, AMBIENT_LIGHTNING) == {
+        "Authorization": "Bearer env-lightning-key"
+    }
+    assert auth.is_configured_for("modal", _pooled_modal("a"))
+    assert not auth.is_configured_for("modal", _pooled_modal("a", proxy=False))
+    assert not auth.is_configured_for("runpod", ProviderAccount.ambient("runpod"))
+
+
+def test_pooled_secrets_never_appear_in_auth_reprs_or_account_reprs():
+    account = _pooled_modal("a")
+    texts = [
+        repr(ModalProxyAuth()),
+        repr(LightningEndpointAuth()),
+        repr(CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())),
+        repr(account),
+        str(account),
+    ]
+    for text in texts:
+        assert "SENTINEL" not in text
+
+
+@pytest.mark.asyncio
+async def test_pooled_deployment_probes_and_inference_use_its_own_proxy_tokens(db_path: Path):
+    probe = HeaderRecordingProbe()
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=WAV, headers={"content-type": "audio/wav"})
+
+    weave = make_weave(db_path, probe=probe, handler=handler, accounts=modal_pool("a", "b"))
+    with patched_modal():
+        dep = await weave.deploy(
+            model=AUDIO_MODEL, provider="modal", wait_for_ready=True, account="b"
+        )
+    assert dep.account == "b" and dep.state == DeploymentState.HEALTHY
+    await dep.check_health()
+    await dep.synthesize("hello")
+    with patched_modal():
+        await dep.refresh()
+
+    assert len(probe.headers_seen) >= 3
+    for headers in [*probe.headers_seen, dict(seen[0].headers)]:
+        lowered = {k.lower(): v for k, v in headers.items()}
+        assert lowered["modal-key"] == "SENTINEL-modal-b-proxy-id"
+        assert lowered["modal-secret"] == "SENTINEL-modal-b-proxy-secret"
+        assert TEST_PROXY_TOKEN_ID not in lowered.values()
+
+
+@pytest.mark.asyncio
+async def test_pooled_secrets_are_never_persisted_or_logged(
+    db_path: Path, caplog: pytest.LogCaptureFixture
+):
+    probe = HeaderRecordingProbe()
+    weave = make_weave(db_path, probe=probe, accounts=modal_pool("a"))
+    with caplog.at_level(logging.DEBUG), patched_modal():
+        dep = await weave.deploy(model=AUDIO_MODEL, provider="modal", wait_for_ready=True)
+        await dep.check_health()
+        await dep.refresh()
+
+    raw = b"".join(f.read_bytes() for f in db_path.parent.glob("deployments.db*") if f.is_file())
+    assert b"iw-modal-" in raw  # sanity: the database really holds the record
+    assert b"SENTINEL" not in raw
+    assert "SENTINEL" not in " ".join(r.getMessage() for r in caplog.records)
+    assert "SENTINEL" not in repr(dep) + repr(dep.status)
+
+
+@pytest.mark.asyncio
+async def test_pooled_proxy_tokens_echoed_by_the_endpoint_are_redacted(db_path: Path):
+    def echoing_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            text=f"bad creds: {request.headers['modal-key']} {request.headers['modal-secret']}",
+        )
+
+    weave_a = make_weave(db_path, accounts=modal_pool("a"))
+    dep = await deploy_on_modal(weave_a)
+    weave_b = make_weave(db_path, handler=echoing_handler, accounts=modal_pool("a"))
+    attached = await weave_b.attach(dep.id)
+
+    with pytest.raises(InferenceError) as excinfo:
+        await attached.synthesize("hello")
+    err = excinfo.value
+    visible = " ".join([str(err), repr(err), err.response_body or "", err.endpoint or ""])
+    assert "SENTINEL" not in visible
+    assert "[REDACTED]" in (err.response_body or "")
+
+
+@pytest.mark.asyncio
+async def test_pooled_modal_deploy_without_proxy_tokens_fails_fast_naming_the_account(
+    db_path: Path,
+):
+    weave = make_weave(db_path, accounts=modal_pool("team-a", proxy=False))
+    with patched_modal() as mocks, pytest.raises(ProviderAuthError, match="team-a"):
+        await weave.deploy(model=AUDIO_MODEL, provider="modal", wait_for_ready=False)
+    assert await weave.list_records() == []  # nothing half-created
+    mocks.stop_app.assert_not_awaited()
+    mocks.from_credentials.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pooled_modal_account_can_opt_out_of_proxy_auth(db_path: Path):
+    weave = make_weave(db_path, accounts=modal_pool("team-a", proxy=False))
+    with patch("modal.web_server", wraps=modal.web_server) as web_server:
+        dep = await deploy_on_modal(
+            weave, account="team-a", custom_args={"requires_proxy_auth": False}
+        )
+    assert web_server.call_args.kwargs["requires_proxy_auth"] is False
+    assert dep.account == "team-a"

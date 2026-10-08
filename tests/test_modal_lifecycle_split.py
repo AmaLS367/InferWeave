@@ -18,6 +18,14 @@ def db_path(tmp_path: Path) -> Path:
     return tmp_path / "deployments.db"
 
 
+def _assert_stopped_app(mocks, deployment_id: str) -> None:
+    """The Modal app was stopped exactly once, for this deployment, under the ambient account."""
+    mocks.stop_app.assert_awaited_once()
+    record, account = mocks.stop_app.await_args.args
+    assert record.id == deployment_id and record.resource.name == deployment_id
+    assert account.is_ambient
+
+
 async def _scaledown_for(weave, **deploy_kwargs) -> int | None:
     captured: dict = {}
     real_function = __import__("modal").App.function
@@ -109,7 +117,7 @@ async def test_scale_to_zero_does_not_mark_the_deployment_stopped(db_path: Path)
     probe = MockHealthcheckProbeAdapter(default_healthy=False)  # cold: probes time out
     weave = make_weave(db_path, probe=probe)
     dep = await deploy_on_modal(weave, destroy_after_idle_mins=1440, scaledown_window_seconds=60)
-    with patched_modal(DeploymentState.STARTING) as mocks:  # app exists, no containers
+    with patched_modal() as mocks:  # app exists, no containers
         status = await dep.refresh()
     assert status.state != DeploymentState.STOPPED
     assert status.state in {DeploymentState.STARTING, DeploymentState.UNHEALTHY}
@@ -121,7 +129,7 @@ async def test_scale_to_zero_does_not_mark_the_deployment_stopped(db_path: Path)
 
     # ... and the endpoint is still logical endpoint once the app wakes up
     probe._default_healthy = True
-    with patched_modal(DeploymentState.STARTING):
+    with patched_modal():
         assert (await dep.refresh()).state == DeploymentState.HEALTHY
     assert dep.endpoint_url == status.endpoint_url
 
@@ -154,7 +162,7 @@ async def test_full_destroy_still_stops_the_modal_app_after_long_idle(db_path: P
         assert await weave.lifecycle_service.check_and_autostop(
             dep.id, now=t0 + timedelta(hours=24, minutes=1)
         ) is True
-    mocks.stop_app.assert_awaited_once_with(dep.id)
+    _assert_stopped_app(mocks, dep.id)
     assert dep.state == DeploymentState.STOPPED
     record = await weave.lifecycle_service.get_record(dep.id)
     assert record is not None and record.state == DeploymentState.STOPPED
@@ -198,7 +206,7 @@ async def test_persisted_activity_survives_a_fresh_inferweave_instance(db_path: 
         assert await weave_b.lifecycle_service.check_and_autostop(
             dep.id, now=active_at + timedelta(hours=24, minutes=1)
         ) is True
-    mocks.stop_app.assert_awaited_once_with(dep.id)
+    _assert_stopped_app(mocks, dep.id)
 
 
 @pytest.mark.asyncio
@@ -223,7 +231,7 @@ async def test_explicit_stop_is_a_real_termination(db_path: Path):
     dep = await deploy_on_modal(weave, scaledown_window_seconds=60)
     with patched_modal() as mocks:
         await dep.stop()
-    mocks.stop_app.assert_awaited_once_with(dep.id)
+    _assert_stopped_app(mocks, dep.id)
     assert dep.state == DeploymentState.STOPPED
     record = await weave.lifecycle_service.get_record(dep.id)
     assert record is not None and record.state == DeploymentState.STOPPED
@@ -231,17 +239,9 @@ async def test_explicit_stop_is_a_real_termination(db_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_registration_preserves_provider_persisted_record(db_path: Path):
-    """register_deployment must update, not replace, the record the provider wrote."""
-    from inferweave.adapters.lifecycle.sqlite_repository import (
-        SqliteDeploymentRepository,
-    )
-    from inferweave.providers.modal_provider import ModalProvider
-    from inferweave.providers.router import ProviderRouter
-
+async def test_registration_preserves_provisioned_record(db_path: Path):
+    """register_deployment must update, not replace, the record written at provisioning."""
     weave = make_weave(db_path)
-    router: ProviderRouter = weave.router
-    router.register(ModalProvider(repository=SqliteDeploymentRepository(db_path)))
     dep = await deploy_on_modal(weave, destroy_after_idle_mins=120, scaledown_window_seconds=45)
     record = await weave.lifecycle_service.get_record(dep.id)
     assert record is not None
@@ -249,3 +249,7 @@ async def test_registration_preserves_provider_persisted_record(db_path: Path):
     assert record.options.autostop.idle_minutes == 120
     assert record.workload_type is not None
     assert record.last_activity_at is not None
+    # ownership written ahead of the create call survives registration
+    assert record.account == "ambient"
+    assert record.resource is not None and record.resource.name == dep.id
+    assert record.needs_reconciliation is False

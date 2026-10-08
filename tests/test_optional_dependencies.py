@@ -96,24 +96,38 @@ def test_skypilot_dry_run_works_without_skypilot_installed(tmp_path):
     assert "OK" in result.stdout
 
 
-def test_missing_skypilot_raises_actionable_install_hint():
+def _run_worker(module, request: dict, monkeypatch, capsys) -> tuple[int, dict]:
+    """Runs a worker's ``main()`` in-process with ``request`` on stdin; returns (rc, response)."""
+    import io
+    import json
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    rc = module.main()
+    last = [ln for ln in capsys.readouterr().out.splitlines() if "iw_worker" in ln][-1]
+    return rc, json.loads(last)
+
+
+@pytest.mark.parametrize("cloud", ["runpod", "fluidstack"])
+def test_skypilot_worker_without_skypilot_reports_not_installed(cloud, monkeypatch, capsys):
+    """The host never imports SkyPilot; a worker interpreter lacking it fails with a clear error."""
+    from inferweave.isolation import skypilot_worker
+
+    request = {"op": "probe", "payload": {"cloud": cloud, "mode": "ambient"}, "secrets": {}}
+    with patch.dict(sys.modules, {"sky": None}):
+        rc, response = _run_worker(skypilot_worker, request, monkeypatch, capsys)
+
+    assert rc != 0 and response["ok"] is False
+    assert response["error"]["kind"] == "invalid_request"
+    assert "SkyPilot is not installed" in response["error"]["message"]
+    assert response["error"]["resource_may_exist"] is False
+
+
+def test_skypilot_provider_never_imports_skypilot_in_the_host_process():
     provider = SkyPilotProvider(cloud_name="runpod")
-    with (
-        patch.dict(sys.modules, {"sky": None}),
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        pytest.raises(ImportError, match=r"pip install 'inferweave\[runpod\]'"),
-    ):
-        provider._get_sky_module()
+    assert not hasattr(provider, "_get_sky_module")
+    from inferweave.providers import skypilot as skypilot_module
 
-
-def test_missing_skypilot_for_uncatalogued_cloud_suggests_clouds_extra():
-    provider = SkyPilotProvider(cloud_name="fluidstack")
-    with (
-        patch.dict(sys.modules, {"sky": None}),
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        pytest.raises(ImportError, match=r"pip install 'inferweave\[clouds\]'"),
-    ):
-        provider._get_sky_module()
+    assert "import sky\n" not in Path(skypilot_module.__file__).read_text(encoding="utf-8")
 
 
 def test_missing_modal_raises_actionable_install_hint():
@@ -125,14 +139,26 @@ def test_missing_modal_raises_actionable_install_hint():
         provider._get_modal_module()
 
 
-def test_missing_lightning_raises_actionable_install_hint():
-    from inferweave.providers.lightning_provider import LightningProvider
+def test_lightning_worker_without_sdk_reports_not_installed(monkeypatch, capsys):
+    from inferweave.isolation import lightning_worker
 
-    with (
-        patch.dict(sys.modules, {"lightning_sdk": None}),
-        pytest.raises(ImportError, match=r"pip install 'inferweave\[lightning\]'"),
-    ):
-        LightningProvider()._sdk()
+    request = {"op": "whoami", "payload": {}, "secrets": {}}
+    with patch.dict(sys.modules, {"lightning_sdk": None, "lightning_sdk.cli.utils.auth": None}):
+        rc, response = _run_worker(lightning_worker, request, monkeypatch, capsys)
+
+    assert rc != 0 and response["ok"] is False
+    assert response["error"]["kind"] == "invalid_request"
+    assert "lightning-sdk is not installed" in response["error"]["message"]
+    assert response["error"]["resource_may_exist"] is False
+
+
+def test_lightning_provider_never_imports_the_sdk_in_the_host_process():
+    from inferweave.providers import lightning_provider
+
+    assert not hasattr(lightning_provider.LightningProvider, "_sdk")
+    assert "import lightning_sdk" not in Path(lightning_provider.__file__).read_text(
+        encoding="utf-8"
+    )
 
 
 def test_lightning_dry_run_works_without_sdk_or_credentials(tmp_path):

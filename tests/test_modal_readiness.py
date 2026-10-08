@@ -12,7 +12,6 @@ from inferweave.core.exceptions import HealthcheckTimeoutError
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.healthcheck import ProbeOutcome, ProbeResult
 from inferweave.models.profile import HealthcheckConfig
-from inferweave.providers.modal_provider import ModalProvider
 from inferweave.providers.router import ProviderRouter
 from inferweave.services.healthcheck_service import HealthcheckService
 from inferweave.services.lifecycle_service import LifecycleService
@@ -34,18 +33,16 @@ class _StateRecordingRepository(InMemoryDeploymentRepository):
 
 def _build_weave(
     probe_adapter: MockHealthcheckProbeAdapter,
-    provider_repo: InMemoryDeploymentRepository | None = None,
+    repository: InMemoryDeploymentRepository | None = None,
 ) -> tuple[InferWeave, InMemoryDeploymentRepository]:
     healthcheck_svc = HealthcheckService(probe_port=probe_adapter)
-    lifecycle_repo = InMemoryDeploymentRepository()
+    lifecycle_repo = repository or InMemoryDeploymentRepository()
     lifecycle_svc = LifecycleService(
         watchdog_port=MockWatchdogAdapter(),
         repository=lifecycle_repo,
         healthcheck_service=healthcheck_svc,
     )
     router = ProviderRouter()
-    if provider_repo is not None:
-        router.register(ModalProvider(repository=provider_repo))
     weave = InferWeave(
         router=router,
         healthcheck_service=healthcheck_svc,
@@ -73,8 +70,8 @@ def _patched_modal_deploy():
 
 
 @pytest.mark.asyncio
-async def test_modal_provider_never_persists_healthy_on_deploy():
-    """ModalProvider.deploy() alone transitions PROVISIONING -> STARTING, never HEALTHY."""
+async def test_modal_provisioning_never_persists_healthy_on_deploy():
+    """Provisioning transitions PROVISIONING -> STARTING (write-ahead first), never HEALTHY."""
     repo = _StateRecordingRepository()
     weave, _ = _build_weave(MockHealthcheckProbeAdapter(default_healthy=True), repo)
     deploy_patch, url_patch = _patched_modal_deploy()
@@ -84,10 +81,14 @@ async def test_modal_provider_never_persists_healthy_on_deploy():
             model="fish-s2-pro", provider="modal", wait_for_ready=False
         )
 
-    assert repo.saved_states == [DeploymentState.PROVISIONING, DeploymentState.STARTING]
+    assert repo.saved_states[0] == DeploymentState.PROVISIONING
+    assert DeploymentState.STARTING in repo.saved_states
+    assert DeploymentState.HEALTHY not in repo.saved_states
     record = await repo.get(deployment.id)
     assert record is not None
     assert record.state == DeploymentState.STARTING
+    assert record.account == "ambient"
+    assert record.needs_reconciliation is False
     assert record.endpoint_url == ENDPOINT
     assert record.ready_at is None
 

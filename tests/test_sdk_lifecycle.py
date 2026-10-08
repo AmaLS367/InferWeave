@@ -1,13 +1,14 @@
 """Integration tests for Deployment lifecycle, autostop, and activity tracking via InferWeave SDK."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from inferweave import DeploymentState, InferWeave
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
 from inferweave.adapters.lifecycle.watchdog import MockWatchdogAdapter
+from inferweave.core.exceptions import ProviderOperationError
 from inferweave.services.healthcheck_service import HealthcheckService
 from inferweave.services.lifecycle_service import LifecycleService
 
@@ -140,6 +141,10 @@ async def test_sdk_refresh_retains_model_and_never_reports_unverified_healthy():
     with (
         patch("modal.App.deploy", return_value=None),
         patch("modal.Function.get_web_url", return_value="https://test.modal.run"),
+        patch(
+            "inferweave.providers.modal_provider.ModalProvider._lookup_app",
+            new=AsyncMock(return_value=True),
+        ),
     ):
         deployment = await weave.deploy(
             model="fish-s2-pro",
@@ -205,8 +210,6 @@ async def test_sdk_weave_stop_and_get_status():
 
 @pytest.mark.asyncio
 async def test_sdk_weave_stop_failure_does_not_mark_stopped():
-    from unittest.mock import AsyncMock
-
     probe_adapter = MockHealthcheckProbeAdapter(default_healthy=True)
     healthcheck_svc = HealthcheckService(probe_port=probe_adapter)
     lifecycle_svc = LifecycleService(
@@ -235,7 +238,7 @@ async def test_sdk_weave_stop_failure_does_not_mark_stopped():
         modal_provider = weave.router.get("modal")
         with (
             patch.object(modal_provider, "stop", AsyncMock(side_effect=RuntimeError("Cloud API Network Failure"))),
-            pytest.raises(RuntimeError, match="Cloud API Network Failure"),
+            pytest.raises(ProviderOperationError, match="Provider stop failed"),
         ):
             await weave.stop(deployment.id)
 
@@ -270,12 +273,13 @@ async def test_lifecycle_dry_run_cross_process_no_provider_calls(tmp_path):
         state=DeploymentState.PROVISIONING,
         endpoint_url="http://dryrun-iw-dryrun-mock-12345.cloud:8080",
         is_dry_run=True,
+        account=None,  # dry runs never touch a provider account
     )
     await repo.save(record)
 
     # 2. In a brand new LifecycleService instance, attach a mock provider resolver
     mock_provider = MagicMock()
-    mock_provider.get_status = AsyncMock()
+    mock_provider.status = AsyncMock()
     mock_provider.stop = AsyncMock()
 
     lifecycle_svc = LifecycleService(
@@ -285,7 +289,7 @@ async def test_lifecycle_dry_run_cross_process_no_provider_calls(tmp_path):
 
     # 3. Calling refresh_status on dry-run should NOT invoke provider API
     status = await lifecycle_svc.refresh_status("iw-dryrun-mock-12345")
-    mock_provider.get_status.assert_not_called()
+    mock_provider.status.assert_not_called()
     assert status.id == "iw-dryrun-mock-12345"
     assert status.model == "fish-s2-pro"
     assert status.provider == "modal"

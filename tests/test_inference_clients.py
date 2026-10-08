@@ -14,6 +14,7 @@ from support import (
     IMAGE_MODEL,
     deploy_on_modal,
     make_weave,
+    modal_pool,
 )
 
 from inferweave.clients import (
@@ -488,6 +489,29 @@ async def test_deployment_methods_dispatch_by_workload_after_attach(db_path: Pat
         await image.synthesize("hello")
     with pytest.raises(UnsupportedWorkloadError):
         await audio.render("fox")
+    await weave_b.close()
+
+
+@pytest.mark.asyncio
+async def test_inference_uses_the_owning_accounts_proxy_tokens(db_path: Path):
+    """Pooled deployments send their own account's proxy tokens, never the env/ambient ones."""
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return wav_response()
+
+    weave_a = make_weave(db_path, accounts=modal_pool("a", "b"))
+    pooled = await deploy_on_modal(weave_a, account="b")
+    ambient = await deploy_on_modal(make_weave(db_path))  # same DB, ambient account
+
+    weave_b = make_weave(db_path, handler=handler, accounts=modal_pool("a", "b"))
+    assert await (await weave_b.attach(pooled.id)).synthesize("hello") == WAV
+    assert seen[-1]["Modal-Key"] == "SENTINEL-modal-b-proxy-id"
+    assert seen[-1]["Modal-Secret"] == "SENTINEL-modal-b-proxy-secret"
+
+    assert await (await weave_b.attach(ambient.id)).synthesize("hello") == WAV
+    assert seen[-1]["Modal-Key"] == "wk-test-proxy-id-0000"  # conftest ambient env tokens
     await weave_b.close()
 
 

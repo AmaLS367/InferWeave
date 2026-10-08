@@ -238,3 +238,36 @@ async def test_sqlite_connections_close_after_every_operation(tmp_path, monkeypa
     for connection in connections:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connection.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_pre_accounts_record_defaults_to_ambient_account_and_can_be_stopped(tmp_path):
+    """A 0.2.0 row has no account/resource fields: it is owned by the ambient account."""
+    from unittest.mock import patch
+
+    path = tmp_path / "state.db"
+    weave = make_weave(path)
+    try:
+        deployed = await deploy_on_modal(weave)
+    finally:
+        await weave.close()
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE deployments SET data_json = json_remove(data_json, "
+                "'$.account', '$.resource', '$.needs_reconciliation')"
+            )
+    finally:
+        conn.close()
+
+    restarted = make_weave(path)
+    try:
+        attached = await restarted.attach(deployed.id)
+        assert attached.account == "ambient"
+        with patch("modal.experimental.stop_app") as mock_stop:
+            await attached.stop()
+        assert mock_stop.call_args.args == (deployed.id,)
+        assert mock_stop.call_args.kwargs == {"environment_name": None, "client": None}
+    finally:
+        await restarted.close()

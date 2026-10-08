@@ -189,7 +189,9 @@ async def test_live_runpod_lifecycle(monkeypatch, tmp_path):
         assert stopped.state == DeploymentState.STOPPED
         # SDK status short-circuits on a STOPPED record, so also ask the provider what
         # SkyPilot reports: a torn-down cluster is no longer listed and maps to STOPPED.
-        live = await reader.router.get("runpod").get_status(deployment.id)
+        (record,) = [r for r in await reader.list_records() if r.id == deployment.id]
+        owner = reader.accounts.resolve(record.provider, record.account, record.id)
+        live = await reader.router.get("runpod").status(record, owner)
         assert live.state == DeploymentState.STOPPED
     except BaseException as err:
         failure = err

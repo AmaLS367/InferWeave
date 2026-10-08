@@ -16,6 +16,11 @@ the wheel METADATA Version and the `inferweave --version` output must all agree.
     python wheel_smoke.py typed
         Run with the interpreter of a clean environment that has the base wheel and mypy
         installed. Verifies the installed package is PEP 561 type-discoverable.
+
+    python wheel_smoke.py workers <lightning-python> <skypilot-python>
+        Run with the base-wheel interpreter. Each provider worker must run under its own
+        interpreter that has only that provider SDK installed (the Lightning/SkyPilot
+        dependency conflict is resolved by these separate environments).
 """
 
 import re
@@ -73,12 +78,25 @@ def check_metadata(wheel_path: str) -> None:
     if not any(r.lower().startswith("msgpack") for r in mandatory):
         sys.exit("MessagePack must be a mandatory runtime dependency for audio inference")
 
+    # Account pools are built on the CredWeave 0.1 API; a 0.2 release may change it.
+    credweave_specs = {
+        frozenset(r.replace(" ", "")[len("credweave") :].split(","))
+        for r in mandatory
+        if r.lower().startswith("credweave")
+    }
+    if credweave_specs != {frozenset({">=0.1.0", "<0.2"})}:
+        sys.exit(f"credweave must be a mandatory dependency bounded to '>=0.1.0,<0.2', got: {mandatory}")
+
     version = wheel_version(wheel_path)
     print(f"Wheel METADATA Version: {version}")
 
     with zipfile.ZipFile(wheel_path) as wheel:
         if "inferweave/py.typed" not in wheel.namelist():
             sys.exit("Wheel is missing inferweave/py.typed (PEP 561 marker)")
+        # Provider SDKs with process-global auth run these scripts in isolated processes.
+        for worker in ("lightning_worker.py", "skypilot_worker.py", "skypilot_queue_plugin.py"):
+            if f"inferweave/isolation/{worker}" not in wheel.namelist():
+                sys.exit(f"Wheel is missing the isolated provider worker {worker}")
 
     extras = set(metadata.get_all("Provides-Extra") or [])
     expected = {
@@ -212,6 +230,52 @@ async def inference(deployment: Deployment) -> None:
     print("Typed OK: mypy resolves inferweave annotations from the installed wheel.")
 
 
+def check_workers(lightning_python: str, skypilot_python: str) -> None:
+    import asyncio
+    import socket
+
+    from inferweave.isolation import (
+        WORKER_DIR,
+        WorkerRunner,
+        account_environment,
+        ambient_environment,
+    )
+
+    async def probe(provider: str, script: str, python: str) -> str:
+        runner = WorkerRunner(provider, WORKER_DIR / script, python=python)
+        result = await runner.run("probe", {}, env=ambient_environment(), timeout=300)
+        return str(result["sdk"])
+
+    lightning = asyncio.run(probe("lightning", "lightning_worker.py", lightning_python))
+    skypilot = asyncio.run(probe("runpod", "skypilot_worker.py", skypilot_python))
+    async def server_probe(cloud: str, home: Path) -> None:
+        # Check real SDK API-server startup in a private HOME with dummy credentials.
+        # server_probe never runs sky.check/launch or calls a cloud account.
+        while True:
+            with socket.socket() as api, socket.socket() as metrics, socket.socket() as queue:
+                api.bind(("127.0.0.1", 0))
+                port = api.getsockname()[1]
+                try:
+                    metrics.bind(("127.0.0.1", port + 1))
+                    queue.bind(("127.0.0.1", port + 2))
+                except OSError:
+                    continue
+                break
+        runner = WorkerRunner(cloud, WORKER_DIR / "skypilot_worker.py", python=skypilot_python)
+        await runner.run(
+            "server_probe",
+            {"mode": "account", "cloud": cloud, "server_port": port, "fingerprint": f"smoke-{cloud}", "hold_seconds": 5},
+            secrets={"api_key": f"SENTINEL-smoke-{cloud}"},
+            env=account_environment(home), timeout=240,
+        )
+    async def parallel_servers(directory: str) -> None:
+        await asyncio.gather(*(server_probe(cloud, Path(directory) / cloud) for cloud in ("runpod", "vast")))
+
+    with tempfile.TemporaryDirectory(prefix="iw-worker-smoke-") as directory:
+        asyncio.run(parallel_servers(directory))
+    print(f"Workers OK: lightning-sdk {lightning} and skypilot {skypilot} in separate environments")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "metadata":
         check_metadata(sys.argv[2])
@@ -223,5 +287,7 @@ if __name__ == "__main__":
         check_imports(sys.argv[2] if len(sys.argv) == 3 else None, with_lightning=True)
     elif len(sys.argv) == 2 and sys.argv[1] == "typed":
         check_typed()
+    elif len(sys.argv) == 4 and sys.argv[1] == "workers":
+        check_workers(sys.argv[2], sys.argv[3])
     else:
         sys.exit(__doc__)

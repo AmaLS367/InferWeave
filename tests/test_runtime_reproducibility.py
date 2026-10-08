@@ -7,7 +7,7 @@ immutable ``@sha256:`` digests; custom runtimes may still use tags), unconstrain
 
 import re
 import shlex
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -146,13 +146,18 @@ def test_fish_s2_runtime_is_documented_as_beta():
 async def test_modal_receives_builtin_digest_reference_unchanged(image_name):
     """Modal consumes the digest form: it must reach Image.from_registry verbatim."""
     import modal
+    from support import modal_record
 
+    from inferweave.accounts import ProviderAccount
     from inferweave.providers.modal_provider import ModalProvider
 
     image = getattr(manifest, image_name)
     runtime = RuntimeSpec(name="pinned", docker_image=image, run_command="true", port=8000)
     profile = _make_dummy_profile(WorkloadType.LLM, "pinned")
     request = DeploymentRequest(model=profile.id, provider="modal")
+    provider = ModalProvider()
+    account = ProviderAccount.ambient("modal")
+    record = modal_record(provider, profile, account, endpoint_url=None)
 
     real_from_registry = modal.Image.from_registry
     with (
@@ -160,16 +165,17 @@ async def test_modal_receives_builtin_digest_reference_unchanged(image_name):
         patch("modal.App.deploy", return_value=None),
         patch("modal.Function.get_web_url", return_value="https://pinned.modal.run"),
     ):
-        await ModalProvider().deploy(request, profile, runtime)
+        await provider.provision(record, request, profile, runtime, account)
 
     from_registry.assert_called_once()
     assert from_registry.call_args.args[0] == image
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("image_name", _MANIFEST_IMAGE_NAMES)
-async def test_skypilot_receives_builtin_digest_reference_unchanged(image_name):
+def test_skypilot_receives_builtin_digest_reference_unchanged(image_name):
     """SkyPilot consumes the digest form: image_id must be exactly ``docker:<repo>@sha256:...``."""
+    from inferweave.accounts import ProviderAccount
+    from inferweave.domain.deployment_record import DeploymentRecord
     from inferweave.providers.skypilot import SkyPilotProvider
 
     image = getattr(manifest, image_name)
@@ -178,17 +184,17 @@ async def test_skypilot_receives_builtin_digest_reference_unchanged(image_name):
     request = DeploymentRequest(model=profile.id, provider="runpod", gpu_type="A100")
 
     provider = SkyPilotProvider(cloud_name="runpod")
-    mock_sky = MagicMock()
-    mock_sky.launch = MagicMock(return_value=(1, None))
-    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
-    with (
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        patch.object(provider, "_get_sky_module", return_value=mock_sky),
-    ):
-        await provider.deploy(request, profile, runtime)
+    deployment_id = provider.new_deployment_id(profile)
+    record = DeploymentRecord(
+        id=deployment_id,
+        model=profile.id,
+        provider="runpod",
+        resource=provider.resource_ref(deployment_id, request, ProviderAccount.ambient("runpod")),
+    )
+    payload = provider.launch_payload(record, request, profile, runtime)
 
-    _, res_kwargs = mock_sky.Resources.call_args
-    assert res_kwargs["image_id"] == f"docker:{image}"
+    assert payload["resources"]["image_id"] == f"docker:{image}"
+    assert payload["cluster"] == deployment_id
 
 
 def test_transitive_pins_are_unique_and_do_not_conflict_with_direct_specs():

@@ -7,7 +7,7 @@ import wave
 import httpx
 import pytest
 
-from inferweave import DeploymentState, InferenceConfig, InferWeave
+from inferweave import DeploymentState, InferenceConfig, InferWeave, ProviderAccount
 from inferweave.providers.lightning_provider import LightningProvider
 
 
@@ -49,7 +49,7 @@ async def test_live_lightning_tts_restart_and_full_cleanup(tmp_path, monkeypatch
     provider.resource_prefix = "iw-lightning-test"
     try:
         # Read-only identity check precedes creation of any GPU resource.
-        await provider.verify_credentials()
+        await provider.verify_credentials(ProviderAccount.ambient("lightning"))
         deployment = await weave1.deploy(
             model="fish-s2-pro", provider="lightning", gpu_type="L4",
             destroy_after_idle_mins=60,
@@ -84,11 +84,12 @@ async def test_live_lightning_tts_restart_and_full_cleanup(tmp_path, monkeypatch
         # Continue cleanup for all records even if one attempt fails.
         errors = []
         for record in await weave1.list_records():
-            if record.provider != "lightning" or not record.lightning or not record.lightning.owned:
+            if record.provider != "lightning" or not record.resource or not record.resource.owned:
                 continue
             try:
-                await provider.stop(record.id)
-                assert await provider.resource_snapshot(record) is None, (
+                account = weave1.accounts.resolve(record.provider, record.account, record.id)
+                await provider.stop(record, account)
+                assert await provider.resource_snapshot(record, account) is None, (
                     "Live Lightning resource remains after cleanup: " + record.id
                 )
             except Exception as error:  # noqa: BLE001
