@@ -33,7 +33,10 @@ from pathlib import Path
 from typing import Any
 
 SERVER_START_TIMEOUT = 120.0
+SERVER_STOP_TIMEOUT = 30.0
+SERVER_KILL_TIMEOUT = 10.0
 posix_os: Any = os
+posix_signal: Any = signal
 
 
 class WorkerError(Exception):
@@ -161,22 +164,58 @@ def _process_birth(pid: int) -> float:
     return float(psutil.Process(pid).create_time())
 
 
+def _group_processes(pid: int) -> list[Any]:
+    """Live members of the private server group, including orphaned SDK workers."""
+    psutil: Any = importlib.import_module("psutil")
+    members = []
+    for process in psutil.process_iter():
+        with contextlib.suppress(psutil.NoSuchProcess, ProcessLookupError):
+            if posix_os.getpgid(process.pid) == pid and process.status() != psutil.STATUS_ZOMBIE:
+                members.append(process)
+    return members
+
+
+def _wait_server_stopped(pid: int, endpoint: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _group_processes(pid) or _healthy(endpoint):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def _group_still_owned(members: list[Any], pid: int) -> bool:
+    """An original process identity must survive before escalating a group signal.
+
+    psutil.is_running() checks process birth time, protecting against PID/group reuse
+    even if the original group leader exited while its children kept running.
+    """
+    for process in members:
+        with contextlib.suppress(ProcessLookupError):
+            if process.is_running() and posix_os.getpgid(process.pid) == pid:
+                return True
+    return False
+
+
 def _stop_server(state: Path, endpoint: str) -> None:
     if not _server_owned(state, endpoint):
         raise WorkerError("transient", "Cannot verify ownership of the SkyPilot API server.", False)
     pid_file = state / "server.pid"
-    with contextlib.suppress(OSError, ValueError):
-        pid = int(pid_file.read_text().strip())
-        # The server was started in its own session; terminate its multiprocessing
-        # children too, so an abandoned API server cannot retain this account's keys.
-        if posix_os.getpgid(pid) != pid:
-            raise WorkerError("transient", "SkyPilot server process group is not private.", False)
+    pid = int(pid_file.read_text().strip())
+    if posix_os.getpgid(pid) != pid:
+        raise WorkerError("transient", "SkyPilot server process group is not private.", False)
+    members = _group_processes(pid)
+    with contextlib.suppress(ProcessLookupError):
         posix_os.killpg(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 30
-    while _healthy(endpoint):
-        if time.monotonic() >= deadline:
+    # SkyPilot's graceful drain can outlast our deadline, and idle request workers
+    # ignore SIGTERM. Losing /api/health alone does not establish server termination.
+    if not _wait_server_stopped(pid, endpoint, SERVER_STOP_TIMEOUT):
+        if not _group_still_owned(members, pid):
+            raise WorkerError("transient", "Cannot verify ownership of the SkyPilot API server group.", False)
+        with contextlib.suppress(ProcessLookupError):
+            posix_os.killpg(pid, posix_signal.SIGKILL)
+        if not _wait_server_stopped(pid, endpoint, SERVER_KILL_TIMEOUT):
             raise WorkerError("transient", "SkyPilot API server termination was not confirmed.", False)
-        time.sleep(0.5)
     with contextlib.suppress(OSError):
         pid_file.unlink()
 

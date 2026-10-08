@@ -269,7 +269,15 @@ def check_workers(lightning_python: str, skypilot_python: str) -> None:
             env=account_environment(home), timeout=240,
         )
     async def parallel_servers(directory: str) -> None:
-        await asyncio.gather(*(server_probe(cloud, Path(directory) / cloud) for cloud in ("runpod", "vast")))
+        # Drain both workers before raising: an early failure must not close the loop
+        # while the other account's server is still shutting down.
+        results = await asyncio.gather(
+            *(server_probe(cloud, Path(directory) / cloud) for cloud in ("runpod", "vast")),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     with tempfile.TemporaryDirectory(prefix="iw-worker-smoke-") as directory:
         asyncio.run(parallel_servers(directory))

@@ -368,6 +368,7 @@ def test_stop_server_terminates_pid_and_waits_for_health_to_drop(monkeypatch, tm
     monkeypatch.setattr(os, "getpgid", lambda pid: pid, raising=False)
     monkeypatch.setattr(os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)
     monkeypatch.setattr(worker, "_healthy", lambda endpoint: next(health))
+    monkeypatch.setattr(worker, "_group_processes", lambda pid: [])
     monkeypatch.setattr(
         worker, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=lambda seconds: None)
     )
@@ -837,15 +838,83 @@ def test_queue_plugin_redacts_sdk_log_records(monkeypatch, tmp_path):
 
 
 def test_server_stop_cannot_claim_success_while_listener_remains(monkeypatch, tmp_path):
+    monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
     state = tmp_path / ".inferweave"
     state.mkdir()
     (state / "server.pid").write_text("31337")
     monkeypatch.setattr(worker, "_server_owned", lambda state, endpoint: True)
     monkeypatch.setattr(os, "getpgid", lambda pid: pid, raising=False)
-    monkeypatch.setattr(os, "killpg", lambda pid, sig: None, raising=False)
-    monkeypatch.setattr(worker, "_healthy", lambda endpoint: True)
-    moments = iter([0, 31])
-    monkeypatch.setattr(worker, "time", types.SimpleNamespace(monotonic=lambda: next(moments), sleep=lambda _: None))
+    signals = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append(sig), raising=False)
+    monkeypatch.setattr(worker, "_group_processes", lambda pid: [])
+    monkeypatch.setattr(worker, "_group_still_owned", lambda members, pid: True)
+    monkeypatch.setattr(worker, "_wait_server_stopped", lambda pid, endpoint, timeout: False)
     with pytest.raises(worker.WorkerError, match="termination was not confirmed"):
         worker._stop_server(state, "http://127.0.0.1:47010")
     assert (state / "server.pid").exists()
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_server_stop_kills_surviving_workers_even_when_health_is_down(monkeypatch, tmp_path):
+    monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+    state = tmp_path / ".inferweave"
+    state.mkdir()
+    (state / "server.pid").write_text("31337")
+    # The leader exited but an original child still holds this private process group.
+    members = [types.SimpleNamespace(pid=31338, is_running=lambda: True)]
+    signals = []
+
+    def killpg(pid, sig):
+        assert pid == 31337
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            members.clear()
+
+    monkeypatch.setattr(worker, "_server_owned", lambda state, endpoint: True)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 31337, raising=False)
+    monkeypatch.setattr(os, "killpg", killpg, raising=False)
+    monkeypatch.setattr(worker, "_group_processes", lambda pid: list(members))
+    monkeypatch.setattr(worker, "_healthy", lambda endpoint: False)
+    moments = iter([0, 31, 31])
+    monkeypatch.setattr(worker, "time", types.SimpleNamespace(monotonic=lambda: next(moments), sleep=lambda _: None))
+    worker._stop_server(state, "http://127.0.0.1:47010")
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert not (state / "server.pid").exists()
+
+
+def test_server_stop_never_escalates_after_original_process_identities_disappear(monkeypatch, tmp_path):
+    state = tmp_path / ".inferweave"
+    state.mkdir()
+    (state / "server.pid").write_text("31337")
+    original = types.SimpleNamespace(pid=31337, is_running=lambda: False)
+    signals = []
+    monkeypatch.setattr(worker, "_server_owned", lambda state, endpoint: True)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signals.append(sig), raising=False)
+    monkeypatch.setattr(worker, "_group_processes", lambda pid: [original])
+    monkeypatch.setattr(worker, "_wait_server_stopped", lambda pid, endpoint, timeout: False)
+    with pytest.raises(worker.WorkerError, match="Cannot verify ownership"):
+        worker._stop_server(state, "http://127.0.0.1:47010")
+    assert signals == [signal.SIGTERM]
+    assert (state / "server.pid").exists()
+
+
+def test_server_group_ignores_zombies_foreign_groups_and_exited_processes(monkeypatch):
+    processes = [
+        types.SimpleNamespace(pid=11, status=lambda: "sleeping"),
+        types.SimpleNamespace(pid=12, status=lambda: "zombie"),
+        types.SimpleNamespace(pid=13, status=lambda: "sleeping"),
+        types.SimpleNamespace(pid=14, status=lambda: "sleeping"),
+    ]
+
+    def getpgid(pid):
+        if pid == 14:
+            raise ProcessLookupError
+        return 31337 if pid in {11, 12} else 999
+
+    psutil = types.SimpleNamespace(
+        process_iter=lambda: processes, STATUS_ZOMBIE="zombie", NoSuchProcess=ProcessLookupError,
+    )
+    monkeypatch.setattr(worker.importlib, "import_module", lambda name: psutil)
+    monkeypatch.setattr(os, "getpgid", getpgid, raising=False)
+    assert worker._group_processes(31337) == [processes[0]]
