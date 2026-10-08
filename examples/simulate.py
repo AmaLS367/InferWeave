@@ -22,9 +22,7 @@ import msgpack
 
 from inferweave import (
     CompositeEndpointAuth,
-    Deployment,
     DeploymentState,
-    DeploymentStatus,
     HealthcheckService,
     HttpxHealthcheckProbeAdapter,
     InferWeave,
@@ -35,7 +33,9 @@ from inferweave import (
     SqliteDeploymentRepository,
     StaticHeaderAuth,
 )
-from inferweave.providers.base import ComputeProvider
+from inferweave.domain.deployment_record import ResourceRef
+from inferweave.domain.lifecycle import AutostopAction
+from inferweave.providers.base import ComputeProvider, ProvisionResult, ResourceStatus
 from inferweave.providers.router import ProviderRouter
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,28 +50,26 @@ class SimulatedProvider(ComputeProvider):
     name = "modal"
     provider_type = ProviderType.MODAL
 
-    def __init__(self, repository):
-        self.repository = repository
+    def new_deployment_id(self, profile):
+        return f"sim-{uuid4().hex}"
 
-    async def deploy(self, request, profile, runtime):
-        assert runtime
-        return Deployment(
-            DeploymentStatus(
-                id=f"sim-{uuid4().hex}",
-                model=profile.id,
-                provider=self.name,
-                state=DeploymentState.STARTING,
-                endpoint_url="https://simulation.modal.run",
-            )
+    def resource_ref(self, deployment_id, request, account):
+        return ResourceRef(name=deployment_id)
+
+    async def provision(self, record, request, profile, runtime, account):
+        assert runtime and account.is_ambient
+        return ProvisionResult(
+            state=DeploymentState.STARTING, endpoint_url="https://simulation.modal.run"
         )
 
-    async def stop(self, deployment_id, action=None):
-        assert await self.repository.get(deployment_id) is not None
+    async def status(self, record, account):
+        return ResourceStatus(state=DeploymentState.STARTING, endpoint_url=record.endpoint_url)
 
-    async def get_status(self, deployment_id):
-        record = await self.repository.get(deployment_id)
-        assert record
-        return DeploymentStatus(**record.model_dump())
+    async def resource_exists(self, record, account):
+        return True
+
+    async def stop(self, record, account, action=AutostopAction.STOP):
+        assert record.resource and record.resource.name == record.id
 
 
 def response(request: httpx.Request) -> httpx.Response:
@@ -117,8 +115,8 @@ def simulated_weave() -> InferWeave:
         profile.healthcheck.initial_delay_seconds = 0
     repository = SqliteDeploymentRepository()
     router = ProviderRouter()
-    router.register(SimulatedProvider(repository))
-    lightning = SimulatedProvider(repository)
+    router.register(SimulatedProvider())
+    lightning = SimulatedProvider()
     lightning.name = "lightning"
     lightning.provider_type = ProviderType.LIGHTNING
     router.register(lightning)

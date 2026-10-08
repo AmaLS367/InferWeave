@@ -9,9 +9,15 @@ pip install "inferweave[lightning]"
 Validated against the installed `lightning-sdk==2026.10.1` API. The extra is bounded
 to this release (`>=2026.10.1,<2026.10.2`). Ordinary imports and dry runs do not
 import Lightning. Lightning and SkyPilot currently have incompatible Click
-requirements (`>=8.2` versus `<8.2`); use separate environments. The `all` extra
-retains SkyPilot, Modal and workers and therefore excludes Lightning.
-Lightning can coexist with Modal and worker extras.
+requirements (`>=8.2` versus `<8.2`). Every Lightning operation runs in a worker
+process, so the SDK may live in its own environment: install `lightning-sdk==2026.10.1`
+in a separate venv and set `INFERWEAVE_LIGHTNING_PYTHON` to its interpreter (the
+worker needs only the SDK). The `all` extra retains SkyPilot, Modal and workers and
+therefore excludes Lightning. Lightning can coexist with Modal and worker extras.
+
+For several Lightning users or teamspaces, configure an account pool instead of the
+variables below; each account carries its own key and `teamspace`. See
+[multiple accounts](use-multiple-accounts.md).
 
 ## Configure local credentials
 
@@ -24,8 +30,9 @@ LIGHTNING_TEAMSPACE=owner/teamspace
 INFERWEAVE_LIGHTNING_INTEGRATION=0
 ```
 
-Use a **user API key** from Lightning settings. Platform requests use the SDK's
-environment authentication. Deployment `ApiKeyAuth()` accepts that same key as
+Use a **user API key** from Lightning settings. Platform requests run in a worker
+process that authenticates with exactly one account's key (these variables are the
+`ambient` account when no pool is configured). Deployment `ApiKeyAuth()` accepts that same key as
 `Authorization: Bearer …`; no separate endpoint key is needed. Scoped org API
 keys cannot call these endpoints and are rejected by a read-only identity check
 before creation. InferWeave never creates keys.

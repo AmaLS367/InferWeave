@@ -8,6 +8,11 @@ InferWeave protects Modal endpoints by default with
 | --- | --- | --- |
 | Manage Modal resources | `modal setup` profile or `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` | Modal SDK |
 | Access protected HTTP | `MODAL_PROXY_TOKEN_ID` + `MODAL_PROXY_TOKEN_SECRET` | Probes and inference |
+| Several workspaces | an account pool: each account's `token_id`/`token_secret` plus its own `proxy_token_id`/`proxy_token_secret` | Modal SDK, probes and inference of that account's deployments |
+
+The environment variables are the `ambient` account. With an account pool (see
+[multiple accounts](use-multiple-accounts.md)) every deployment's probes and inference use the
+proxy tokens of the workspace that owns it; tokens are never sent to another workspace's app.
 
 Create Proxy Tokens in [Modal Settings](https://modal.com/docs/guide/webhook-proxy-auth).
 The default `CompositeEndpointAuth(ModalProxyAuth())` reads environment variables
@@ -31,7 +36,8 @@ whose providers have no explicit resolver. If a provider has its own auth, confi
 matching SDK auth for subsequent requests.
 
 For a custom API key use `StaticHeaderAuth`, scoped by provider, or implement
-`EndpointAuthPort.headers_for(provider, endpoint_url) -> dict[str, str]`.
+`EndpointAuthPort.headers_for(provider, endpoint_url, account=None) -> dict[str, str]`;
+`account` is the `ProviderAccount` that owns the deployment.
 Use a host-checking resolver for multiple trust domains; static auth does not
 constrain hosts. Composite resolvers merge headers, with later values winning.
 `NoEndpointAuth()` produces no headers.

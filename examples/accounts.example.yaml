@@ -1,0 +1,42 @@
+# InferWeave accounts configuration (no secret values: only variable names / file paths).
+# Use with: InferWeave(accounts="examples/accounts.example.yaml"),
+# INFERWEAVE_ACCOUNTS_FILE=examples/accounts.example.yaml, or inferweave --accounts ...
+# Guide: docs/how-to/use-multiple-accounts.md
+max_attempts: 3
+providers:
+  modal:
+    strategy: round_robin
+    accounts:
+      - id: modal-team-a
+        env:
+          token_id: MODAL_A_TOKEN_ID
+          token_secret: MODAL_A_TOKEN_SECRET
+          proxy_token_id: MODAL_A_PROXY_TOKEN_ID
+          proxy_token_secret: MODAL_A_PROXY_TOKEN_SECRET
+      - id: modal-team-b
+        env:
+          token_id: MODAL_B_TOKEN_ID
+          token_secret: MODAL_B_TOKEN_SECRET
+          proxy_token_id: MODAL_B_PROXY_TOKEN_ID
+          proxy_token_secret: MODAL_B_PROXY_TOKEN_SECRET
+  lightning:
+    strategy: failover
+    accounts:
+      - id: lightning-primary
+        priority: 0
+        teamspace: acme/inference
+        env: {user_id: LIGHTNING_A_USER_ID, api_key: LIGHTNING_A_API_KEY}
+      - id: lightning-backup
+        priority: 1
+        teamspace: acme-backup/inference
+        env: {user_id: LIGHTNING_B_USER_ID, api_key: LIGHTNING_B_API_KEY}
+  runpod:
+    strategy: weighted
+    accounts:
+      - {id: runpod-main, weight: 2, env: {api_key: RUNPOD_MAIN_API_KEY}}
+      - {id: runpod-b, env: {api_key: RUNPOD_B_API_KEY}}
+  vast:
+    strategy: round_robin
+    accounts:
+      - {id: vast-a, env: {api_key: VAST_A_API_KEY}}
+      - {id: vast-b, env: {api_key: VAST_B_API_KEY}, max_concurrency: 2}

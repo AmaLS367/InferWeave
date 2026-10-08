@@ -80,6 +80,25 @@ Modal endpoints are protected by default. SDK credentials provision resources; s
 Scale-to-zero releases idle GPU containers while keeping the app reusable;
 `destroy_after_idle_mins` stops the entire app. `close()` releases local resources.
 
+## Multiple accounts per provider
+
+Register several Modal, Lightning AI, RunPod or Vast.ai accounts and InferWeave rotates new
+deployments across them with [CredWeave](https://github.com/AmaLS367/CredWeave): round-robin,
+weighted or priority failover, cooldown on rate limits and quota exhaustion, and bounded failover
+to the next account. Every deployment stays bound to the account that created it, across
+restarts, for status, stop, autostop and inference.
+
+```python
+weave = InferWeave(accounts="accounts.yaml")  # or export INFERWEAVE_ACCOUNTS_FILE
+deployment = await weave.deploy("fish-s2-pro", provider="modal")
+print(deployment.account)  # e.g. "modal-team-b"
+```
+
+The accounts file only names environment variables or a protected credentials file; secrets are
+kept out of deployment records, logs and model containers. Uncertain creation blocks
+retries until the original operation has settled and owner-bound absence/cleanup is confirmed.
+Changed control keys cannot silently take over existing pooled deployments. Read [use multiple accounts](docs/how-to/use-multiple-accounts.md).
+
 ## Documentation and examples
 
 Lightning AI uses the same deployment, inference and recovery API:
@@ -99,9 +118,12 @@ Lightning creates one container Deployment with no Studio; stop deletes it.
 Read the [Lightning guide](docs/how-to/use-lightning.md) for first-pull readiness,
 autoscaling, restart recovery and opt-in paid tests.
 The verified SDK is `lightning-sdk==2026.10.1` (Python 3.11/3.12).
-Its Click requirement conflicts with SkyPilot, so use a separate environment.
-`inferweave[all]` retains SkyPilot, Modal and workers; it excludes Lightning.
+Its Click requirement conflicts with SkyPilot; InferWeave runs Lightning and SkyPilot
+operations in worker processes, so each can live in its own virtual environment
+(`INFERWEAVE_LIGHTNING_PYTHON`, `INFERWEAVE_SKYPILOT_PYTHON`) while one InferWeave process
+drives all providers. `inferweave[all]` retains SkyPilot, Modal and workers; it excludes Lightning.
 
+- [Use multiple provider accounts](docs/how-to/use-multiple-accounts.md)
 - [Use Lightning AI](docs/how-to/use-lightning.md)
 - [First TTS on Modal](docs/tutorials/first-tts-on-modal.md)
 - [Generate images](docs/how-to/generate-an-image.md)
