@@ -79,6 +79,7 @@ def test_classify_api_server_errors_are_transient(operation, may_exist):
 
     assert error.kind == "transient"
     assert error.resource_may_exist is may_exist
+    assert error.operation_may_continue is may_exist
 
 
 @pytest.mark.parametrize("exc_class", [InvalidSkyPilotConfigError])
@@ -120,6 +121,7 @@ def test_classify_unknown_launch_error_is_transient_and_may_exist():
     assert error.kind == "transient"
     assert error.resource_may_exist is True
     assert "kaboom" not in str(error)
+    assert error.operation_may_continue is True
     assert SECRET not in str(error)
     assert "RuntimeError" in str(error)
 
@@ -130,6 +132,7 @@ def test_classify_unknown_non_launch_error_leaves_existence_unknown(operation):
 
     assert error.kind == "transient"
     assert error.resource_may_exist is None
+    assert error.operation_may_continue is False
 
 
 def test_classify_passes_worker_errors_through():
@@ -574,15 +577,32 @@ def test_main_launch_endpoint_variants(monkeypatch, capsys, sky, home, endpoints
     assert message["result"] == {"endpoint": expected}
 
 
-def test_main_launch_failure_is_classified_and_text_withheld(monkeypatch, capsys, sky, home):
-    sky.results["launch"] = ResourcesUnavailableError(f"no capacity {SECRET}")
+@pytest.mark.parametrize(
+    ("failure", "kind", "may_exist", "may_continue"),
+    [
+        (ResourcesUnavailableError(f"no capacity {SECRET}"), "capacity", True, False),
+        (InvalidCloudCredentials(SECRET), "auth", False, False),
+        (NoCloudAccessError(SECRET), "permission", False, False),
+        (InvalidSkyPilotConfigError(SECRET), "invalid_request", False, False),
+        (RuntimeError(f"HTTP 402 {SECRET}"), "quota", False, False),
+        (RuntimeError(f"HTTP 429 {SECRET}"), "rate_limit", False, False),
+        (ApiServerConnectionError(SECRET), "transient", True, True),
+        (RuntimeError(SECRET), "transient", True, True),
+        (worker.WorkerError("transient", "Settled failure.", True), "transient", True, False),
+    ],
+)
+def test_main_launch_failure_is_classified_and_text_withheld(
+    monkeypatch, capsys, sky, home, failure, kind, may_exist, may_continue
+):
+    sky.results["launch"] = failure
 
     code, message = run_main(monkeypatch, capsys, {"op": "launch", "payload": LAUNCH_PAYLOAD})
 
     assert code == 1
     assert message["ok"] is False
-    assert message["error"]["kind"] == "capacity"
-    assert message["error"]["resource_may_exist"] is True
+    assert message["error"]["kind"] == kind
+    assert message["error"]["resource_may_exist"] is may_exist
+    assert message["error"]["operation_may_continue"] is may_continue
     assert SECRET not in json.dumps(message)
     assert sky.get_requests == ["launch"]  # the failure surfaces through get(), not swallowed
 

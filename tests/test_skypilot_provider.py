@@ -25,11 +25,14 @@ from inferweave.accounts import (
     runpod_account,
     vast_account,
 )
+from inferweave.adapters.lifecycle.memory_repository import InMemoryDeploymentRepository
 from inferweave.core.exceptions import ProviderOperationError, ProviderPlatformError
 from inferweave.core.failures import FailureKind
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.lifecycle import AutostopAction, AutostopPolicy
 from inferweave.domain.options import DeploymentOptions
+from inferweave.isolation import WorkerRunner
+from inferweave.isolation import skypilot_worker as worker
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import DeploymentState, ProviderType, WorkloadType
 from inferweave.models.profile import (
@@ -39,6 +42,10 @@ from inferweave.models.profile import (
 )
 from inferweave.providers.skypilot import SkyPilotProvider, resolve_worker_workdir
 from inferweave.runtimes.base import RuntimeSpec
+from inferweave.services.provisioning_service import (
+    ProvisionCandidate,
+    ProvisioningService,
+)
 
 ENDPOINT = "http://1.2.3.4:8000"
 AMBIENT_SENTINEL = "SENTINEL-ambient-runpod-key"
@@ -172,6 +179,64 @@ def pooled_manager(tmp_path: Path, cloud: str = "runpod", ids: tuple[str, ...] =
 
 def ambient(cloud: str = "runpod") -> ProviderAccount:
     return ProviderAccount.ambient(cloud)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["capacity", "auth"])
+async def test_settled_worker_launch_failure_reconciles_and_fails_over(
+    tmp_path, sample_profile, sample_runtime, linux_host, kind
+):
+    from test_skypilot_worker import (
+        FakeSky,
+        InvalidCloudCredentials,
+        ResourcesUnavailableError,
+    )
+
+    class FailureRunner(FakeRunner):
+        exists = kind == "capacity"
+
+        async def run(self, operation, payload, **kwargs):
+            if operation == "status":
+                self.responses["status"] = {"exists": self.exists, "status": "UP", "endpoint": ENDPOINT}
+            result = await super().run(operation, payload, **kwargs)
+            if operation == "down":
+                self.exists = False
+            if operation == "launch":
+                sky = FakeSky()
+                if kwargs["account_id"] == "a":
+                    error_class = ResourcesUnavailableError if kind == "capacity" else InvalidCloudCredentials
+                    sky.results["launch"] = error_class("SENTINEL-failure-secret")
+                try:
+                    result = worker.op_launch(sky, payload)
+                except worker.WorkerError as error:
+                    envelope = {"iw_worker": 1, "ok": False, "error": {
+                        "kind": error.kind, "message": str(error),
+                        "resource_may_exist": error.resource_may_exist,
+                        "operation_may_continue": error.operation_may_continue,
+                    }}
+                    return WorkerRunner._parse(
+                        json.dumps(envelope).encode(), 1, "runpod launch", kwargs["deployment_id"],
+                    )
+            return result
+
+    manager = pooled_manager(tmp_path)
+    runner = FailureRunner()
+    provider = make_provider(tmp_path, runner=runner)
+    repository = InMemoryDeploymentRepository()
+    request = DeploymentRequest(model=sample_profile.id, provider="runpod")
+    candidate = ProvisionCandidate(provider=provider, request=request, runtime=sample_runtime)
+    record, _ = await ProvisioningService(manager, repository).provision([candidate], sample_profile)
+    assert record.account == "b"
+    assert [(c.op, c.account_id) for c in runner.calls] == (
+        [("launch", "a"), ("status", "a"), ("down", "a"), ("status", "a"), ("launch", "b")]
+        if kind == "capacity" else [("launch", "a"), ("launch", "b")]
+    )
+    [failed] = [r for r in await repository.list_all() if r.state == DeploymentState.FAILED]
+    assert failed.account == "a"
+    assert not failed.creation_may_continue and not failed.needs_reconciliation
+    health = {h.account_id: h for h in manager.health()}
+    assert health["a"].state == ("available" if kind == "capacity" else "revoked")
+    assert all(h.in_flight == 0 for h in health.values())
 
 
 # --- task spec (launch_payload) -----------------------------------------------------------

@@ -83,7 +83,8 @@ def classify(err: BaseException, operation: str) -> WorkerError:
         return WorkerError("auth", "The cloud rejected the account credentials.", False, 401)
     if name in ("ApiServerConnectionError", "ApiServerAuthenticationError"):
         return WorkerError(
-            "transient", "The account's SkyPilot API server is unreachable.", operation == "launch"
+            "transient", "The account's SkyPilot API server is unreachable.", operation == "launch",
+            operation_may_continue=operation == "launch",
         )
     if name in ("InvalidSkyPilotConfigError", "NotSupportedError", "InvalidClusterNameError"):
         return WorkerError("invalid_request", f"SkyPilot rejected the request ({name}).", False)
@@ -107,6 +108,7 @@ def classify(err: BaseException, operation: str) -> WorkerError:
         "transient",
         f"SkyPilot {operation} failed ({name}); details withheld to protect credentials.",
         True if operation == "launch" else None,
+        operation_may_continue=operation == "launch",
     )
 
 
@@ -351,11 +353,8 @@ def op_launch(sky: Any, payload: dict[str, Any]) -> dict[str, Any]:
                 stream_logs=False,
             )
         )
-    except Exception as exc:  # noqa: BLE001 - launch spans several asynchronous API operations
-        error = classify(exc, "launch")
-        error.resource_may_exist = True
-        error.operation_may_continue = True
-        raise error from None
+    except Exception as exc:  # noqa: BLE001 - preserve completed failures vs unknown outcomes
+        raise classify(exc, "launch") from None
     return {"endpoint": _endpoint_of(sky, payload["cluster"], payload.get("port"))}
 
 
