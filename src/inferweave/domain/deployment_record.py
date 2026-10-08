@@ -39,13 +39,27 @@ def _redact_value(value: object) -> object:
     return value
 
 
-class LightningDeploymentMetadata(BaseModel):
-    """Nonsensitive resource identity for Lightning recovery and ownership checks."""
+AMBIENT_ACCOUNT = "ambient"
+"""Owner of deployments created with a provider's native default credentials (and of records
+written before accounts existed). Mirrors ``inferweave.accounts.AMBIENT_ACCOUNT_ID``."""
 
-    name: str
-    teamspace: str
-    resource_id: str | None = None
-    owned: bool = True
+
+class ResourceRef(BaseModel):
+    """Nonsecret identity of the remote resource backing a deployment.
+
+    ``name`` is chosen by InferWeave before the resource is created, so an operation that timed
+    out can always be reconciled by looking the name up under the owning account.
+    """
+
+    name: str = Field(..., description="Remote resource name (Modal app, Lightning deployment, cluster)")
+    scope: str | None = Field(
+        default=None, description="Provider scope: Lightning teamspace or Modal environment"
+    )
+    resource_id: str | None = Field(default=None, description="Provider-assigned resource id")
+    owned: bool = Field(
+        default=True,
+        description="False until InferWeave knows the name did not belong to a pre-existing resource",
+    )
 
 
 class DeploymentRecord(BaseModel):
@@ -54,7 +68,30 @@ class DeploymentRecord(BaseModel):
     id: str = Field(..., description="Unique deployment identifier")
     model: str = Field(..., description="Model identifier or HuggingFace ID")
     provider: str = Field(..., description="Compute infrastructure provider name")
-    lightning: LightningDeploymentMetadata | None = None
+    account: str | None = Field(
+        default=AMBIENT_ACCOUNT,
+        description=(
+            "Nonsecret id of the provider account that owns the resource. Every later operation "
+            "uses exactly this account. None for dry runs (no remote resource)."
+        ),
+    )
+    resource: ResourceRef | None = Field(
+        default=None, description="Remote resource identity used for recovery and cleanup"
+    )
+    owner_fingerprint: str | None = Field(
+        default=None, description="Nonsecret digest binding the original control-plane credentials."
+    )
+    creation_may_continue: bool = Field(
+        default=False,
+        description="An unacknowledged create may still complete remotely; absence is not conclusive.",
+    )
+    needs_reconciliation: bool = Field(
+        default=False,
+        description=(
+            "True while the remote state is unknown (a create or delete whose outcome was not "
+            "confirmed). Cleared by stop(), reconcile() or a successful provisioning."
+        ),
+    )
     state: DeploymentState = Field(
         default=DeploymentState.PENDING,
         description="Current operational lifecycle state",

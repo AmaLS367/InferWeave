@@ -1,6 +1,7 @@
 """Provider router resolving provider names and selection strategies."""
 
 import asyncio
+from pathlib import Path
 
 from inferweave.core.asyncio_utils import ensure_no_running_loop
 from inferweave.core.exceptions import (
@@ -27,8 +28,10 @@ class ProviderRouter:
         routing_service: SmartRoutingService | None = None,
         hardware_service: HardwareValidationService | None = None,
         endpoint_auth: EndpointAuthPort | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         self._endpoint_auth = endpoint_auth
+        self._state_dir = state_dir
         self._providers: dict[str, ComputeProvider] = {}
         self._routing_service = routing_service or SmartRoutingService()
         self._hardware_service = hardware_service or HardwareValidationService()
@@ -163,6 +166,32 @@ class ProviderRouter:
 
         return compute_provider
 
+    async def acandidates(
+        self,
+        provider_name: str,
+        profile: ModelProfile,
+        strategy: str | None,
+        request: DeploymentRequest,
+    ) -> list[tuple[ComputeProvider, DeploymentRequest]]:
+        """Providers to try in order: the routed choice first, then (``auto`` only) the other
+        feasible providers from the routing ranking, each with its own GPU selection."""
+        primary = await self.aresolve(provider_name, profile, strategy=strategy, request=request)
+        candidates = [(primary, request)]
+        decision = self._last_decision
+        if provider_name.lower() != "auto" or decision is None:
+            return candidates
+        seen = {primary.name}
+        for ranked in decision.rankings:
+            name = ranked.offer.provider.lower()
+            if name in seen or name not in self._providers:
+                continue
+            seen.add(name)
+            alternative = request.model_copy(
+                deep=True, update={"provider": name, "gpu_type": ranked.offer.gpu_spec.name}
+            )
+            candidates.append((self._providers[name], alternative))
+        return candidates
+
     def list_providers(self) -> list[str]:
         """Returns list of registered provider names."""
         return list(self._providers.keys())
@@ -183,8 +212,10 @@ class ProviderRouter:
             "fluidstack",
         ]
         for cloud in skypilot_clouds:
-            self.register(SkyPilotProvider(cloud_name=cloud))
+            self.register(SkyPilotProvider(cloud_name=cloud, state_dir=self._state_dir))
 
         # Independent serverless provider
         self.register(ModalProvider(endpoint_auth=self._endpoint_auth))
-        self.register(LightningProvider(endpoint_auth=self._endpoint_auth))
+        self.register(
+            LightningProvider(endpoint_auth=self._endpoint_auth, state_dir=self._state_dir)
+        )

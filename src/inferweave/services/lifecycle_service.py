@@ -5,9 +5,18 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from inferweave.accounts.config import AccountsConfig
+from inferweave.accounts.manager import AccountManager
+from inferweave.accounts.models import ProviderAccount
 from inferweave.adapters.lifecycle.sqlite_repository import SqliteDeploymentRepository
 from inferweave.adapters.lifecycle.watchdog import AsyncioWatchdogAdapter
-from inferweave.core.exceptions import DeploymentNotFoundError, ProviderNotFoundError
+from inferweave.core.exceptions import (
+    DeploymentNotFoundError,
+    ProviderAuthError,
+    ProviderNotFoundError,
+    ProviderOperationError,
+)
+from inferweave.core.failures import FailureKind
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.lifecycle import (
     AutostopAction,
@@ -26,7 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 class LifecycleService:
-    """Orchestrates deployment inactivity monitoring, activity heartbeats, and autostop execution."""
+    """Orchestrates deployment inactivity monitoring, activity heartbeats, and autostop execution.
+
+    Every remote operation on an existing deployment (status, stop, autostop, reconcile) runs
+    under the account recorded on the deployment, resolved through the ``AccountManager``. A
+    missing account raises ``AccountUnavailableError``; another account is never substituted.
+    """
 
     def __init__(
         self,
@@ -36,7 +50,9 @@ class LifecycleService:
         provider_resolver: Callable[[str], Any] | None = None,
         endpoint_auth: EndpointAuthPort | None = None,
         activity_persist_interval_seconds: float = 30.0,
+        accounts: AccountManager | None = None,
     ) -> None:
+        self._accounts = accounts or AccountManager(AccountsConfig.from_env())
         self._watchdog = watchdog_port or AsyncioWatchdogAdapter()
         self._repository: DeploymentRepositoryPort = (
             repository or SqliteDeploymentRepository()
@@ -60,6 +76,29 @@ class LifecycleService:
     @endpoint_auth.setter
     def endpoint_auth(self, value: EndpointAuthPort | None) -> None:
         self._endpoint_auth = value
+
+    @property
+    def accounts(self) -> AccountManager:
+        """Account pools used to resolve the owner of every deployment."""
+        return self._accounts
+
+    @accounts.setter
+    def accounts(self, value: AccountManager) -> None:
+        self._accounts = value
+
+    def owner_account(self, record: DeploymentRecord) -> ProviderAccount:
+        """The account that owns ``record`` (raises ``AccountUnavailableError`` if removed)."""
+        return self._accounts.resolve_owner(record)
+
+    def endpoint_headers(
+        self, record: DeploymentRecord, endpoint_url: str | None
+    ) -> dict[str, str]:
+        """Endpoint auth headers built from the owning account's endpoint credentials."""
+        if self._endpoint_auth is None:
+            return {}
+        return self._endpoint_auth.headers_for(
+            record.provider, endpoint_url, self.owner_account(record)
+        )
 
     @property
     def repository(self) -> DeploymentRepositoryPort:
@@ -135,7 +174,9 @@ class LifecycleService:
     ) -> None:
         """Schedules the periodic destroy-timer check for a policy with an enabled idle limit."""
         if not (
-            policy.enabled and policy.idle_minutes is not None and policy.idle_minutes > 0
+            policy.enabled
+            and policy.idle_minutes is not None
+            and policy.idle_minutes > 0
         ):
             return
         # Check cadence: sample every 1/4th of the idle duration, capped between 1s and 60s
@@ -268,6 +309,22 @@ class LifecycleService:
         now: datetime | None = None,
     ) -> None:
         """Terminates or pauses a deployment, cancels watchdog monitoring, and persists state."""
+        with self._repository.operation_lock(deployment_id) as acquired:
+            if not acquired:
+                raise ProviderOperationError(
+                    "Deployment has an active provisioning or cleanup operation.",
+                    FailureKind.TRANSIENT,
+                    deployment_id=deployment_id,
+                )
+            await self._stop_deployment(deployment_id, action, provider, now)
+
+    async def _stop_deployment(
+        self,
+        deployment_id: str,
+        action: AutostopAction | None,
+        provider: Any | None,
+        now: datetime | None,
+    ) -> None:
         current_time = now or datetime.now(UTC)
         state = self._states.get(deployment_id)
         deployment = self._deployments.get(deployment_id)
@@ -313,10 +370,25 @@ class LifecycleService:
         )
         if isinstance(target_action, str):
             target_action = AutostopAction(target_action.lower())
+        if record is None:
+            # The owning account is only known from the persisted record.
+            raise DeploymentNotFoundError(deployment_id)
+        if target_provider is None:
+            raise ProviderNotFoundError(record.provider)
 
         try:
-            if target_provider and hasattr(target_provider, "stop"):
-                await target_provider.stop(deployment_id, action=target_action)
+            account = self.owner_account(record)
+            record.needs_reconciliation = True
+            await self._repository.save(record)
+            await target_provider.stop(record, account, action=target_action)
+
+            if record.creation_may_continue:
+                raise ProviderOperationError(
+                    "Delete was requested, but an unacknowledged create may still complete. "
+                    "Confirm the create has settled in the provider console before reconciliation.",
+                    FailureKind.TRANSIENT,
+                    deployment_id=deployment_id,
+                )
 
             # Transition to stopped only upon successful provider stop/down
             if state:
@@ -324,16 +396,44 @@ class LifecycleService:
                 state.stopped_at = current_time
             if deployment and hasattr(deployment, "_status"):
                 deployment._status.state = DeploymentState.STOPPED
-            if record:
-                record.mark_stopped(now=current_time)
-                await self._repository.save(record)
+            record.mark_stopped(now=current_time)
+            record.needs_reconciliation = False
+            await self._repository.save(record)
         except Exception as err:
-            logger.error("Failed to stop deployment '%s': %s", deployment_id, err)
-            raise
+            logger.error(
+                "Failed to stop deployment '%s' (%s).",
+                deployment_id,
+                type(err).__name__,
+            )
+            if isinstance(err, ProviderOperationError | ProviderAuthError):
+                raise
+            raise ProviderOperationError(
+                "Provider stop failed; its outcome is unknown.",
+                FailureKind.TRANSIENT,
+                deployment_id=deployment_id,
+            ) from None
         finally:
-            await self._watchdog.cancel_check(deployment_id)
+            if record.state == DeploymentState.STOPPED:
+                await self._watchdog.cancel_check(deployment_id)
 
     async def refresh_status(
+        self,
+        deployment_id: str,
+        provider: Any | None = None,
+        probe: bool = True,
+        healthcheck_config: Any | None = None,
+    ) -> DeploymentStatus:
+        with self._repository.operation_lock(deployment_id) as acquired:
+            record = await self._repository.get(deployment_id)
+            if record and not record.is_dry_run:
+                self.owner_account(record)
+            if record and (not acquired or record.creation_may_continue):
+                return self._status_from_record(record)
+            if not acquired:
+                raise ProviderOperationError("Deployment operation is active.", FailureKind.TRANSIENT)
+            return await self._refresh_status_locked(deployment_id, provider, probe, healthcheck_config)
+
+    async def _refresh_status_locked(
         self,
         deployment_id: str,
         provider: Any | None = None,
@@ -372,6 +472,9 @@ class LifecycleService:
         if is_already_stopped:
             stopped_status = DeploymentStatus(
                 id=deployment_id,
+                account=record.account
+                if record
+                else (deployment.account if deployment else None),
                 model=record.model
                 if record
                 else (deployment.model if deployment else "unknown"),
@@ -403,15 +506,14 @@ class LifecycleService:
             # For dry-run deployments, return persisted state directly without querying cloud provider API
             dry_status = DeploymentStatus(
                 id=deployment_id,
+                account=record.account if record else None,
                 model=record.model
                 if record
                 else (deployment.model if deployment else "unknown"),
                 provider=record.provider
                 if record
                 else (deployment.provider if deployment else "unknown"),
-                state=record.state
-                if record
-                else DeploymentState.PROVISIONING,
+                state=record.state if record else DeploymentState.PROVISIONING,
                 endpoint_url=record.endpoint_url
                 if record
                 else (deployment.endpoint_url if deployment else None),
@@ -426,31 +528,35 @@ class LifecycleService:
                 deployment._status = dry_status
             return dry_status
 
-        # 1. Fetch raw status from provider or deployment handle
-
-        raw_status: DeploymentStatus | None = None
-        if target_provider and hasattr(target_provider, "get_status"):
-            raw_status = await target_provider.get_status(deployment_id)
-        elif (
-            deployment and hasattr(deployment, "_refresh_fn") and deployment._refresh_fn
-        ):
-            raw_status = await deployment._refresh_fn()
-        elif deployment and hasattr(deployment, "status"):
-            raw_status = deployment.status
-
-        # If unable to fetch, construct fallback status
-        if not raw_status:
-            model = record.model if record else "unknown"
-            prov_name = record.provider if record else "unknown"
-            st = record.state if record else DeploymentState.PENDING
-            ep = record.endpoint_url if record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model,
-                provider=prov_name,
-                state=st,
-                endpoint_url=ep,
+        # 1. Fetch infrastructure status from the provider under the owning account
+        if record is None or target_provider is None:
+            if deployment is not None and hasattr(deployment, "status"):
+                return deployment.status
+            raise DeploymentNotFoundError(deployment_id)
+        account = self.owner_account(record)
+        try:
+            resource = await target_provider.status(record, account)
+        except ProviderOperationError as err:
+            if err.kind not in (FailureKind.TRANSIENT, FailureKind.RATE_LIMIT):
+                raise
+            # A flaky control plane must not flip a live deployment to a wrong state.
+            logger.warning(
+                "Could not refresh deployment '%s' (%s); keeping its last known state.",
+                deployment_id,
+                err.kind.value,
             )
+            return self._status_from_record(record)
+        raw_status = DeploymentStatus(
+            id=deployment_id,
+            model=record.model,
+            provider=record.provider,
+            account=record.account,
+            state=resource.state,
+            endpoint_url=resource.endpoint_url,
+            error_message=record.error_message,
+            created_at=record.created_at,
+            ready_at=record.ready_at,
+        )
 
         # 2. Preserve known model name rather than accepting 'unknown'
         real_model = (
@@ -474,15 +580,10 @@ class LifecycleService:
             and self._healthcheck_service
             and endpoint_url
             and healthcheck_config is not None
-            and raw_status.state
-            in {DeploymentState.STARTING, DeploymentState.HEALTHY}
+            and raw_status.state in {DeploymentState.STARTING, DeploymentState.HEALTHY}
         ):
             try:
-                auth_headers = (
-                    self._endpoint_auth.headers_for(raw_status.provider, endpoint_url)
-                    if self._endpoint_auth is not None
-                    else {}
-                )
+                auth_headers = self.endpoint_headers(record, endpoint_url)
                 if auth_headers:
                     probe_res = await self._healthcheck_service.check_health(
                         endpoint_url=endpoint_url,
@@ -508,10 +609,14 @@ class LifecycleService:
             current_state=(record.state if record else None),
         )
 
+        if record.creation_may_continue:
+            reconciled_state = record.state
+
         updated_status = DeploymentStatus(
             id=deployment_id,
             model=real_model,
             provider=raw_status.provider,
+            account=record.account,
             state=reconciled_state,
             endpoint_url=endpoint_url,
             error_message=raw_status.error_message
@@ -521,6 +626,8 @@ class LifecycleService:
         )
 
         # 4. Persist updated status to repository and deployment handle
+        if resource.state == DeploymentState.STOPPED and not record.creation_may_continue:
+            record.needs_reconciliation = False
         if record:
             if (
                 reconciled_state == DeploymentState.HEALTHY
@@ -536,6 +643,105 @@ class LifecycleService:
             deployment._status = updated_status
 
         return updated_status
+
+    @staticmethod
+    def _status_from_record(record: DeploymentRecord) -> DeploymentStatus:
+        return DeploymentStatus(
+            id=record.id,
+            model=record.model,
+            provider=record.provider,
+            account=record.account,
+            state=record.state,
+            endpoint_url=record.endpoint_url,
+            error_message=record.error_message,
+            created_at=record.created_at,
+            ready_at=record.ready_at,
+        )
+
+    async def reconcile(
+        self,
+        min_age_seconds: float = 1800.0,
+        now: datetime | None = None,
+        *,
+        confirmed_settled: tuple[str, ...] = (),
+    ) -> list[DeploymentRecord]:
+        """Resolves deployments whose remote state is unknown, under their owning accounts.
+
+        * A failed/cancelled provisioning whose resource still exists is destroyed.
+        * A resource confirmed absent clears the flag.
+        * Records still marked PROVISIONING are only touched once older than
+          ``min_age_seconds``, so a deploy still running in another process is left alone.
+
+        Accounts that are no longer configured are skipped (logged) and stay flagged.
+        Returns the records that were updated.
+        """
+        current_time = now or datetime.now(UTC)
+        updated: list[DeploymentRecord] = []
+        for snapshot in await self._repository.list_all():
+            with self._repository.operation_lock(snapshot.id) as acquired:
+                if not acquired:
+                    continue
+                record = await self._repository.get(snapshot.id)
+                if record is None:
+                    continue
+                if record.id in confirmed_settled:
+                    # Explicit operator confirmation, after checking the provider's operation
+                    # history. Never inferred from age or a momentary absence snapshot.
+                    self.owner_account(record)
+                    record.creation_may_continue = False
+                    await self._repository.save(record)
+                result = await self._reconcile_record(
+                    record, min_age_seconds, current_time
+                )
+                if result:
+                    updated.append(record)
+        return updated
+
+    async def _reconcile_record(
+        self,
+        record: DeploymentRecord,
+        min_age_seconds: float,
+        current_time: datetime,
+    ) -> bool:
+        if not record.needs_reconciliation or record.is_dry_run:
+            return False
+        in_flight = record.state in {
+            DeploymentState.PENDING,
+            DeploymentState.PROVISIONING,
+        }
+        if (
+            in_flight
+            and (current_time - record.created_at).total_seconds() < min_age_seconds
+        ):
+            return False
+        provider = (
+            self._provider_resolver(record.provider)
+            if self._provider_resolver
+            else None
+        )
+        if provider is None:
+            return False
+        if record.creation_may_continue:
+            return False
+        try:
+            account = self.owner_account(record)
+            if await provider.resource_exists(record, account):
+                await provider.stop(record, account, action=AutostopAction.DOWN)
+                if await provider.resource_exists(record, account):
+                    return False
+                record.mark_stopped(now=current_time)
+            elif record.is_active():
+                record.mark_failed("Provisioning did not complete; no resource exists.")
+        except Exception as err:  # noqa: BLE001 - keep reconciling other deployments
+            logger.warning(
+                "Could not reconcile deployment '%s' (%s); it stays flagged.",
+                record.id,
+                type(err).__name__,
+            )
+            return False
+        record.needs_reconciliation = False
+        await self._repository.save(record)
+        return True
 
     def get_state(self, deployment_id: str) -> LifecycleState | None:
         """Returns the current LifecycleState for the given deployment ID."""

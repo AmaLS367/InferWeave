@@ -1,27 +1,50 @@
-"""SkyPilot multi-cloud compute provider adapter."""
+"""SkyPilot multi-cloud compute provider adapter.
 
-import asyncio
+SkyPilot calls run in ``inferweave/isolation/skypilot_worker.py`` worker processes. RunPod and
+Vast.ai account pools get one private SkyPilot home and API server per account (see the worker
+docstring), so clusters, credentials and cached SDK state never cross accounts. Clouds without a
+pool, and RunPod/Vast without one, use the user's own SkyPilot setup (the ambient account).
+The worker may run under a separate interpreter (``INFERWEAVE_SKYPILOT_PYTHON``), keeping
+SkyPilot's dependencies apart from Lightning SDK's.
+"""
+
+import hashlib
+import json
 import logging
 import os
 import shlex
 import shutil
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
-from inferweave.core.exceptions import ProviderPlatformError
-from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.accounts.models import ProviderAccount
+from inferweave.core.exceptions import ProviderOperationError, ProviderPlatformError
+from inferweave.core.failures import FailureKind
+from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.domain.lifecycle import AutostopAction
-from inferweave.domain.options import DeploymentOptions
-from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
+from inferweave.isolation import (
+    WORKER_DIR,
+    WorkerRunner,
+    account_environment,
+    ambient_environment,
+)
+from inferweave.isolation.file_lock import file_lock
+from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import DeploymentState, ProviderType
 from inferweave.models.profile import ModelProfile
-from inferweave.ports.deployment_repository import DeploymentRepositoryPort
-from inferweave.providers.base import ComputeProvider
+from inferweave.providers.base import ComputeProvider, ProvisionResult, ResourceStatus
 from inferweave.runtimes.base import RuntimeSpec
 
 logger = logging.getLogger(__name__)
+
+PYTHON_ENV = "INFERWEAVE_SKYPILOT_PYTHON"
+POOLED_CLOUDS = frozenset({"runpod", "vast"})
+_PORT_BASE = 47000
+_PORT_SLOTS = 1000
+_ports_lock = threading.Lock()
 
 
 def resolve_worker_workdir(
@@ -72,7 +95,6 @@ def resolve_worker_workdir(
 
 
 class SkyPilotProvider(ComputeProvider):
-
     """Compute provider delegating GPU provisioning and execution to SkyPilot.
 
     Supports: RunPod, AWS, GCP, Azure, Lambda Labs, Nebius, Vast.ai, OCI, Kubernetes, etc.
@@ -81,11 +103,17 @@ class SkyPilotProvider(ComputeProvider):
     def __init__(
         self,
         cloud_name: str,
-        repository: DeploymentRepositoryPort | None = None,
+        python: str | None = None,
+        state_dir: Path | None = None,
+        runner: WorkerRunner | None = None,
     ) -> None:
         self._cloud_name = cloud_name.lower()
-        self._repository = repository
-        self._local_deployments: dict[str, dict[str, Any]] = {}
+        self.state_dir = state_dir or Path.home() / ".inferweave" / "accounts"
+        self.runner = runner or WorkerRunner(
+            self._cloud_name,
+            WORKER_DIR / "skypilot_worker.py",
+            python=python or os.environ.get(PYTHON_ENV),
+        )
 
     @property
     def name(self) -> str:
@@ -106,114 +134,119 @@ class SkyPilotProvider(ComputeProvider):
                 f"  2. Use a native Windows-compatible provider like Modal: `provider='modal'`"
             )
 
-    def _get_sky_module(self) -> Any:
-        """Lazy loads the SkyPilot SDK module."""
-        self._ensure_supported_platform()
-        try:
-            import sky  # type: ignore
+    def new_deployment_id(self, profile: ModelProfile) -> str:
+        return f"iw-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
 
-            return sky
-        except ImportError as e:
-            known_individual_extras = {
-                "runpod",
-                "aws",
-                "gcp",
-                "azure",
-                "lambda",
-                "nebius",
-                "kubernetes",
-                "vast",
-            }
-            pkg_hint = (
-                f"inferweave[{self.name}]"
-                if self.name in known_individual_extras
-                else "inferweave[clouds]"
-            )
-            raise ImportError(
-                f"SkyPilot is not installed with support for '{self.name}'. "
-                f"Install it via: pip install '{pkg_hint}'"
-            ) from e
+    def resource_ref(
+        self, deployment_id: str, request: DeploymentRequest, account: ProviderAccount
+    ) -> ResourceRef:
+        return ResourceRef(name=deployment_id)
 
-    @staticmethod
-    def _await_request(sky: Any, result: Any) -> Any:
-        """Resolves a SkyPilot client API result to its value.
+    def dry_run_endpoint(self, deployment_id: str, runtime: RuntimeSpec) -> str:
+        return f"http://dryrun-{deployment_id}.cloud:{runtime.port}"
 
-        SkyPilot's client SDK (>=0.9) submits work to its API server and returns a request
-        ID (a ``str``); the operation's result or error is only available via ``sky.get``.
-        Blocking; call from a worker thread. Non-ID results are returned unchanged.
-        """
-        if isinstance(result, str):
-            return sky.get(result)
-        return result
-
-    async def deploy(
+    def preflight(
         self,
         request: DeploymentRequest,
         profile: ModelProfile,
         runtime: RuntimeSpec,
-    ) -> Deployment:
-        """Translates ModelProfile and RuntimeSpec into a SkyPilot Task and launches it."""
-        deployment_id = (
-            f"iw-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
-        )
-
-        record = DeploymentRecord(
-            id=deployment_id,
-            model=profile.id,
-            provider=self.name,
-            state=DeploymentState.PROVISIONING,
-            endpoint_url=f"http://dryrun-{deployment_id}.cloud:{runtime.port}"
-            if request.dry_run
-            else None,
-            options=request.options
-            or DeploymentOptions.from_custom_args(
-                request.custom_args, request.autostop_mins
-            ),
-            is_dry_run=request.dry_run,
-        )
-        self._local_deployments[deployment_id] = {
-            "model": profile.id,
-            "dry_run": request.dry_run,
-            "record": record,
-        }
-        if self._repository:
-            await self._repository.save(record)
-
-        # In dry-run mode, simulate provisioning without launching live cloud resources
+        account: ProviderAccount,
+    ) -> None:
         if request.dry_run:
-            status = DeploymentStatus(
-                id=deployment_id,
-                model=profile.id,
-                provider=self.name,
-                state=DeploymentState.PROVISIONING,
-                endpoint_url=f"http://dryrun-{deployment_id}.cloud:{runtime.port}",
-            )
-            return Deployment(
-                status=status,
-                stop_fn=lambda action=None: self.stop(
-                    deployment_id, action=action or AutostopAction.STOP
-                ),
-                refresh_fn=lambda: self.get_status(deployment_id),
-            )
-
-        # Ensure platform is supported before initiating launch
+            return
         self._ensure_supported_platform()
-        sky = self._get_sky_module()
+        if not account.is_ambient:
+            account.secret("api_key")
 
-        # Map hardware requirements to SkyPilot resources
+    # --- account isolation ---------------------------------------------------------------------
+
+    def _account_dir(self, account: ProviderAccount) -> Path:
+        digest = hashlib.sha256(f"{account.id}/{account.owner_fingerprint}".encode()).hexdigest()[:16]
+        return self.state_dir / "skypilot" / self.name / digest
+
+    def account_port(self, account: ProviderAccount) -> int:
+        """Stable localhost port of the account's private SkyPilot API server."""
+        registry = self.state_dir / "skypilot" / "ports.json"
+        key = f"{self.name}/{account.id}/{account.owner_fingerprint}"
+        with _ports_lock, file_lock(registry.with_suffix(".lock"), blocking=True):
+            try:
+                ports: dict[str, int] = json.loads(registry.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                ports = {}
+            if key in ports:
+                return int(ports[key])
+            used = set(ports.values())
+            slot = int(hashlib.sha256(key.encode("utf-8")).hexdigest(), 16) % _PORT_SLOTS
+            for offset in range(_PORT_SLOTS):
+                # API, metrics and the account-private multiprocessing request queue.
+                port = _PORT_BASE + ((slot + offset) % _PORT_SLOTS) * 3
+                if port not in used:
+                    break
+            else:  # pragma: no cover - a thousand accounts on one machine
+                raise ProviderPlatformError("No free port for another SkyPilot account server.")
+            ports[key] = port
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            temporary = registry.with_suffix(".tmp")
+            temporary.write_text(json.dumps(ports, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(temporary, registry)
+            return port
+
+    async def _run(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        account: ProviderAccount,
+        *,
+        timeout: float,
+        deployment_id: str | None = None,
+    ) -> Any:
+        self._ensure_supported_platform()
+        payload = {"cloud": self.name, **payload}
+        secrets: dict[str, str] = {}
+        if account.is_ambient:
+            env = ambient_environment()
+            payload["mode"] = "ambient"
+        else:
+            if self.name not in POOLED_CLOUDS:
+                raise ProviderOperationError(
+                    f"Account pools are not supported for SkyPilot cloud '{self.name}'.",
+                    FailureKind.INVALID_REQUEST,
+                    resource_may_exist=False,
+                )
+            env = account_environment(self._account_dir(account) / "home")
+            payload.update(
+                mode="account",
+                server_port=self.account_port(account),
+                fingerprint=account.owner_fingerprint,
+            )
+            secrets["api_key"] = account.secret("api_key")
+        return await self.runner.run(
+            operation,
+            payload,
+            env=env,
+            secrets=secrets,
+            timeout=timeout,
+            deployment_id=deployment_id,
+            account_id=account.id,
+        )
+
+    # --- lifecycle ---------------------------------------------------------------------------
+
+    def launch_payload(
+        self,
+        record: DeploymentRecord,
+        request: DeploymentRequest,
+        profile: ModelProfile,
+        runtime: RuntimeSpec,
+    ) -> dict[str, Any]:
+        """Translates ModelProfile and RuntimeSpec into the worker's SkyPilot task spec."""
+        assert record.resource is not None
         gpu_spec = request.gpu_type or (
             profile.hardware.recommended_gpus[0]
             if profile.hardware.recommended_gpus
             else "A10G"
         )
         gpu_count = request.num_gpus or profile.hardware.gpu_count
-        accelerators = f"{gpu_spec}:{gpu_count}"
-
-        # Construct task definition
-        setup_script = (
-            "\n".join(runtime.setup_commands) if runtime.setup_commands else None
-        )
-
         provider_opts = request.options.provider if request.options else None
         workdir = None
         if provider_opts and provider_opts.extra_provider_args:
@@ -223,31 +256,12 @@ class SkyPilotProvider(ComputeProvider):
         # argv (every token shell-quoted), never from the free-form run_command, so model IDs,
         # engine args and extra_cli_args stay literal arguments instead of shell fragments.
         run_script = shlex.join(runtime.run_args)
-
         if workdir is None and "inferweave" in run_script:
             workdir = resolve_worker_workdir()
-
 
         task_envs = dict(runtime.env_vars) if runtime.env_vars else {}
         if workdir and "PYTHONPATH" not in task_envs:
             task_envs["PYTHONPATH"] = ".:$PYTHONPATH"
-
-        task = sky.Task(
-            name=deployment_id,
-            setup=setup_script,
-            run=run_script,
-            envs=task_envs,
-            workdir=workdir,
-        )
-
-
-        use_spot = provider_opts.allow_spot if provider_opts else True
-        region = (
-            provider_opts.preferred_regions[0]
-            if (provider_opts and provider_opts.preferred_regions)
-            else None
-        )
-        disk_size = provider_opts.disk_size_gb if provider_opts else None
 
         # Determine provider-native autostop policy (action & idle minutes)
         autodown = False
@@ -262,265 +276,97 @@ class SkyPilotProvider(ComputeProvider):
         elif provider_opts and provider_opts.autodown:
             autodown = True
 
-        resources_kwargs: dict[str, Any] = {
-            "cloud": (
-                sky.clouds.CLOUD_REGISTRY.from_str(self.name)
-                if hasattr(sky.clouds, "CLOUD_REGISTRY")
-                else None
-            ),
-            "accelerators": accelerators,
+        resources: dict[str, Any] = {
+            "cloud": self.name,
+            "accelerators": f"{gpu_spec}:{gpu_count}",
             "ports": [runtime.port],
-            "use_spot": use_spot,
+            "use_spot": provider_opts.allow_spot if provider_opts else True,
         }
         if runtime.docker_image:
-            resources_kwargs["image_id"] = f"docker:{runtime.docker_image}"
-        if region:
-            resources_kwargs["region"] = region
-        if disk_size:
-            resources_kwargs["disk_size"] = disk_size
-
+            resources["image_id"] = f"docker:{runtime.docker_image}"
+        if provider_opts and provider_opts.preferred_regions:
+            resources["region"] = provider_opts.preferred_regions[0]
+        if provider_opts and provider_opts.disk_size_gb:
+            resources["disk_size"] = provider_opts.disk_size_gb
         if provider_opts and provider_opts.extra_provider_args:
             for k in ("zone", "image_id"):
                 if k in provider_opts.extra_provider_args:
-                    resources_kwargs[k] = provider_opts.extra_provider_args[k]
+                    resources[k] = provider_opts.extra_provider_args[k]
 
-        resources = sky.Resources(**resources_kwargs)
-        task.set_resources(resources)
+        return {
+            "cluster": record.resource.name,
+            "setup": "\n".join(runtime.setup_commands) if runtime.setup_commands else None,
+            "run": run_script,
+            "envs": task_envs,
+            "workdir": workdir,
+            "resources": resources,
+            "idle_minutes": idle_mins,
+            "down": autodown,
+            "port": runtime.port,
+        }
 
-        # Launch the task asynchronously
-        def _launch_sync() -> None:
-            self._await_request(
-                sky,
-                sky.launch(
-                    task,
-                    cluster_name=deployment_id,
-                    idle_minutes_to_autostop=idle_mins,
-                    down=autodown,
-                    stream_logs=False,
-                ),
-            )
-
-        await asyncio.to_thread(_launch_sync)
-
-        # Query live cluster endpoint if ready
-        endpoint_url = await self._resolve_endpoint(sky, deployment_id, runtime.port)
-        # A launched cluster with an endpoint only proves the infrastructure is up, not that
-        # the model runtime is serving. Report STARTING; HEALTHY is assigned only after a
-        # successful readiness healthcheck (see InferWeave.deploy / refresh_status).
-        state = (
-            DeploymentState.STARTING
-            if endpoint_url is not None
-            else DeploymentState.PROVISIONING
+    async def provision(
+        self,
+        record: DeploymentRecord,
+        request: DeploymentRequest,
+        profile: ModelProfile,
+        runtime: RuntimeSpec,
+        account: ProviderAccount,
+    ) -> ProvisionResult:
+        result = await self._run(
+            "launch",
+            self.launch_payload(record, request, profile, runtime),
+            account,
+            timeout=3600,
+            deployment_id=record.id,
         )
-
-        status = DeploymentStatus(
-            id=deployment_id,
-            model=profile.id,
-            provider=self.name,
-            state=state,
+        endpoint_url = result.get("endpoint") if isinstance(result, dict) else None
+        # A launched cluster with an endpoint only proves the infrastructure is up, not that
+        # the model runtime is serving. HEALTHY is assigned only after a readiness healthcheck.
+        return ProvisionResult(
+            state=DeploymentState.STARTING if endpoint_url else DeploymentState.PROVISIONING,
             endpoint_url=endpoint_url,
         )
-        record.state = state
-        record.endpoint_url = endpoint_url
-        if self._repository:
-            await self._repository.save(record)
 
-        async def _stop(action: AutostopAction | str | None = AutostopAction.STOP) -> None:
-            await self.stop(deployment_id, action=action or AutostopAction.STOP)
+    def _cluster(self, record: DeploymentRecord) -> dict[str, Any]:
+        return {"cluster": record.resource.name if record.resource else record.id}
 
-        async def _refresh() -> DeploymentStatus:
-            return await self.get_status(deployment_id)
+    async def status(self, record: DeploymentRecord, account: ProviderAccount) -> ResourceStatus:
+        data = await self._run(
+            "status", self._cluster(record), account, timeout=180, deployment_id=record.id
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("exists"), bool):
+            raise ProviderOperationError("SkyPilot returned an invalid status.", FailureKind.TRANSIENT)
+        if not data["exists"]:
+            return ResourceStatus(state=DeploymentState.STOPPED, endpoint_url=record.endpoint_url)
+        status = str(data.get("status") or "")
+        # Cluster UP is infrastructure state only; readiness is established by a probe.
+        if "UP" in status:
+            state = DeploymentState.STARTING
+        elif "INIT" in status:
+            state = DeploymentState.PROVISIONING
+        elif "STOPPED" in status:
+            state = DeploymentState.STOPPED
+        else:
+            state = DeploymentState.PENDING
+        return ResourceStatus(state=state, endpoint_url=data.get("endpoint") or record.endpoint_url)
 
-        return Deployment(status=status, stop_fn=_stop, refresh_fn=_refresh)
-
-    async def _resolve_endpoint(
-        self, sky: Any, cluster_name: str, port: int
-    ) -> str | None:
-        """Queries cluster endpoints from SkyPilot."""
-
-        def _fetch() -> str | None:
-            try:
-                eps = self._await_request(sky, sky.endpoints(cluster_name, port=port))
-                if not eps:
-                    return None
-                ep = eps.get(port) or next(iter(eps.values()), None)
-                if ep:
-                    return ep if str(ep).startswith("http") else f"http://{ep}"
-                return None
-            except (RuntimeError, ValueError, OSError) as err:
-                logger.debug(
-                    "Endpoints for cluster '%s' not yet ready: %s", cluster_name, err
-                )
-                return None
-            except Exception as err:  # noqa: BLE001
-                logger.debug(
-                    "Unexpected error fetching endpoints for '%s': %s",
-                    cluster_name,
-                    err,
-                )
-                return None
-
-        return await asyncio.to_thread(_fetch)
+    async def resource_exists(self, record: DeploymentRecord, account: ProviderAccount) -> bool:
+        data = await self._run(
+            "status", self._cluster(record), account, timeout=180, deployment_id=record.id
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("exists"), bool):
+            raise ProviderOperationError("SkyPilot returned an invalid status.", FailureKind.TRANSIENT)
+        return bool(data["exists"])
 
     async def stop(
         self,
-        deployment_id: str,
-        action: AutostopAction | str | None = AutostopAction.STOP,
+        record: DeploymentRecord,
+        account: ProviderAccount,
+        action: AutostopAction = AutostopAction.STOP,
     ) -> None:
-        """Terminates or pauses the SkyPilot cluster corresponding to this deployment."""
-        act = action or AutostopAction.STOP
-        target_action = (
-            AutostopAction(act.lower()) if isinstance(act, str) else act
-        )
-        is_dry_run = False
-        if deployment_id in self._local_deployments:
-            is_dry_run = self._local_deployments[deployment_id].get("dry_run", False)
-        elif self._repository:
-            rec = await self._repository.get(deployment_id)
-            if rec and rec.is_dry_run:
-                is_dry_run = True
-
-        if is_dry_run:
-            logger.info("Dry-run deployment '%s' marked stopped.", deployment_id)
-            if deployment_id in self._local_deployments:
-                self._local_deployments[deployment_id]["record"].mark_stopped()
-            if self._repository:
-                rec = await self._repository.get(deployment_id)
-                if rec:
-                    rec.mark_stopped()
-                    await self._repository.save(rec)
-            return
-
-        self._ensure_supported_platform()
-        sky = self._get_sky_module()
-        if target_action == AutostopAction.DOWN:
-            logger.info("Tearing down SkyPilot cluster '%s'...", deployment_id)
-            await asyncio.to_thread(
-                lambda: self._await_request(sky, sky.down(cluster_name=deployment_id))
-            )
-        else:
-            logger.info("Stopping SkyPilot cluster '%s'...", deployment_id)
-            await asyncio.to_thread(
-                lambda: self._await_request(sky, sky.stop(cluster_name=deployment_id))
-            )
-
-        if deployment_id in self._local_deployments:
-            self._local_deployments[deployment_id]["record"].mark_stopped()
-        if self._repository:
-            rec = await self._repository.get(deployment_id)
-            if rec:
-                rec.mark_stopped()
-                await self._repository.save(rec)
-
-    async def get_status(self, deployment_id: str) -> DeploymentStatus:
-        """Retrieves live cluster status from SkyPilot."""
-        model_name = "unknown"
-        is_dry_run = False
-        cached_record = None
-
-        if self._repository:
-            cached_record = await self._repository.get(deployment_id)
-            if cached_record:
-                model_name = cached_record.model
-                is_dry_run = cached_record.is_dry_run
-
-        if model_name == "unknown" and deployment_id in self._local_deployments:
-            meta = self._local_deployments[deployment_id]
-            model_name = meta.get("model", "unknown")
-            is_dry_run = meta.get("dry_run", False)
-            cached_record = meta.get("record")
-
-        if is_dry_run:
-            state = (
-                cached_record.state if cached_record else DeploymentState.PROVISIONING
-            )
-            endpoint = cached_record.endpoint_url if cached_record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model_name,
-                provider=self.name,
-                state=state,
-                endpoint_url=endpoint,
-            )
-
-        self._ensure_supported_platform()
-        sky = self._get_sky_module()
-
-        def _fetch_status() -> tuple[DeploymentState, str | None]:
-            try:
-                clusters = self._await_request(
-                    sky, sky.status(cluster_names=[deployment_id])
-                )
-                if not clusters:
-                    return DeploymentState.STOPPED, None
-
-                rec = clusters[0]
-                status_raw = getattr(rec, "status", None)
-                if status_raw is None and isinstance(rec, dict):
-                    status_raw = rec.get("status")
-
-                status_str = str(getattr(status_raw, "value", status_raw)).upper()
-
-                # Cluster UP is infrastructure state only; application readiness is
-                # established separately by a healthcheck probe.
-                if "UP" in status_str:
-                    state = DeploymentState.STARTING
-                elif "INIT" in status_str:
-                    state = DeploymentState.PROVISIONING
-                elif "STOPPED" in status_str:
-                    state = DeploymentState.STOPPED
-                else:
-                    state = DeploymentState.PENDING
-
-                # Try fetching endpoint if UP
-                endpoint = None
-                if state == DeploymentState.STARTING:
-                    try:
-                        eps = self._await_request(sky, sky.endpoints(deployment_id))
-                        if eps:
-                            ep = next(iter(eps.values()), None)
-                            if ep:
-                                endpoint = (
-                                    ep if str(ep).startswith("http") else f"http://{ep}"
-                                )
-                    except (RuntimeError, ValueError, OSError) as err:
-                        logger.debug(
-                            "Endpoint query failed for healthy cluster: %s", err
-                        )
-                    except Exception as err:  # noqa: BLE001
-                        logger.debug("Unexpected endpoint query error: %s", err)
-
-                return state, endpoint
-            except (RuntimeError, ValueError, OSError) as err:
-                logger.warning(
-                    "Failed to fetch SkyPilot status for '%s': %s", deployment_id, err
-                )
-                fallback_state = (
-                    cached_record.state if cached_record else DeploymentState.PENDING
-                )
-                fallback_endpoint = (
-                    cached_record.endpoint_url if cached_record else None
-                )
-                return fallback_state, fallback_endpoint
-            except Exception as err:  # noqa: BLE001
-                logger.warning(
-                    "Unexpected error fetching SkyPilot status for '%s': %s",
-                    deployment_id,
-                    err,
-                )
-                fallback_state = (
-                    cached_record.state if cached_record else DeploymentState.PENDING
-                )
-                fallback_endpoint = (
-                    cached_record.endpoint_url if cached_record else None
-                )
-                return fallback_state, fallback_endpoint
-
-        state, endpoint = await asyncio.to_thread(_fetch_status)
-        return DeploymentStatus(
-            id=deployment_id,
-            model=model_name,
-            provider=self.name,
-            state=state,
-            endpoint_url=endpoint,
-        )
+        """Stops (disk kept, still billed) or tears down (DOWN) the cluster."""
+        target = AutostopAction(action.lower()) if isinstance(action, str) else action
+        operation = "down" if target == AutostopAction.DOWN else "stop"
+        logger.info("%s SkyPilot cluster '%s'...", operation.title(), record.id)
+        await self._run(operation, self._cluster(record), account, timeout=900, deployment_id=record.id)

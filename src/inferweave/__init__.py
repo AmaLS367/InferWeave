@@ -3,9 +3,27 @@
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # Accounts (CredWeave)
+    "AccountsConfig": ("inferweave.accounts", "AccountsConfig"),
+    "AccountSpec": ("inferweave.accounts", "AccountSpec"),
+    "AccountManager": ("inferweave.accounts", "AccountManager"),
+    "AccountHealth": ("inferweave.accounts", "AccountHealth"),
+    "ProviderAccount": ("inferweave.accounts", "ProviderAccount"),
+    "ProviderAccounts": ("inferweave.accounts", "ProviderAccounts"),
+    "modal_account": ("inferweave.accounts", "modal_account"),
+    "lightning_account": ("inferweave.accounts", "lightning_account"),
+    "runpod_account": ("inferweave.accounts", "runpod_account"),
+    "vast_account": ("inferweave.accounts", "vast_account"),
+    "AccountConfigurationError": ("inferweave.core.exceptions", "AccountConfigurationError"),
+    "AccountUnavailableError": ("inferweave.core.exceptions", "AccountUnavailableError"),
+    "NoAccountAvailableError": ("inferweave.core.exceptions", "NoAccountAvailableError"),
+    "ProviderOperationError": ("inferweave.core.exceptions", "ProviderOperationError"),
+    "ProvisioningUncertainError": ("inferweave.core.exceptions", "ProvisioningUncertainError"),
+    "FailureKind": ("inferweave.core.failures", "FailureKind"),
+    "ResourceRef": ("inferweave.domain.deployment_record", "ResourceRef"),
     # Adapters
     "HttpxHealthcheckProbeAdapter": ("inferweave.adapters.healthcheck", "HttpxHealthcheckProbeAdapter"),
     "MockHealthcheckProbeAdapter": ("inferweave.adapters.healthcheck", "MockHealthcheckProbeAdapter"),
@@ -93,6 +111,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 }
 
 __all__ = [
+    "AccountConfigurationError",
+    "AccountHealth",
+    "AccountManager",
+    "AccountSpec",
+    "AccountUnavailableError",
+    "AccountsConfig",
     "AmbiguousDeploymentError",
     "AsyncioWatchdogAdapter",
     "AutostopAction",
@@ -113,6 +137,7 @@ __all__ = [
     "DeploymentStatus",
     "EndpointAuthPort",
     "EndpointNotReadyError",
+    "FailureKind",
     "FishSpeechClient",
     "GpuSpec",
     "HardwareRequirements",
@@ -148,19 +173,25 @@ __all__ = [
     "ModelNotFoundError",
     "ModelProfile",
     "ModelRegistry",
+    "NoAccountAvailableError",
     "NoEndpointAuth",
     "NoFeasibleProviderError",
     "ProbeOutcome",
     "ProbeResult",
+    "ProviderAccount",
+    "ProviderAccounts",
     "ProviderAuthError",
     "ProviderNotFoundError",
+    "ProviderOperationError",
     "ProviderOptions",
     "ProviderPlatformError",
     "ProviderType",
+    "ProvisioningUncertainError",
     "RankedOffer",
     "ReadinessReport",
     "ReadinessState",
     "ReferenceAudio",
+    "ResourceRef",
     "RoutingConstraints",
     "RoutingDecision",
     "RuntimeOptions",
@@ -170,8 +201,11 @@ __all__ = [
     "UnsupportedWorkloadError",
     "VramCheckResult",
     "WorkloadType",
+    "lightning_account",
+    "modal_account",
+    "runpod_account",
+    "vast_account",
 ]
-
 
 
 def __getattr__(name: str) -> Any:
@@ -190,6 +224,18 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:
+    from inferweave.accounts import (
+        AccountHealth,
+        AccountManager,
+        AccountsConfig,
+        AccountSpec,
+        ProviderAccount,
+        ProviderAccounts,
+        lightning_account,
+        modal_account,
+        runpod_account,
+        vast_account,
+    )
     from inferweave.adapters.auth import (
         CompositeEndpointAuth,
         LightningEndpointAuth,
@@ -217,6 +263,8 @@ if TYPE_CHECKING:
         ReferenceAudio,
     )
     from inferweave.core.exceptions import (
+        AccountConfigurationError,
+        AccountUnavailableError,
         AmbiguousDeploymentError,
         DeploymentError,
         DeploymentNotActiveError,
@@ -231,14 +279,18 @@ if TYPE_CHECKING:
         InsufficientVramError,
         InvalidInferenceResponseError,
         ModelNotFoundError,
+        NoAccountAvailableError,
         NoFeasibleProviderError,
         ProviderAuthError,
         ProviderNotFoundError,
+        ProviderOperationError,
         ProviderPlatformError,
+        ProvisioningUncertainError,
         UnknownGpuError,
         UnsupportedWorkloadError,
     )
-    from inferweave.domain.deployment_record import DeploymentRecord
+    from inferweave.core.failures import FailureKind
+    from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
     from inferweave.domain.hardware_validator import HardwareValidator
     from inferweave.domain.healthcheck import (
         HealthEvaluator,

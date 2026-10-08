@@ -1,19 +1,19 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
-    "extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-aws' and extra != 'extra-10-inferweave-azure' and extra != 'extra-10-inferweave-clouds' and extra != 'extra-10-inferweave-gcp' and extra != 'extra-10-inferweave-kubernetes' and extra != 'extra-10-inferweave-lambda' and extra == 'extra-10-inferweave-lightning' and extra != 'extra-10-inferweave-nebius' and extra != 'extra-10-inferweave-runpod' and extra != 'extra-10-inferweave-vast'",
     "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
-    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
+    "extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-aws' and extra != 'extra-10-inferweave-azure' and extra != 'extra-10-inferweave-clouds' and extra != 'extra-10-inferweave-gcp' and extra != 'extra-10-inferweave-kubernetes' and extra != 'extra-10-inferweave-lambda' and extra == 'extra-10-inferweave-lightning' and extra != 'extra-10-inferweave-nebius' and extra != 'extra-10-inferweave-runpod' and extra != 'extra-10-inferweave-vast'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-inferweave-all' and extra != 'extra-10-inferweave-lightning'",
 ]
 conflicts = [[
@@ -2204,10 +2204,10 @@ version = "8.1.8"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
@@ -2277,6 +2277,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/3a/00cc578cd27ed0b22c9be25cef2c24539d92df9fa80ebd67a3fc5419724c/crc32c-2.8-pp311-pypy311_pp73-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:15905fa78344654e241371c47e6ed2411f9eeb2b8095311c68c88eccf541e8b4", size = 64108, upload-time = "2025-10-17T06:20:11.072Z" },
     { url = "https://files.pythonhosted.org/packages/6b/bc/0587ef99a1c7629f95dd0c9d4f3d894de383a0df85831eb16c48a6afdae4/crc32c-2.8-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c596f918688821f796434e89b431b1698396c38bf0b56de873621528fe3ecb1e", size = 64815, upload-time = "2025-10-17T06:20:11.919Z" },
     { url = "https://files.pythonhosted.org/packages/73/42/94f2b8b92eae9064fcfb8deef2b971514065bd606231f8857ff8ae02bebd/crc32c-2.8-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:8d23c4fe01b3844cb6e091044bc1cebdef7d16472e058ce12d9fadf10d2614af", size = 66659, upload-time = "2025-10-17T06:20:12.766Z" },
+]
+
+[[package]]
+name = "credweave"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/db/4cbce167d0cb950d892fa19974e8ad8fb1c0aa746333183cbe548eba1a91/credweave-0.1.0.tar.gz", hash = "sha256:fb1e24b71e3a3d6d5f4963c50f8b0f1d02863d1ded4b59079aa6aba5ef538c0c", size = 151314, upload-time = "2026-10-08T13:37:13.05Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/1d/8103538473d9bbf949ce83144efd3772fac6ca5ead4a7392210b4e0a356f/credweave-0.1.0-py3-none-any.whl", hash = "sha256:ced80bc88c3ed7b2787a98aceb6e4b64aa527e1e757c9d1b3ebe509d7db9dcf2", size = 76843, upload-time = "2026-10-08T13:37:11.493Z" },
 ]
 
 [[package]]
@@ -3141,6 +3150,7 @@ wheels = [
 name = "inferweave"
 source = { editable = "." }
 dependencies = [
+    { name = "credweave" },
     { name = "httpx" },
     { name = "msgpack" },
     { name = "pydantic" },
@@ -3204,6 +3214,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "credweave", specifier = ">=0.1.0,<0.2" },
     { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.110.0" },
     { name = "fastapi", marker = "extra == 'workers'", specifier = ">=0.110.0" },
     { name = "httpx", specifier = ">=0.28.1,<1.0" },
@@ -3214,16 +3225,16 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "skypilot", extras = ["aws"], marker = "extra == 'aws'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["aws", "azure", "cudo", "fluidstack", "gcp", "ibm", "kubernetes", "lambda", "nebius", "oci", "paperspace", "runpod", "scp", "seeweb", "shadeform", "vast", "verda"], marker = "extra == 'all'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["aws", "azure", "cudo", "fluidstack", "gcp", "ibm", "kubernetes", "lambda", "nebius", "oci", "paperspace", "runpod", "scp", "seeweb", "shadeform", "vast", "verda"], marker = "extra == 'clouds'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["azure"], marker = "extra == 'azure'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["gcp"], marker = "extra == 'gcp'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["kubernetes"], marker = "extra == 'kubernetes'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["lambda"], marker = "extra == 'lambda'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["nebius"], marker = "extra == 'nebius'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["runpod"], marker = "extra == 'runpod'", specifier = ">=0.13.0" },
-    { name = "skypilot", extras = ["vast"], marker = "extra == 'vast'", specifier = ">=0.13.0" },
+    { name = "skypilot", extras = ["aws"], marker = "extra == 'aws'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["aws", "azure", "cudo", "fluidstack", "gcp", "ibm", "kubernetes", "lambda", "nebius", "oci", "paperspace", "runpod", "scp", "seeweb", "shadeform", "vast", "verda"], marker = "extra == 'all'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["aws", "azure", "cudo", "fluidstack", "gcp", "ibm", "kubernetes", "lambda", "nebius", "oci", "paperspace", "runpod", "scp", "seeweb", "shadeform", "vast", "verda"], marker = "extra == 'clouds'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["azure"], marker = "extra == 'azure'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["gcp"], marker = "extra == 'gcp'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["kubernetes"], marker = "extra == 'kubernetes'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["lambda"], marker = "extra == 'lambda'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["nebius"], marker = "extra == 'nebius'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["runpod"], marker = "extra == 'runpod'", specifier = ">=0.13.0,<0.14" },
+    { name = "skypilot", extras = ["vast"], marker = "extra == 'vast'", specifier = ">=0.13.0,<0.14" },
     { name = "typer", specifier = ">=0.12.0" },
     { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.28.0" },
     { name = "uvicorn", marker = "extra == 'workers'", specifier = ">=0.28.0" },

@@ -69,6 +69,9 @@ class DeploymentStatus(BaseModel):
     id: str = Field(..., description="Unique deployment identifier")
     model: str = Field(..., description="Model identifier")
     provider: str = Field(..., description="Provider hosting the deployment")
+    account: str | None = Field(
+        default=None, description="Nonsecret id of the provider account that owns the deployment"
+    )
     state: DeploymentState = Field(default=DeploymentState.PENDING)
     endpoint_url: str | None = Field(
         default=None, description="Live HTTP/HTTPS inference URL"
@@ -97,6 +100,7 @@ class Deployment:
         inference_client: "InferenceClient | None" = None,
     ) -> None:
         self._status = status
+        self._owner_fingerprint: str | None = None
         self._stop_fn = stop_fn
         self._refresh_fn = refresh_fn
         self._healthcheck_fn = healthcheck_fn
@@ -119,6 +123,11 @@ class Deployment:
     @property
     def provider(self) -> str:
         return self._status.provider
+
+    @property
+    def account(self) -> str | None:
+        """Nonsecret id of the provider account that owns this deployment."""
+        return self._status.account
 
     @property
     def state(self) -> DeploymentState:
@@ -307,5 +316,6 @@ class Deployment:
         endpoint = safe_endpoint(self.endpoint_url) if self.endpoint_url else None
         return (
             f"<Deployment id='{self.id}' model='{self.model}' "
-            f"provider='{self.provider}' state='{self.state}' endpoint='{endpoint}'>"
+            f"provider='{self.provider}' account='{self.account}' state='{self.state}' "
+            f"endpoint='{endpoint}'>"
         )

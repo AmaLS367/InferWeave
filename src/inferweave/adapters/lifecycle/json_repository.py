@@ -1,13 +1,17 @@
 """JSON file-based implementation of DeploymentRepositoryPort for cross-process persistence."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.isolation.file_lock import file_lock
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 
 logger = logging.getLogger(__name__)
@@ -101,12 +105,29 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
             logger.error("Failed to write deployment records to '%s': %s", self.file_path, exc)
             raise
 
+    @contextmanager
+    def operation_lock(self, deployment_id: str) -> Iterator[bool]:
+        digest = hashlib.sha256(deployment_id.encode()).hexdigest()
+        directory = self.file_path.resolve().with_suffix(self.file_path.suffix + ".locks")
+        with file_lock(directory / digest) as acquired:
+            yield acquired
+
+    def _mutate_sync(self, record: DeploymentRecord | None, deployment_id: str) -> None:
+        lock_path = self.file_path.resolve().with_suffix(self.file_path.suffix + ".write.lock")
+        with file_lock(lock_path, blocking=True) as acquired:
+            if not acquired:
+                raise OSError("Cannot acquire deployment storage lock")
+            records = self._read_records_sync()
+            if record is None:
+                records.pop(deployment_id, None)
+            else:
+                records[deployment_id] = record.model_copy(deep=True)
+            self._write_records_sync(records)
+
     async def save(self, record: DeploymentRecord) -> None:
-        """Persists or updates a deployment record."""
+        """Persists an update with a cross-process read/modify/write lock."""
         async with self._lock:
-            records = await asyncio.to_thread(self._read_records_sync)
-            records[record.id] = record.model_copy(deep=True)
-            await asyncio.to_thread(self._write_records_sync, records)
+            await asyncio.to_thread(self._mutate_sync, record, record.id)
 
     async def get(self, deployment_id: str) -> DeploymentRecord | None:
         """Retrieves a deployment record by ID, or None if not found."""
@@ -122,12 +143,8 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
             return [rec.model_copy(deep=True) for rec in records.values()]
 
     async def delete(self, deployment_id: str) -> None:
-        """Removes a deployment record from storage."""
         async with self._lock:
-            records = await asyncio.to_thread(self._read_records_sync)
-            if deployment_id in records:
-                del records[deployment_id]
-                await asyncio.to_thread(self._write_records_sync, records)
+            await asyncio.to_thread(self._mutate_sync, None, deployment_id)
 
     def clear(self) -> None:
         """Clears all records (useful for testing)."""

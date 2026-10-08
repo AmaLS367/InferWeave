@@ -1,4 +1,10 @@
-"""InferWeave core exception hierarchy."""
+"""InferWeave core exception hierarchy.
+
+Messages never contain credential values: provider SDK error text is withheld or redacted before
+it reaches an exception, and exceptions raised from SDK errors suppress the chained traceback.
+"""
+
+from inferweave.core.failures import FailureKind
 
 
 class InferWeaveError(Exception):
@@ -44,12 +50,104 @@ class ProviderPlatformError(InferWeaveError):
     """Raised when a provider cannot run on the current host platform."""
 
 
+class AccountConfigurationError(InferWeaveError):
+    """Raised when provider account configuration is invalid (never includes secret values)."""
+
+
+class AccountUnavailableError(ProviderAuthError):
+    """Raised when the account that owns a deployment is no longer configured.
+
+    InferWeave never falls back to another account for an existing deployment: restore the
+    account (same id) in the configuration, or clean the resource up in the provider console.
+    """
+
+    def __init__(
+        self, provider: str, account_id: str, deployment_id: str | None = None
+    ) -> None:
+        target = f" (deployment '{deployment_id}')" if deployment_id else ""
+        super().__init__(
+            f"Account '{account_id}' of provider '{provider}'{target} is not configured or no "
+            "longer provides credentials. InferWeave will not operate on this deployment with "
+            "another account. The account may be revoked or its control-plane keys may have "
+            "changed identity; restore its original keys or recover in the provider console."
+        )
+        self.provider = provider
+        self.account_id = account_id
+        self.deployment_id = deployment_id
+
+
+class ProviderOperationError(InferWeaveError):
+    """A classified provider control-plane failure.
+
+    ``kind`` says why the operation failed; ``resource_may_exist`` is True when the request may
+    have taken effect remotely (e.g. a timeout after a create call was sent).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        kind: FailureKind,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+        resource_may_exist: bool | None = None,
+        deployment_id: str | None = None,
+        operation_may_continue: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.resource_may_exist = (
+            not kind.is_definitive_rejection if resource_may_exist is None else resource_may_exist
+        )
+        self.deployment_id = deployment_id
+        self.operation_may_continue = operation_may_continue
+
+
+class NoAccountAvailableError(InferWeaveError):
+    """Raised when no account of the requested provider(s) could provision the deployment.
+
+    ``attempts`` lists ``(provider, account_id, failure_kind)`` for every attempt made;
+    ``retry_after`` is the shortest known cooldown, when one is known.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        attempts: list[tuple[str, str, str]] | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = list(attempts or [])
+        self.retry_after = retry_after
+
+
 class DeploymentError(InferWeaveError):
     """Raised when a deployment fails during provisioning, runtime startup, or healthcheck."""
 
     def __init__(self, message: str, deployment_id: str | None = None) -> None:
         super().__init__(message)
         self.deployment_id = deployment_id
+
+
+class ProvisioningUncertainError(DeploymentError):
+    """Raised when InferWeave cannot tell whether a paid resource exists remotely.
+
+    No other account or provider is tried, so a possibly running resource is never duplicated.
+    The deployment record keeps ``needs_reconciliation=True`` and its owning account; run
+    ``InferWeave.reconcile()`` (or ``stop(deployment_id)``) once the provider is reachable.
+    """
+
+    def __init__(self, deployment_id: str, provider: str, account_id: str) -> None:
+        super().__init__(
+            f"Provisioning of deployment '{deployment_id}' on {provider} account '{account_id}' "
+            "ended in an unknown state; a billed resource may exist. No retry was made. Run "
+            "InferWeave.reconcile() or stop() for this deployment ID to clean it up.",
+            deployment_id=deployment_id,
+        )
+        self.provider = provider
+        self.account_id = account_id
 
 
 class DeploymentNotFoundError(DeploymentError):

@@ -4,6 +4,7 @@ Unified orchestration and management of AI inference deployments across cloud GP
 """
 
 import asyncio
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -24,6 +25,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+_options: dict[str, Path | None] = {"accounts": None}
+
+
+def _weave() -> InferWeave:
+    """Builds the SDK with the accounts file chosen via --accounts (or the environment)."""
+    accounts = _options["accounts"]
+    return InferWeave(accounts=accounts) if accounts is not None else InferWeave()
 
 
 def version_callback(value: bool) -> None:
@@ -46,8 +54,17 @@ def main(
             is_eager=True,
         ),
     ] = None,
+    accounts: Annotated[
+        Path | None,
+        typer.Option(
+            "--accounts",
+            help="Accounts configuration file (YAML/JSON). Defaults to $INFERWEAVE_ACCOUNTS_FILE.",
+            envvar="INFERWEAVE_ACCOUNTS_FILE",
+        ),
+    ] = None,
 ) -> None:
     """InferWeave command-line interface."""
+    _options["accounts"] = accounts
 
 
 @app.command(name="deploy", help="Deploy a model to cloud GPU infrastructure.")
@@ -135,6 +152,13 @@ def deploy(
             help="Automatically terminate cloud resources if readiness probe times out",
         ),
     ] = False,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Pin one configured account id of the provider (no failover)",
+        ),
+    ] = None,
 ) -> None:
     """Deploys a model to the requested compute provider."""
     # Parse env pairs
@@ -182,7 +206,7 @@ def deploy(
     if autostop is not None and autostop <= 0:
         effective_autostop = None
 
-    weave = InferWeave()
+    weave = _weave()
     status_msg = f"[bold green]Deploying {model} via provider '{provider}'...[/bold green]"
     if dry_run:
         status_msg = f"[bold yellow][DRY-RUN] Simulating deployment of {model} on '{provider}'...[/bold yellow]"
@@ -201,6 +225,7 @@ def deploy(
                     custom_args=custom_args_dict,
                     dry_run=dry_run,
                     wait_for_ready=wait,
+                    account=account,
                 )
             )
 
@@ -261,7 +286,7 @@ def list_models(
     ] = None,
 ) -> None:
     """Displays models available in the InferWeave registry."""
-    weave = InferWeave()
+    weave = _weave()
     workload_type = None
     if workload:
         try:
@@ -304,7 +329,7 @@ def list_providers() -> None:
     table.add_column("Engine", style="magenta")
     table.add_column("Description")
 
-    weave = InferWeave()
+    weave = _weave()
     registered = weave.router.list_providers()
     provider_meta: dict[str, tuple[str, str]] = {
         "runpod": ("SkyPilot", "RunPod GPU Cloud instances"),
@@ -333,7 +358,7 @@ def list_providers() -> None:
 @app.command(name="list", help="List all tracked inference deployments.")
 def list_deployments() -> None:
     """Displays all deployments recorded in persistent storage."""
-    weave = InferWeave()
+    weave = _weave()
     records = asyncio.run(weave.list_records())
     if not records:
         console.print("[dim]No active or recorded deployments found.[/dim]")
@@ -343,6 +368,7 @@ def list_deployments() -> None:
     table.add_column("Deployment ID", style="bold cyan", no_wrap=True)
     table.add_column("Model")
     table.add_column("Provider", style="magenta")
+    table.add_column("Account", style="magenta")
     table.add_column("State")
     table.add_column("Endpoint URL")
     table.add_column("Created At", style="dim")
@@ -363,7 +389,9 @@ def list_deployments() -> None:
             rec.id,
             rec.model,
             rec.provider,
-            f"[{state_style}]{st_val}[/{state_style}]",
+            rec.account or "[dim]-[/dim]",
+            f"[{state_style}]{st_val}[/{state_style}]"
+            + (" [yellow](needs reconcile)[/yellow]" if rec.needs_reconciliation else ""),
             rec.endpoint_url or "[dim]None[/dim]",
             created_str,
         )
@@ -379,7 +407,7 @@ def get_status(
     ],
 ) -> None:
     """Queries the operational status of a deployment."""
-    weave = InferWeave()
+    weave = _weave()
     try:
         status = asyncio.run(weave.get_status(deployment_id))
         table = Table(
@@ -392,6 +420,7 @@ def get_status(
         table.add_row("ID", status.id)
         table.add_row("Model", status.model)
         table.add_row("Provider", status.provider)
+        table.add_row("Account", status.account or "[dim]-[/dim]")
         table.add_row("State", status.state.value)
         table.add_row("Endpoint URL", status.endpoint_url or "[dim]None[/dim]")
         if status.error_message:
@@ -425,7 +454,7 @@ def stop(
     ] = AutostopAction.STOP,
 ) -> None:
     """Terminates or pauses a deployment."""
-    weave = InferWeave()
+    weave = _weave()
     try:
         with console.status(
             f"[bold yellow]Stopping deployment '{deployment_id}' (action={action.value})...[/bold yellow]",
@@ -450,3 +479,71 @@ def stop(
             f"[bold red]Failed to stop deployment '{deployment_id}':[/bold red] {err}"
         )
         raise typer.Exit(code=1) from err
+
+
+@app.command(name="accounts", help="Show configured provider accounts and their health.")
+def list_accounts() -> None:
+    """Displays nonsecret CredWeave state of every pooled account."""
+    weave = _weave()
+    health = weave.account_health()
+    if not health:
+        console.print(
+            "[dim]No account pools configured; every provider uses its native default "
+            "credentials (the 'ambient' account).[/dim]"
+        )
+        return
+    table = Table(title="InferWeave Accounts", border_style="cyan")
+    table.add_column("Provider", style="magenta")
+    table.add_column("Account", style="bold cyan")
+    table.add_column("State")
+    table.add_column("In flight")
+    table.add_column("Failures")
+    table.add_column("Leases")
+    table.add_column("Cooldown until", style="dim")
+    for item in health:
+        table.add_row(
+            item.provider,
+            item.account_id,
+            item.state,
+            str(item.in_flight),
+            str(item.consecutive_failures),
+            str(item.total_leases),
+            item.cooldown_until.isoformat() if item.cooldown_until else "-",
+        )
+    console.print(table)
+
+
+@app.command(name="reconcile", help="Clean up deployments whose provisioning outcome is unknown.")
+def reconcile(
+    min_age: Annotated[
+        float,
+        typer.Option(
+            "--min-age",
+            help="Seconds a still-provisioning deployment must age before it is reconciled",
+        ),
+    ] = 1800.0,
+    confirm_settled: Annotated[
+        list[str] | None,
+        typer.Option("--confirm-settled", help="Deployment ID whose create is confirmed finished in the provider console (repeatable)"),
+    ] = None,
+) -> None:
+    """Checks flagged deployments under their owning accounts and removes leftovers."""
+    weave = _weave()
+    try:
+        if confirm_settled:
+            updated = asyncio.run(weave.reconcile(
+                min_age_seconds=min_age, confirmed_settled=tuple(confirm_settled),
+            ))
+        else:
+            updated = asyncio.run(weave.reconcile(min_age_seconds=min_age))
+    except InferWeaveError as err:
+        console.print(f"[bold red]Reconciliation failed:[/bold red] {err}")
+        raise typer.Exit(code=1) from err
+    if not updated:
+        console.print("[dim]Nothing to reconcile.[/dim]")
+        return
+    for record in updated:
+        console.print(
+            f"[bold green][+][/bold green] {record.id} ({record.provider}/{record.account}): "
+            f"{record.state.value}"
+        )
