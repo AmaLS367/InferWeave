@@ -141,6 +141,17 @@ jobs:
           uv pip install --no-config --python "$RUNNER_TEMP/smoke-lightning/bin/python" "${WHEEL}[lightning]"
           "$RUNNER_TEMP/smoke-lightning/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" imports-lightning "$WHEEL"
           uv pip check --python "$RUNNER_TEMP/smoke-lightning/bin/python"
+      - name: Smoke test provider workers in isolated Lightning and SkyPilot environments
+        # Lightning SDK and SkyPilot cannot share one environment; InferWeave drives both
+        # through worker processes that run under their own interpreters.
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --no-config "$RUNNER_TEMP/env-lightning" --python 3.12
+          uv pip install --no-config --python "$RUNNER_TEMP/env-lightning/bin/python" "lightning-sdk==2026.10.1"
+          uv venv --no-config "$RUNNER_TEMP/env-skypilot" --python 3.12
+          uv pip install --no-config --python "$RUNNER_TEMP/env-skypilot/bin/python" "skypilot[runpod,vast]==0.13.0"
+          "$RUNNER_TEMP/smoke/bin/python" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" workers \
+            "$RUNNER_TEMP/env-lightning/bin/python" "$RUNNER_TEMP/env-skypilot/bin/python"
       - name: Check installed wheel is PEP 561 type-discoverable
         # mypy is only installed after the import smoke test so it cannot mask eager imports.
         working-directory: ${{ runner.temp }}

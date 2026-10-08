@@ -12,10 +12,36 @@
 | `LIGHTNING_TEAMSPACE` | Selected `owner/teamspace` for Lightning, unless typed option overrides it |
 | `LIGHTNING_ORG` | Optional owner for a bare teamspace; unnecessary with a full slug |
 | `INFERWEAVE_LIGHTNING_INTEGRATION` | Unset/`0` skips paid Lightning tests; `1` explicitly opts in |
-| `endpoint_auth=` | Default `CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())` |
+| `endpoint_auth=` | Default `CompositeEndpointAuth(ModalProxyAuth(), LightningEndpointAuth())`; resolvers receive the deployment's owning account |
+| `INFERWEAVE_ACCOUNTS_FILE` | Accounts configuration (YAML/JSON) used when `InferWeave(accounts=...)` is omitted; CLI `--accounts` |
+| `INFERWEAVE_LIGHTNING_PYTHON` | Interpreter for Lightning worker processes (an isolated venv with `lightning-sdk`); default: current Python |
+| `INFERWEAVE_SKYPILOT_PYTHON` | Interpreter for SkyPilot worker processes (an isolated venv with `skypilot`); default: current Python |
+
+The single-account variables above are the **ambient** account of each provider. They are used
+for providers without an account pool and for deployments created before pools existed.
 
 There is no `.env` loader. Export/load values before creating the SDK.
 Recovery does not load secrets from SQLite. See [security](../how-to/secure-your-endpoint.md).
+
+## Accounts
+
+`InferWeave(accounts=...)` accepts an `AccountsConfig`, a path to a YAML/JSON file, or an
+`AccountManager`. See [multiple accounts](../how-to/use-multiple-accounts.md) for examples.
+
+| Field | Default / behavior |
+| --- | --- |
+| `max_attempts` | `3`; provisioning attempts per deploy across accounts and (`auto`) providers |
+| `state_dir` | `~/.inferweave/accounts`; private per-account homes for Lightning/SkyPilot workers |
+| `providers.<name>.strategy` | `round_robin`; also `weighted`, `failover`, `least_used`, `least_recently_used`, `random` |
+| `providers.<name>.accounts[]` | `id`, `env` (`secret field: VARIABLE_NAME`), `weight`, `priority`, `max_concurrency`, `metadata` and provider metadata keys (`teamspace`, `environment`) |
+| `providers.<name>.credentials_file` | CredWeave JSON credentials file, hot-reloaded; relative to the config file |
+| `providers.<name>.cooldown_seconds` | `60`; cooldown after a transient failure |
+| `providers.<name>.max_consecutive_failures` | `3`; transient failures before an account is unhealthy |
+| `providers.<name>.permission_cooldown_seconds` | `900`; parking time after HTTP 403 |
+| `providers.<name>.quota_cooldown_seconds` | `3600`; parking time after quota exhaustion without a reset hint |
+
+Secret fields per provider: Modal `token_id`, `token_secret`, optional pair `proxy_token_id`,
+`proxy_token_secret`; Lightning `user_id`, `api_key`; RunPod and Vast.ai `api_key`.
 
 ## Deployment and runtime
 
@@ -97,3 +123,9 @@ consecutive successes 1, method `GET`, headers `{}`. Paths/ports vary by
 `LifecycleService(activity_persist_interval_seconds=30.0)` throttles inference
 activity writes; `0` persists every touch. Synchronous activity and successful
 probes update memory only. Watchdog intervals depend on the idle policy.
+
+Pooled records bind control credentials by a nonsecret digest. Changing keys affects new
+deployments; managing existing records requires the original generation. Modal proxy tokens
+rotate independently. CredWeave cooldown/health/concurrency state is in-memory by default.
+SkyPilot account isolation uses its public 0.13 plugin API (`>=0.13.0,<0.14`) and three private
+ports per account generation. See [recovery and rotation](../how-to/use-multiple-accounts.md).

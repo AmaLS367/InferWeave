@@ -13,7 +13,8 @@ InferWeave(registry: ModelRegistry | None = None,
            lifecycle_service: LifecycleService | None = None,
            endpoint_auth: EndpointAuthPort | None = None,
            inference_config: InferenceConfig | None = None,
-           inference_http_client: httpx.AsyncClient | None = None)
+           inference_http_client: httpx.AsyncClient | None = None,
+           accounts: AccountsConfig | AccountManager | str | Path | None = None)
 
 await weave.deploy(
     model: str, provider: str = "auto", strategy: str = "cheapest",
@@ -23,8 +24,15 @@ await weave.deploy(
     wait_for_ready: bool = True,
     destroy_after_idle_mins: int | None | _Unset = <unset>,
     scaledown_window_seconds: int | None = None,
+    account: str | None = None,
 ) -> Deployment
 ```
+
+`accounts` configures per-provider account pools (default: `$INFERWEAVE_ACCOUNTS_FILE`, else
+every provider uses its native credentials as the `ambient` account). Deploy leases an account
+from the provider's pool, fails over within `max_attempts`, and binds the deployment to that
+account; `account=` pins one account of an explicit provider. See
+[multiple accounts](../how-to/use-multiple-accounts.md).
 
 The internal sentinel distinguishes omission from `None`; idle default resolves
 to 30 minutes. Do not import/pass `_Unset`. Defaults construct registry, router,
@@ -47,10 +55,19 @@ sharing. The SDK has no async context manager; use `try/finally` and `close()`.
 | `await list_records()` | `list[DeploymentRecord]`; persisted records |
 | `await stop(deployment_id: str, action: Any \| None = None)` | `None`; stop by ID across restarts |
 | `await get_status(deployment_id: str)` | `DeploymentStatus`; provider reconciliation and known-profile probe |
+| `await reconcile(min_age_seconds: float = 1800.0, *, confirmed_settled: tuple[str, ...] = ())` | `list[DeploymentRecord]`; clean settled leftovers under their owners; pending remote creation requires explicit provider-history confirmation |
+| `account_health()` | `list[AccountHealth]`; nonsecret CredWeave state of pooled accounts |
+| `accounts` | `AccountManager`; `await accounts.reset(provider, id)` / `await accounts.authorize(provider, id)` |
+
+Every operation on an existing deployment (status, stop, attach, autostop, inference headers)
+uses the account recorded on it, never another one; a removed account raises
+`AccountUnavailableError`. Changed control keys also fail for pooled records bound to a
+different credential generation. `confirmed_settled` acknowledges that remote creation has
+finished or was cancelled; it never bypasses an active provisioning lock.
 
 ## Deployment
 
-Properties: `id`, `model`, `provider`, `state`, `endpoint_url`, `status`,
+Properties: `id`, `model`, `provider`, `account`, `state`, `endpoint_url`, `status`,
 `workload_type`, `is_healthy`, `autostop_mins`, `last_activity_at`. The status
 snapshot includes identity/state/URL/error and `created_at`/`ready_at`.
 Constructing `Deployment(status)` alone does not wire SDK callbacks.
@@ -109,9 +126,11 @@ Transport: `await post(path, *, content=None, json=None, headers=None, timeout=N
 -> httpx.Response`, `await aclose() -> None`. Audio/image clients have the handle
 inference signatures. Unified client dispatches/tracks activity and has `aclose()`.
 
-`EndpointAuthPort.headers_for(provider: str, endpoint_url: str | None)
--> dict[str, str]` resolves headers; `is_configured_for(provider: str) -> bool`
-checks availability. Implementations: `ModalProxyAuth(token_id=None,
+`EndpointAuthPort.headers_for(provider: str, endpoint_url: str | None,
+account: ProviderAccount | None = None) -> dict[str, str]` resolves headers from the
+deployment's owning account (pooled accounts carry their own Modal proxy tokens / Lightning
+key; the ambient account uses environment variables); `is_configured_for(provider: str,
+account: ProviderAccount | None = None) -> bool` checks availability. Implementations: `ModalProxyAuth(token_id=None,
 token_secret=None, token_getter=None)`, `StaticHeaderAuth(headers, providers=())`,
 `CompositeEndpointAuth(*auths)`, `NoEndpointAuth()`. See [security](../how-to/secure-your-endpoint.md).
 
@@ -125,6 +144,11 @@ These public errors subclass `InferWeaveError`:
 | `DeploymentNotActiveError` | Stopped/failed/dry-run attach; `deployment_id`, `reason` |
 | `AmbiguousDeploymentError` | Multiple matches; `model`, `provider`, `candidate_ids` |
 | `ProviderAuthError` | Required endpoint credentials missing |
+| `AccountUnavailableError` | ProviderAuthError: the deployment's owning account is not configured; `provider`, `account_id`, `deployment_id` |
+| `AccountConfigurationError` | Invalid accounts configuration (never echoes secrets) |
+| `NoAccountAvailableError` | Every attempt failed or no account was eligible; `attempts`, `retry_after` |
+| `ProviderOperationError` | Classified control-plane failure; `kind` (`FailureKind`), `status_code`, `retry_after`, `resource_may_exist` |
+| `ProvisioningUncertainError` | DeploymentError: a billed resource may exist; nothing else was tried; run `reconcile()` |
 | `InferenceError` | Base error; optional sanitized `deployment_id`, `status_code`, `endpoint`, `response_body` |
 | `EndpointNotReadyError` | InferenceError: missing/stopped URL or exhausted retries |
 | `InferenceTimeoutError` | InferenceError: HTTP timeout, no replay |

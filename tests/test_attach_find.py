@@ -10,12 +10,14 @@ from support import (
     IMAGE_MODEL,
     deploy_on_modal,
     make_weave,
+    modal_pool,
     patched_modal,
 )
 
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
 from inferweave.adapters.lifecycle.sqlite_repository import SqliteDeploymentRepository
 from inferweave.core.exceptions import (
+    AccountUnavailableError,
     AmbiguousDeploymentError,
     DeploymentNotActiveError,
     DeploymentNotFoundError,
@@ -95,17 +97,18 @@ async def test_attached_handle_refresh_stop_and_health_closures_work(db_path: Pa
     assert (await _read_record(db_path, dep_a.id)).state == DeploymentState.HEALTHY
 
     # refresh() reconciles with the provider and the readiness probe
-    with patched_modal(DeploymentState.STARTING) as mocks:
+    with patched_modal() as mocks:
         refreshed = await attached.refresh()
     assert refreshed.state == DeploymentState.HEALTHY
     assert refreshed.model == AUDIO_MODEL
     assert refreshed.endpoint_url == ENDPOINT
-    mocks.fetch_state.assert_awaited()
+    mocks.lookup_app.assert_awaited()
 
     # stop() really stops the provider app and persists STOPPED
     with patched_modal() as mocks:
         await attached.stop()
-    mocks.stop_app.assert_awaited_once_with(dep_a.id)
+    mocks.stop_app.assert_awaited_once()
+    assert mocks.stop_app.await_args.args[0].id == dep_a.id
     assert attached.state == DeploymentState.STOPPED
     stopped = await _read_record(db_path, dep_a.id)
     assert stopped is not None and stopped.state == DeploymentState.STOPPED
@@ -273,5 +276,40 @@ async def test_attach_restores_idle_timer_and_destroy_policy(db_path: Path):
         assert await weave_b.lifecycle_service.check_and_autostop(
             dep.id, now=long_ago + timedelta(minutes=61)
         ) is True
-    mocks.stop_app.assert_awaited_once_with(dep.id)
+    mocks.stop_app.assert_awaited_once()
+    assert mocks.stop_app.await_args.args[0].id == dep.id
     assert (await _read_record(db_path, dep.id)).state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_attach_restores_the_owning_account_and_stops_under_it(db_path: Path):
+    """A restarted process recovers the pooled account that owns the deployment."""
+    pool = modal_pool("a", "b")
+    weave_a = make_weave(db_path, accounts=pool)
+    dep = await deploy_on_modal(weave_a, account="b")
+    assert dep.account == "b"
+    persisted = await _read_record(db_path, dep.id)
+    assert persisted.account == "b" and persisted.resource.name == dep.id
+
+    weave_b = make_weave(db_path, accounts=modal_pool("a", "b"))
+    attached = await weave_b.attach(dep.id)
+    assert attached.account == "b"
+    assert (await weave_b.find(model=AUDIO_MODEL, provider="modal")) is attached
+
+    with patched_modal() as mocks:
+        await attached.stop()
+    stopped_record, stopped_account = mocks.stop_app.await_args.args
+    assert stopped_record.id == dep.id
+    assert stopped_account.id == "b"  # never another account of the pool
+
+
+@pytest.mark.asyncio
+async def test_attach_fails_when_the_owning_account_is_no_longer_configured(db_path: Path):
+    weave_a = make_weave(db_path, accounts=modal_pool("a", "b"))
+    dep = await deploy_on_modal(weave_a, account="b")
+
+    # account "b" was removed from the pool: never silently adopt account "a"
+    weave_b = make_weave(db_path, accounts=modal_pool("a"))
+    with pytest.raises(AccountUnavailableError, match="'b'"):
+        await weave_b.attach(dep.id)
+    assert weave_b.list_deployments() == []

@@ -1,9 +1,12 @@
 """Unit tests for Provider adapters verifying autostop and provider custom arguments."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from inferweave.accounts import ProviderAccount
+from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import WorkloadType
 from inferweave.models.profile import (
@@ -43,6 +46,14 @@ async def test_modal_provider_scaledown_window_is_decoupled_from_autostop_and_ti
     sample_profile, sample_runtime
 ):
     provider = ModalProvider()
+    record = DeploymentRecord(
+        id="iw-modal-test",
+        model=sample_profile.id,
+        provider="modal",
+        resource=provider.resource_ref(
+            "iw-modal-test", DeploymentRequest(model=sample_profile.id), ProviderAccount.ambient("modal")
+        ),
+    )
     request = DeploymentRequest(
         model=sample_profile.id,
         provider="modal",
@@ -65,7 +76,9 @@ async def test_modal_provider_scaledown_window_is_decoupled_from_autostop_and_ti
 
         mock_function.side_effect = decorator
         with patch("modal.App.deploy", return_value=None):
-            await provider.deploy(request, sample_profile, sample_runtime)
+            await provider.provision(
+                record, request, sample_profile, sample_runtime, ProviderAccount.ambient("modal")
+            )
 
             mock_function.assert_called_once()
             call_kwargs = mock_function.call_args[1]
@@ -80,11 +93,24 @@ async def test_modal_provider_scaledown_window_is_decoupled_from_autostop_and_ti
             assert call_kwargs.get("memory") == 16384
 
 
+class _RecordingRunner:
+    """Fake SkyPilot WorkerRunner capturing the JSON request the provider would send."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict]] = []
+
+    async def run(self, operation, payload, *, env, secrets=None, timeout, deployment_id=None, account_id=""):
+        self.requests.append((operation, json.loads(json.dumps(payload))))
+        return {"endpoint": "http://1.2.3.4:8000"}
+
+
 @pytest.mark.asyncio
 async def test_skypilot_provider_passes_autostop_autodown_and_resources(
-    sample_profile, sample_runtime
+    sample_profile, sample_runtime, tmp_path
 ):
-    provider = SkyPilotProvider(cloud_name="runpod")
+    runner = _RecordingRunner()
+    provider = SkyPilotProvider(cloud_name="runpod", state_dir=tmp_path, runner=runner)  # type: ignore[arg-type]
+    account = ProviderAccount.ambient("runpod")
     request = DeploymentRequest(
         model=sample_profile.id,
         provider="runpod",
@@ -96,26 +122,25 @@ async def test_skypilot_provider_passes_autostop_autodown_and_resources(
             "preferred_regions": ["us-central-1"],
         },
     )
+    record = DeploymentRecord(
+        id="iw-test",
+        model=sample_profile.id,
+        provider="runpod",
+        resource=provider.resource_ref("iw-test", request, account),
+    )
 
-    mock_sky = MagicMock()
-    mock_sky.launch = MagicMock(return_value=(1, None))
-    mock_sky.endpoints = MagicMock(return_value={8000: "http://1.2.3.4:8000"})
-    mock_sky.Task = MagicMock()
-    mock_sky.Resources = MagicMock()
+    with patch.object(SkyPilotProvider, "_ensure_supported_platform", return_value=None):
+        await provider.provision(record, request, sample_profile, sample_runtime, account)
 
-    with (
-        patch.object(provider, "_ensure_supported_platform", return_value=None),
-        patch.object(provider, "_get_sky_module", return_value=mock_sky),
-    ):
-        await provider.deploy(request, sample_profile, sample_runtime)
+    ((operation, payload),) = runner.requests
+    assert operation == "launch"
 
-        # Verify Resources kwargs
-        res_kwargs = mock_sky.Resources.call_args[1]
-        assert res_kwargs.get("use_spot") is True
-        assert res_kwargs.get("disk_size") == 120
-        assert res_kwargs.get("region") == "us-central-1"
+    # Resources sent to the worker (it builds sky.Resources from them)
+    resources = payload["resources"]
+    assert resources["use_spot"] is True
+    assert resources["disk_size"] == 120
+    assert resources["region"] == "us-central-1"
 
-        # Verify launch arguments
-        launch_kwargs = mock_sky.launch.call_args[1]
-        assert launch_kwargs.get("idle_minutes_to_autostop") == 25
-        assert launch_kwargs.get("down") is True
+    # Launch arguments: idle minutes -> idle_minutes_to_autostop, autodown -> down
+    assert payload["idle_minutes"] == 25
+    assert payload["down"] is True

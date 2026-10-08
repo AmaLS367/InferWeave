@@ -1,13 +1,16 @@
 """SQLite-based implementation of DeploymentRepositoryPort for transactional, multi-process persistence."""
 
 import asyncio
+import hashlib
 import logging
 import os
 import sqlite3
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.isolation.file_lock import file_lock
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,13 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
             self.db_path = Path(env_path) if env_path else DEFAULT_DEPLOYMENTS_DB
 
         self._ensure_initialized()
+
+    @contextmanager
+    def operation_lock(self, deployment_id: str) -> Iterator[bool]:
+        digest = hashlib.sha256(deployment_id.encode()).hexdigest()
+        directory = self.db_path.resolve().with_suffix(self.db_path.suffix + ".locks")
+        with file_lock(directory / digest) as acquired:
+            yield acquired
 
     def _ensure_initialized(self) -> None:
         """Initializes database directory and tables."""

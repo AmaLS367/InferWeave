@@ -31,6 +31,8 @@ class AsyncioWatchdogAdapter(AutostopWatchdogPort):
                 try:
                     await asyncio.sleep(interval_seconds)
                     await callback()
+                    if deployment_id not in self._tasks:
+                        return
                 except asyncio.CancelledError:
                     break
                 except Exception as err:  # noqa: BLE001
@@ -46,6 +48,8 @@ class AsyncioWatchdogAdapter(AutostopWatchdogPort):
     async def cancel_check(self, deployment_id: str) -> None:
         """Cancels and cleans up the watchdog task for the specified deployment."""
         task = self._tasks.pop(deployment_id, None)
+        if task is asyncio.current_task():
+            return
         if task and not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

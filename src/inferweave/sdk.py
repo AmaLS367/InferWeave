@@ -3,10 +3,12 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from inferweave.accounts import AccountHealth, AccountManager, AccountsConfig
 from inferweave.adapters.auth import default_endpoint_auth
 from inferweave.clients.inference import InferenceClient
 from inferweave.clients.transport import InferenceConfig, InferenceTransport
@@ -30,6 +32,10 @@ from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.templates import get_runtime_template
 from inferweave.services.healthcheck_service import HealthcheckService
 from inferweave.services.lifecycle_service import LifecycleService
+from inferweave.services.provisioning_service import (
+    ProvisionCandidate,
+    ProvisioningService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +63,14 @@ class InferWeave:
         endpoint_auth: EndpointAuthPort | None = None,
         inference_config: InferenceConfig | None = None,
         inference_http_client: httpx.AsyncClient | None = None,
+        accounts: AccountsConfig | AccountManager | str | Path | None = None,
     ) -> None:
         """Creates the SDK.
 
         Args:
+            accounts: Provider account pools (``AccountsConfig``, a path to a YAML/JSON accounts
+                file, or a prebuilt ``AccountManager``). Defaults to ``$INFERWEAVE_ACCOUNTS_FILE``
+                when set; providers without a pool use their native default credentials.
             endpoint_auth: Resolves endpoint credentials (e.g. Modal proxy tokens) for readiness
                 probes and inference calls. Defaults to environment-based resolution
                 (``MODAL_PROXY_TOKEN_ID`` / ``MODAL_PROXY_TOKEN_SECRET``). Secrets are never
@@ -68,9 +78,22 @@ class InferWeave:
             inference_config: Timeout/retry policy for ``synthesize()``/``render()``.
             inference_http_client: Optional shared ``httpx.AsyncClient`` (mainly for tests).
         """
+        if isinstance(accounts, AccountManager):
+            self.accounts = accounts
+        elif isinstance(accounts, AccountsConfig):
+            self.accounts = AccountManager(accounts)
+        elif accounts is not None:
+            self.accounts = AccountManager(AccountsConfig.from_file(accounts))
+        elif lifecycle_service is not None:
+            # An injected lifecycle service already carries the account pools it resolves with.
+            self.accounts = lifecycle_service.accounts
+        else:
+            self.accounts = AccountManager(AccountsConfig.from_env())
         self.endpoint_auth: EndpointAuthPort = endpoint_auth or default_endpoint_auth()
         self.registry = registry or ModelRegistry()
-        self.router = router or ProviderRouter(endpoint_auth=self.endpoint_auth)
+        self.router = router or ProviderRouter(
+            endpoint_auth=self.endpoint_auth, state_dir=self.accounts.config.state_dir
+        )
         if router is not None and endpoint_auth is not None:
             self.router.adopt_endpoint_auth(endpoint_auth)
         self.healthcheck_service = healthcheck_service or HealthcheckService()
@@ -78,15 +101,18 @@ class InferWeave:
             healthcheck_service=self.healthcheck_service,
             provider_resolver=self.router.get,
             endpoint_auth=self.endpoint_auth,
+            accounts=self.accounts,
         )
         if self.lifecycle_service.endpoint_auth is None:
             self.lifecycle_service.endpoint_auth = self.endpoint_auth
+        self.lifecycle_service.accounts = self.accounts
+        self.provisioning_service = ProvisioningService(
+            self.accounts, self.lifecycle_service.repository
+        )
         self._inference_config = inference_config
         self._inference_http_client = inference_http_client
         self._active_deployments: dict[str, Deployment] = {}
         self._attach_lock = asyncio.Lock()
-        for name in self.router.list_providers():
-            self.router.get(name).bind_repository(self.lifecycle_service.repository)
 
     async def deploy(
         self,
@@ -102,8 +128,14 @@ class InferWeave:
         wait_for_ready: bool = True,
         destroy_after_idle_mins: int | None | _Unset = _UNSET,
         scaledown_window_seconds: int | None = None,
+        account: str | None = None,
     ) -> Deployment:
         """Deploys a model to the requested compute provider.
+
+        With account pools configured, the provider's CredWeave strategy picks the account; a
+        failure that is not the request's fault fails over to the next account (and, for
+        ``provider='auto'``, the next feasible provider) within ``max_attempts``. The deployment
+        is bound to the account that created it for its whole life.
 
         Args:
             model: Model identifier from registry (e.g. 'fish-s2-pro', 'meta-llama/Meta-Llama-3-8B-Instruct')
@@ -126,6 +158,8 @@ class InferWeave:
                 containers shut down while the app stays deployed and wakes on the next request.
                 Independent of ``destroy_after_idle_mins`` (default 1800s when unset). Ignored by
                 providers without scale-to-zero.
+            account: Pin a specific account id of the chosen provider (no failover). Requires
+                an explicit ``provider``.
 
         Returns:
             Deployment: Live deployment handle with lifecycle controls and endpoint details.
@@ -170,24 +204,31 @@ class InferWeave:
         if request.gpu_type:
             self.router.hardware_service.validate_deployment_hardware(profile, request)
 
-        # 3. Resolve target compute provider (SkyPilot clouds or Modal) with VRAM-aware routing
-        compute_provider = await self.router.aresolve(
+        if account is not None and request.provider.lower() == "auto":
+            raise ValueError("account= pins one provider's account; pass an explicit provider.")
+
+        # 3. Resolve candidate providers (VRAM-aware routing; alternatives only for 'auto')
+        routed = await self.router.acandidates(
             provider_name=request.provider,
             profile=profile,
             strategy=request.strategy,
             request=request,
         )
 
-        # 4. Render runtime specification
+        # 4. Render the runtime for each candidate (GPU choice may differ per provider)
         runtime_template = get_runtime_template(profile.default_runtime)
-        runtime_spec = runtime_template.render(profile, request)
+        candidates = [
+            ProvisionCandidate(provider=p, request=r, runtime=runtime_template.render(profile, r))
+            for p, r in routed
+        ]
 
-        # 5. Provision and launch deployment
-        deployment = await compute_provider.deploy(
-            request=request,
-            profile=profile,
-            runtime=runtime_spec,
+        # 5. Provision under a scheduled account, with safe failover and write-ahead records
+        record, compute_provider = await self.provisioning_service.provision(
+            candidates, profile, account=account
         )
+        request = next(c.request for c in candidates if c.provider is compute_provider)
+        deployment = Deployment(status=self._status_from_record(record))
+        deployment._owner_fingerprint = record.owner_fingerprint
 
         try:
             # 6. Wire lifecycle management and autostop callbacks
@@ -202,16 +243,14 @@ class InferWeave:
                 is_dry_run=request.dry_run,
                 provider=compute_provider,
                 workload_type=profile.workload_type,
-                options=request.options,
+                options=record.options,
             )
             self._wire_deployment(
                 deployment,
                 profile=profile,
                 provider=compute_provider,
                 autostop_mins=autostop_policy.idle_minutes,
-                cleanup_on_failure=bool(
-                    request.options and getattr(request.options, "cleanup_on_failure", False)
-                ),
+                cleanup_on_failure=record.options.cleanup_on_failure,
                 enable_inference=not request.dry_run,
             )
 
@@ -241,9 +280,27 @@ class InferWeave:
 
         return deployment
 
+    @staticmethod
+    def _status_from_record(record: DeploymentRecord) -> DeploymentStatus:
+        return DeploymentStatus(
+            id=record.id,
+            model=record.model,
+            provider=record.provider,
+            account=record.account,
+            state=record.state,
+            endpoint_url=record.endpoint_url,
+            error_message=record.error_message,
+            created_at=record.created_at,
+            ready_at=record.ready_at,
+        )
+
     def _auth_headers_for(self, deployment: Deployment) -> dict[str, str]:
-        """Resolves runtime endpoint credentials for a deployment (never persisted)."""
-        return self.endpoint_auth.headers_for(deployment.provider, deployment.endpoint_url)
+        """Resolves endpoint credentials from the deployment's own account (never persisted)."""
+        owner = self.accounts.resolve_owner(DeploymentRecord(
+            id=deployment.id, model=deployment.model, provider=deployment.provider,
+            account=deployment.account, owner_fingerprint=deployment._owner_fingerprint,
+        ))
+        return self.endpoint_auth.headers_for(deployment.provider, deployment.endpoint_url, owner)
 
     def _wire_deployment(
         self,
@@ -405,18 +462,10 @@ class InferWeave:
 
             profile = self.registry.get(record.model)
             provider = self.router.get(record.provider)
-            deployment = Deployment(
-                status=DeploymentStatus(
-                    id=record.id,
-                    model=record.model,
-                    provider=record.provider,
-                    state=record.state,
-                    endpoint_url=record.endpoint_url,
-                    error_message=record.error_message,
-                    created_at=record.created_at,
-                    ready_at=record.ready_at,
-                ),
-            )
+            # Fail fast when the owning account is gone; never adopt another account.
+            self.accounts.resolve_owner(record)
+            deployment = Deployment(status=self._status_from_record(record))
+            deployment._owner_fingerprint = record.owner_fingerprint
             self._wire_deployment(
                 deployment,
                 profile=profile,
@@ -456,6 +505,23 @@ class InferWeave:
         if len(matches) > 1:
             raise AmbiguousDeploymentError(model, provider, [rec.id for rec in matches])
         return await self.attach(matches[0].id)
+
+    async def reconcile(
+        self, min_age_seconds: float = 1800.0, *, confirmed_settled: tuple[str, ...] = (),
+    ) -> list[DeploymentRecord]:
+        """Cleans up deployments whose provisioning outcome was never confirmed.
+
+        Each one is checked under its owning account: a leftover resource from a failed or
+        interrupted provisioning is destroyed, an absent one just clears the flag. Deployments
+        still provisioning are left alone until ``min_age_seconds`` old. Returns updated records.
+        """
+        return await self.lifecycle_service.reconcile(
+            min_age_seconds=min_age_seconds, confirmed_settled=confirmed_settled,
+        )
+
+    def account_health(self) -> list[AccountHealth]:
+        """Nonsecret CredWeave state (cooldowns, health, usage) of every pooled account."""
+        return self.accounts.health()
 
     async def close(self) -> None:
         """Releases inference connection pools, watchdog tasks and probe resources."""

@@ -1,22 +1,29 @@
-"""Dedicated Modal serverless compute provider adapter."""
+"""Dedicated Modal serverless compute provider adapter.
+
+Every Modal call runs under an explicit ``modal.Client.from_credentials(token_id, token_secret)``
+built from the owning account, so concurrent deployments on different workspaces never share
+credentials and the process environment is never touched. The ambient account passes no client,
+letting Modal resolve ``MODAL_TOKEN_*`` / ``~/.modal.toml`` exactly as it does natively.
+"""
 
 import asyncio
 import logging
 import shlex
+import threading
 import uuid
 from typing import Any
 
+from inferweave.accounts.models import ProviderAccount
 from inferweave.adapters.auth import default_endpoint_auth
-from inferweave.core.exceptions import ProviderAuthError
-from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.core.exceptions import ProviderAuthError, ProviderOperationError
+from inferweave.core.failures import FailureKind, retry_after_from_error
+from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.domain.lifecycle import AutostopAction
-from inferweave.domain.options import DeploymentOptions
-from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
+from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import DeploymentState, ProviderType
 from inferweave.models.profile import ModelProfile
 from inferweave.ports.auth import EndpointAuthPort
-from inferweave.ports.deployment_repository import DeploymentRepositoryPort
-from inferweave.providers.base import ComputeProvider
+from inferweave.providers.base import ComputeProvider, ProvisionResult, ResourceStatus
 from inferweave.runtimes.base import RuntimeSpec
 
 logger = logging.getLogger(__name__)
@@ -26,6 +33,16 @@ logger = logging.getLogger(__name__)
 # deployed, whereas the destroy timer stops the whole app.
 DEFAULT_SCALEDOWN_WINDOW_SECONDS = 1800
 
+_ERROR_KINDS = {
+    "AuthError": FailureKind.AUTH,
+    "PermissionDeniedError": FailureKind.PERMISSION,
+    "ResourceExhaustedError": FailureKind.RATE_LIMIT,
+    "InvalidError": FailureKind.INVALID_REQUEST,
+    "NotFoundError": FailureKind.INVALID_REQUEST,
+    "ImageBuildError": FailureKind.INVALID_REQUEST,
+    "VersionError": FailureKind.INVALID_REQUEST,
+}
+
 
 class ModalProvider(ComputeProvider):
     """Serverless GPU provider adapter using Modal.
@@ -34,14 +51,10 @@ class ModalProvider(ComputeProvider):
     deployments directly via the Modal Python SDK with native container definition.
     """
 
-    def __init__(
-        self,
-        repository: DeploymentRepositoryPort | None = None,
-        endpoint_auth: EndpointAuthPort | None = None,
-    ) -> None:
-        self._repository = repository
+    def __init__(self, endpoint_auth: EndpointAuthPort | None = None) -> None:
         self._endpoint_auth = endpoint_auth
-        self._local_deployments: dict[str, dict[str, Any]] = {}
+        self._clients: dict[str, tuple[str | None, Any]] = {}
+        self._clients_lock = threading.Lock()
 
     @property
     def endpoint_auth(self) -> EndpointAuthPort | None:
@@ -60,26 +73,10 @@ class ModalProvider(ComputeProvider):
     def provider_type(self) -> ProviderType:
         return ProviderType.MODAL
 
-    def _ensure_proxy_credentials(self) -> None:
-        """Fails fast when proxy auth is on but no credentials exist to reach the endpoint.
-
-        Without tokens the deployment would be created but unreachable by InferWeave's own
-        readiness probes and inference calls.
-        """
-        auth = self._endpoint_auth or default_endpoint_auth()
-        if not auth.is_configured_for(self.name):
-            raise ProviderAuthError(
-                "Modal endpoints are protected with proxy auth, but no proxy token was found. "
-                "Create a token in the Modal workspace settings and export "
-                "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET (or pass endpoint_auth= "
-                "to InferWeave), or deliberately opt out with "
-                "custom_args={'requires_proxy_auth': False}."
-            )
-
-    def _get_modal_module(self):
+    def _get_modal_module(self) -> Any:
         """Lazy loads the modal SDK module."""
         try:
-            import modal  # type: ignore
+            import modal
 
             return modal
         except ImportError as e:
@@ -87,47 +84,137 @@ class ModalProvider(ComputeProvider):
                 "Modal SDK is not installed. Install it via: pip install 'inferweave[modal]'"
             ) from e
 
-    async def deploy(
+    def new_deployment_id(self, profile: ModelProfile) -> str:
+        return f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+
+    def resource_ref(
+        self, deployment_id: str, request: DeploymentRequest, account: ProviderAccount
+    ) -> ResourceRef:
+        return ResourceRef(name=deployment_id, scope=account.get_metadata("environment"))
+
+    def dry_run_endpoint(self, deployment_id: str, runtime: RuntimeSpec) -> str:
+        return f"https://dryrun-{deployment_id}.modal.run"
+
+    def preflight(
         self,
         request: DeploymentRequest,
         profile: ModelProfile,
         runtime: RuntimeSpec,
-    ) -> Deployment:
-        """Configures and launches a serverless deployment on Modal."""
-        modal = self._get_modal_module()
-
+        account: ProviderAccount,
+    ) -> None:
+        self._get_modal_module()
         requires_proxy_auth = (
             request.options.provider.requires_proxy_auth if request.options else True
         )
-        if requires_proxy_auth and not request.dry_run:
-            self._ensure_proxy_credentials()
+        if not requires_proxy_auth or request.dry_run:
+            return
+        # Without proxy tokens the app would deploy but be unreachable for InferWeave's own
+        # readiness probes and inference calls.
+        auth = self._endpoint_auth or default_endpoint_auth()
+        if not auth.is_configured_for(self.name, account):
+            if account.is_ambient:
+                hint = (
+                    "export MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET (or pass "
+                    "endpoint_auth= to InferWeave)"
+                )
+            else:
+                hint = f"configure proxy_token_id/proxy_token_secret for account '{account.id}'"
+            message = (
+                "Modal endpoints are protected with proxy auth, but no proxy token was found. "
+                f"Create a token in the Modal workspace settings and {hint}, or deliberately "
+                "opt out with custom_args={'requires_proxy_auth': False}."
+            )
+            if account.is_ambient:
+                raise ProviderAuthError(message)
+            # Missing endpoint credentials prevent this account serving the request, but do
+            # not prove its control-plane credentials invalid. Park it and allow failover.
+            raise ProviderOperationError(
+                message, FailureKind.PERMISSION, resource_may_exist=False,
+            )
 
-        deployment_id = (
-            f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
+    # --- credentials -----------------------------------------------------------------------
+
+    def _client(self, account: ProviderAccount) -> Any:
+        """Explicit Modal client for ``account`` (``None`` = Modal's own default resolution).
+
+        Clients are cached per account and rebuilt when the account's secret rotates. Blocking;
+        call from a worker thread.
+        """
+        if account.is_ambient:
+            return None
+        modal = self._get_modal_module()
+        fingerprint = account.secret_fingerprint
+        with self._clients_lock:
+            cached = self._clients.get(account.id)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
+            client = modal.Client.from_credentials(
+                account.secret("token_id"), account.secret("token_secret")
+            )
+            self._clients[account.id] = (fingerprint, client)
+            return client
+
+    def _failure(
+        self, operation: str, err: Exception, account: ProviderAccount, deployment_id: str
+    ) -> ProviderOperationError:
+        kind = _ERROR_KINDS.get(type(err).__name__, FailureKind.TRANSIENT)
+        if type(err).__name__ == "ResourceExhaustedError":
+            detail = str(err).lower()
+            if "quota" in detail or "balance" in detail:
+                kind = FailureKind.QUOTA
+            elif "capacity" in detail or "out of stock" in detail:
+                kind = FailureKind.CAPACITY
+        return ProviderOperationError(
+            f"Modal {operation} failed for account '{account.id}' ({type(err).__name__}).",
+            kind,
+            retry_after=retry_after_from_error(err),
+            deployment_id=deployment_id,
+            resource_may_exist=operation == "deploy" and not kind.is_definitive_rejection,
+            operation_may_continue=operation == "deploy" and not kind.is_definitive_rejection,
         )
 
-        record = DeploymentRecord(
-            id=deployment_id,
-            model=profile.id,
-            provider=self.name,
-            state=DeploymentState.PROVISIONING,
-            endpoint_url=f"https://dryrun-{deployment_id}.modal.run"
-            if request.dry_run
-            else None,
-            options=request.options
-            or DeploymentOptions.from_custom_args(
-                request.custom_args, request.autostop_mins
-            ),
-            is_dry_run=request.dry_run,
-            workload_type=profile.workload_type,
+    async def _call(
+        self, operation: str, record: DeploymentRecord, account: ProviderAccount, fn: Any
+    ) -> Any:
+        task = asyncio.ensure_future(asyncio.to_thread(fn))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The SDK call keeps running in its thread; wait for it so the caller's cleanup
+            # sees the app if the deploy went through, then let the cancellation win.
+            try:
+                await task
+                if operation == "deploy":
+                    record.creation_may_continue = False
+            except Exception as err:  # noqa: BLE001 - cancellation wins, details withheld
+                logger.debug("Cancelled Modal call ended with %s.", type(err).__name__)
+            raise
+        except ProviderOperationError:
+            raise
+        except Exception as err:  # noqa: BLE001 - classified and sanitized below
+            raise self._failure(operation, err, account, record.id) from None
+
+    # --- lifecycle ---------------------------------------------------------------------------
+
+    async def prepare(self, record: DeploymentRecord, account: ProviderAccount) -> None:
+        await self._call("authenticate", record, account, lambda: self._client(account))
+
+    async def provision(
+        self,
+        record: DeploymentRecord,
+        request: DeploymentRequest,
+        profile: ModelProfile,
+        runtime: RuntimeSpec,
+        account: ProviderAccount,
+    ) -> ProvisionResult:
+        """Configures and launches a serverless deployment on Modal."""
+        modal = self._get_modal_module()
+        assert record.resource is not None
+        app_name = record.resource.name
+        environment = record.resource.scope
+        requires_proxy_auth = (
+            request.options.provider.requires_proxy_auth if request.options else True
         )
-        self._local_deployments[deployment_id] = {
-            "model": profile.id,
-            "dry_run": request.dry_run,
-            "record": record,
-        }
-        if self._repository:
-            await self._repository.save(record)
 
         # Build container image dynamically from runtime template spec
         image = modal.Image.from_registry(
@@ -146,8 +233,8 @@ class ModalProvider(ComputeProvider):
             try:
                 image = image.add_local_python_source("inferweave")
             except Exception as exc:  # noqa: BLE001
-                logger.debug("Could not add_local_python_source('inferweave'): %s", exc)
-        app = modal.App(name=deployment_id)
+                logger.debug("Could not add_local_python_source('inferweave'): %s", type(exc).__name__)
+        app = modal.App(name=app_name)
 
         # Map hardware to Modal GPU specification
         gpu_type = request.gpu_type or (
@@ -200,190 +287,95 @@ class ModalProvider(ComputeProvider):
             startup_timeout=300,
             requires_proxy_auth=requires_proxy_auth,
         )
-        def serve():
+        def serve() -> None:
             import subprocess
 
             subprocess.Popen(run_args, shell=False)
 
-        # Handle dry-run mode without provisioning live Modal workers
-        if request.dry_run:
-            status = DeploymentStatus(
-                id=deployment_id,
-                model=profile.id,
-                provider=self.name,
-                state=DeploymentState.PROVISIONING,
-                endpoint_url=f"https://dryrun-{deployment_id}.modal.run",
-            )
-            return Deployment(
-                status=status,
-                stop_fn=lambda action=None: self.stop(
-                    deployment_id, action=action or AutostopAction.STOP
-                ),
-                refresh_fn=lambda: self.get_status(deployment_id),
-            )
+        def _deploy_sync() -> str | None:
+            client = self._client(account)
+            app.deploy(name=app_name, environment_name=environment, client=client)
+            # From here on the app exists: even a definitive endpoint-lookup rejection
+            # must preserve cleanup/reconciliation under the owning account.
+            record.creation_may_continue = False
+            try:
+                return serve.get_web_url()
+            except Exception as err:  # noqa: BLE001 - sanitized, resource already deployed
+                failure = self._failure("endpoint lookup", err, account, record.id)
+                failure.resource_may_exist = True
+                raise failure from None
 
-        # Deploy application to Modal platform asynchronously
-        def _deploy_sync():
-            return app.deploy(name=deployment_id)
-
-        await asyncio.to_thread(_deploy_sync)
-
-        # Retrieve live HTTPS web endpoint URL assigned by Modal
-        endpoint_url = await asyncio.to_thread(
-            getattr(serve, "get_web_url", lambda: None)
-        )
-        if not endpoint_url:
-            endpoint_url = f"https://{deployment_id}.modal.run"
-
+        endpoint_url = await self._call("deploy", record, account, _deploy_sync)
+        record.creation_may_continue = False
         # A successful app.deploy() only proves the app was deployed, not that the model
         # runtime is serving. Report STARTING; HEALTHY is assigned only after a
-        # successful readiness healthcheck (see InferWeave.deploy / wait_for_ready).
-        status = DeploymentStatus(
-            id=deployment_id,
-            model=profile.id,
-            provider=self.name,
+        # successful readiness healthcheck.
+        return ProvisionResult(
             state=DeploymentState.STARTING,
-            endpoint_url=endpoint_url,
+            endpoint_url=endpoint_url or f"https://{app_name}.modal.run",
         )
-        record.state = DeploymentState.STARTING
-        record.endpoint_url = endpoint_url
-        if self._repository:
-            await self._repository.save(record)
 
-        async def _stop(action: AutostopAction | str | None = None) -> None:
-            await self.stop(deployment_id, action=action)
+    async def _lookup_app(self, record: DeploymentRecord, account: ProviderAccount) -> bool:
+        """Whether the Modal app named by the record exists in the owning workspace."""
+        modal = self._get_modal_module()
+        name = record.resource.name if record.resource else record.id
+        environment = record.resource.scope if record.resource else None
 
-        async def _refresh() -> DeploymentStatus:
-            return await self.get_status(deployment_id)
+        def _lookup() -> bool:
+            try:
+                modal.App.lookup(name, environment_name=environment, client=self._client(account))
+            except modal.exception.NotFoundError:
+                return False
+            return True
 
-        return Deployment(status=status, stop_fn=_stop, refresh_fn=_refresh)
+        result: bool = await self._call("status lookup", record, account, _lookup)
+        return result
 
-    async def _stop_modal_app(self, deployment_id: str) -> None:
-        """Stops the deployed Modal app named ``deployment_id`` via the public SDK.
+    async def _stop_modal_app(self, record: DeploymentRecord, account: ProviderAccount) -> None:
+        """Stops the deployed Modal app via the public SDK (idempotent).
 
-        Uses ``modal.experimental.stop_app`` (public, non-underscore; verified on
-        modal 1.6+). Supports forward capability detection for public stop APIs.
-        Stopping an app that is already gone is treated as success (idempotent).
+        Uses ``modal.experimental.stop_app`` (public, non-underscore; verified on modal 1.6+).
+        Stopping an app that is already gone is treated as success.
         """
         modal = self._get_modal_module()
-        stop_fn = (
-            getattr(getattr(modal, "experimental", None), "stop_app", None)
-            or getattr(modal, "stop_app", None)
-            or getattr(getattr(modal, "App", None), "stop", None)
-        )
-        try:
-            if callable(stop_fn):
-                await asyncio.to_thread(stop_fn, deployment_id)
-            else:
-                raise RuntimeError(  # noqa: TRY004
-                    "Modal SDK does not expose a supported public app stop API "
-                    "(expected modal.experimental.stop_app)."
-                )
-        except modal.exception.NotFoundError:
-            logger.info(
-                "Modal app '%s' not found; treating it as already stopped.",
-                deployment_id,
+        name = record.resource.name if record.resource else record.id
+        environment = record.resource.scope if record.resource else None
+        stop_fn = getattr(getattr(modal, "experimental", None), "stop_app", None)
+        if not callable(stop_fn):
+            raise ProviderOperationError(
+                "Modal SDK does not expose a supported public app stop API "
+                "(expected modal.experimental.stop_app).",
+                FailureKind.INVALID_REQUEST,
+                deployment_id=record.id,
             )
 
-    async def _fetch_modal_state(self, deployment_id: str) -> DeploymentState:
-        """Maps Modal app presence to an infrastructure-level DeploymentState.
+        def _stop() -> None:
+            try:
+                stop_fn(name, environment_name=environment, client=self._client(account))
+            except modal.exception.NotFoundError:
+                logger.info("Modal app '%s' not found; treating it as already stopped.", name)
 
-        A deployed Modal app only proves the infrastructure exists, not that the model
-        runtime is serving, so it maps to STARTING; HEALTHY requires an application
-        readiness probe (see LifecycleService.refresh_status).
+        await self._call("stop", record, account, _stop)
+
+    async def status(self, record: DeploymentRecord, account: ProviderAccount) -> ResourceStatus:
+        """Maps Modal app presence to an infrastructure-level state.
+
+        A deployed Modal app only proves the infrastructure exists, not that the model runtime
+        is serving, so it maps to STARTING; HEALTHY requires an application readiness probe.
         """
-        modal = self._get_modal_module()
-        try:
-            await asyncio.to_thread(modal.App.lookup, deployment_id)
-        except modal.exception.NotFoundError:
-            return DeploymentState.STOPPED
-        return DeploymentState.STARTING
+        exists = await self._lookup_app(record, account)
+        if not exists:
+            return ResourceStatus(state=DeploymentState.STOPPED, endpoint_url=record.endpoint_url)
+        return ResourceStatus(state=DeploymentState.STARTING, endpoint_url=record.endpoint_url)
+
+    async def resource_exists(self, record: DeploymentRecord, account: ProviderAccount) -> bool:
+        return await self._lookup_app(record, account)
 
     async def stop(
         self,
-        deployment_id: str,
-        action: AutostopAction | str | None = None,
+        record: DeploymentRecord,
+        account: ProviderAccount,
+        action: AutostopAction = AutostopAction.STOP,
     ) -> None:
-        """Stops the Modal deployment app and terminates its running containers."""
-        is_dry_run = False
-        if deployment_id in self._local_deployments:
-            is_dry_run = self._local_deployments[deployment_id].get("dry_run", False)
-        elif self._repository:
-            rec = await self._repository.get(deployment_id)
-            if rec and rec.is_dry_run:
-                is_dry_run = True
-
-        if is_dry_run:
-            logger.info("Dry-run Modal deployment '%s' marked stopped.", deployment_id)
-            if deployment_id in self._local_deployments:
-                self._local_deployments[deployment_id]["record"].mark_stopped()
-            if self._repository:
-                rec = await self._repository.get(deployment_id)
-                if rec:
-                    rec.mark_stopped()
-                    await self._repository.save(rec)
-            return
-
-        self._get_modal_module()
-        try:
-            await self._stop_modal_app(deployment_id)
-        except Exception as err:
-            logger.error("Failed to stop Modal app '%s': %s", deployment_id, err)
-            raise
-
-        # Only on confirmed success update persistent state to STOPPED
-        if deployment_id in self._local_deployments:
-            self._local_deployments[deployment_id]["record"].mark_stopped()
-        if self._repository:
-            rec = await self._repository.get(deployment_id)
-            if rec:
-                rec.mark_stopped()
-                await self._repository.save(rec)
-
-    async def get_status(self, deployment_id: str) -> DeploymentStatus:
-        """Retrieves deployment state from Modal."""
-        model_name = "unknown"
-        is_dry_run = False
-        cached_record = None
-
-        if self._repository:
-            cached_record = await self._repository.get(deployment_id)
-            if cached_record:
-                model_name = cached_record.model
-                is_dry_run = cached_record.is_dry_run
-
-        if model_name == "unknown" and deployment_id in self._local_deployments:
-            meta = self._local_deployments[deployment_id]
-            model_name = meta.get("model", "unknown")
-            is_dry_run = meta.get("dry_run", False)
-            cached_record = meta.get("record")
-
-        if is_dry_run:
-            state = (
-                cached_record.state if cached_record else DeploymentState.PROVISIONING
-            )
-            endpoint = cached_record.endpoint_url if cached_record else None
-            return DeploymentStatus(
-                id=deployment_id,
-                model=model_name,
-                provider=self.name,
-                state=state,
-                endpoint_url=endpoint,
-            )
-
-        self._get_modal_module()
-        endpoint = cached_record.endpoint_url if cached_record else None
-        try:
-            state = await self._fetch_modal_state(deployment_id)
-        except Exception as err:  # noqa: BLE001
-            logger.warning(
-                "Failed to get Modal status for '%s': %s", deployment_id, err
-            )
-            state = cached_record.state if cached_record else DeploymentState.PENDING
-        return DeploymentStatus(
-            id=deployment_id,
-            model=model_name,
-            provider=self.name,
-            state=state,
-            endpoint_url=endpoint,
-        )
+        """Stops the Modal app and terminates its running containers (stop and down alike)."""
+        await self._stop_modal_app(record, account)

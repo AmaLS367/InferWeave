@@ -1,13 +1,17 @@
 """Concrete EndpointAuthPort implementations.
 
-Secrets live only in process memory / the environment. Every class here hides secret values
-from ``repr``/``str`` so accidental logging cannot leak them.
+Secrets live only in process memory / the environment / the owning account. Every class here
+hides secret values from ``repr``/``str`` so accidental logging cannot leak them.
+
+Pooled accounts carry their own endpoint credentials (Modal proxy token pair, Lightning user API
+key); the ambient account keeps the historical environment-variable resolution.
 """
 
 import os
 from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit
 
+from inferweave.accounts.models import ProviderAccount
 from inferweave.ports.auth import EndpointAuthPort
 
 MODAL_PROXY_TOKEN_ID_ENV = "MODAL_PROXY_TOKEN_ID"
@@ -28,7 +32,12 @@ def _host_matches(endpoint_url: str | None, suffixes: tuple[str, ...]) -> bool:
 class NoEndpointAuth(EndpointAuthPort):
     """Sends no credentials (public endpoints)."""
 
-    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+    def headers_for(
+        self,
+        provider: str,
+        endpoint_url: str | None,
+        account: ProviderAccount | None = None,
+    ) -> dict[str, str]:
         return {}
 
 
@@ -41,7 +50,12 @@ class StaticHeaderAuth(EndpointAuthPort):
         self._headers = dict(headers)
         self._providers = tuple(p.lower() for p in providers)
 
-    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+    def headers_for(
+        self,
+        provider: str,
+        endpoint_url: str | None,
+        account: ProviderAccount | None = None,
+    ) -> dict[str, str]:
         if self._providers and provider.lower() not in self._providers:
             return {}
         return dict(self._headers)
@@ -80,12 +94,22 @@ class ModalProxyAuth(EndpointAuthPort):
             self._token_secret or os.environ.get(MODAL_PROXY_TOKEN_SECRET_ENV),
         )
 
-    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+    def headers_for(
+        self,
+        provider: str,
+        endpoint_url: str | None,
+        account: ProviderAccount | None = None,
+    ) -> dict[str, str]:
         if provider.lower() != self.provider_name:
             return {}
         if not _host_matches(endpoint_url, _MODAL_HOST_SUFFIXES):
             return {}
-        token_id, token_secret = self._tokens()
+        if account is not None and not account.is_ambient:
+            # A workspace's proxy tokens only open that workspace's endpoints.
+            token_id = account.optional_secret("proxy_token_id")
+            token_secret = account.optional_secret("proxy_token_secret")
+        else:
+            token_id, token_secret = self._tokens()
         if not token_id or not token_secret:
             return {}
         return {"Modal-Key": token_id, "Modal-Secret": token_secret}
@@ -101,14 +125,22 @@ class LightningEndpointAuth(EndpointAuthPort):
     explicit StaticHeaderAuth resolver. Keys are resolved for each request, including attach.
     """
 
-    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+    def headers_for(
+        self,
+        provider: str,
+        endpoint_url: str | None,
+        account: ProviderAccount | None = None,
+    ) -> dict[str, str]:
         if provider.lower() != "lightning":
             return {}
         if endpoint_url and urlsplit(endpoint_url).scheme != "https":
             return {}
         if not _host_matches(endpoint_url, (".cloudspaces.litng.ai",)):
             return {}
-        key = os.environ.get("LIGHTNING_API_KEY")
+        if account is not None and not account.is_ambient:
+            key = account.optional_secret("api_key")
+        else:
+            key = os.environ.get("LIGHTNING_API_KEY")
         return {"Authorization": f"Bearer {key}"} if key else {}
 
     def __repr__(self) -> str:
@@ -121,10 +153,15 @@ class CompositeEndpointAuth(EndpointAuthPort):
     def __init__(self, *auths: EndpointAuthPort) -> None:
         self._auths = auths
 
-    def headers_for(self, provider: str, endpoint_url: str | None) -> dict[str, str]:
+    def headers_for(
+        self,
+        provider: str,
+        endpoint_url: str | None,
+        account: ProviderAccount | None = None,
+    ) -> dict[str, str]:
         merged: dict[str, str] = {}
         for auth in self._auths:
-            merged.update(auth.headers_for(provider, endpoint_url))
+            merged.update(auth.headers_for(provider, endpoint_url, account))
         return merged
 
     def __repr__(self) -> str:
