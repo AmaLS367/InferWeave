@@ -1,8 +1,9 @@
 """Domain entity representing a deployment record and its persistent lifecycle state."""
 
 from datetime import UTC, datetime
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState, WorkloadType
@@ -135,6 +136,27 @@ class DeploymentRecord(BaseModel):
             "destroy timer survives process restarts. None for records written by older versions."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_lightning(cls, data: Any) -> Any:
+        """Preserves the remote identity of Lightning deployments written by 0.2."""
+        if (
+            isinstance(data, dict)
+            and data.get("provider") == "lightning"
+            and data.get("resource") is None
+            and isinstance(legacy := data.get("lightning"), dict)
+        ):
+            data = {
+                **data,
+                "resource": ResourceRef(
+                    name=legacy["name"],
+                    scope=legacy["teamspace"],
+                    resource_id=legacy.get("resource_id"),
+                    owned=legacy.get("owned", True),
+                ),
+            }
+        return data
 
     def mark_healthy(
         self,

@@ -1,13 +1,77 @@
 """Unit tests for JsonDeploymentRepository persistent storage."""
 
+import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
-from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.models.enums import DeploymentState
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["json", "sqlite"])
+@pytest.mark.parametrize("owned", [True, False])
+async def test_legacy_lightning_record_migrates_on_load(tmp_path, backend, owned):
+    from inferweave.adapters.lifecycle.sqlite_repository import (
+        SqliteDeploymentRepository,
+    )
+
+    legacy = {
+        "id": "iw-old-lightning", "model": "fish-s2-pro", "provider": "lightning",
+        "state": "healthy", "endpoint_url": "https://old.cloudspaces.litng.ai",
+        "lightning": {
+            "name": "old-deployment", "teamspace": "owner/original-space",
+            "resource_id": "dep-old", "owned": owned,
+        },
+    }
+    encoded = json.dumps(legacy)
+    if backend == "json":
+        path = tmp_path / "deployments.json"
+        path.write_text(json.dumps({legacy["id"]: legacy}), encoding="utf-8")
+        repo = JsonDeploymentRepository(path)
+    else:
+        path = tmp_path / "deployments.db"
+        repo = SqliteDeploymentRepository(path)
+        await repo.save(DeploymentRecord(id=legacy["id"], model=legacy["model"], provider="lightning"))
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE deployments SET data_json = ? WHERE id = ?", (encoded, legacy["id"]))
+
+    record = await repo.get(legacy["id"])
+    expected = ResourceRef(
+        name="old-deployment", scope="owner/original-space", resource_id="dep-old", owned=owned,
+    )
+    assert record.resource == expected
+    assert record.account == "ambient"
+    assert (await repo.list_all())[0].resource == expected
+    assert DeploymentRecord.model_validate(legacy).resource == expected
+    assert json.dumps(legacy) == encoded  # validation must not mutate caller-owned input
+    await repo.save(record)
+    persisted = (await repo.get(record.id)).model_dump(mode="json")
+    assert persisted["resource"] == expected.model_dump()
+    assert "lightning" not in persisted
+
+
+@pytest.mark.parametrize("resource", [None, {"name": "current", "scope": "new/space", "owned": False}])
+def test_legacy_lightning_migration_preserves_current_resource(resource):
+    record = DeploymentRecord.model_validate({
+        "id": "old", "model": "fish-s2-pro", "provider": "lightning", "resource": resource,
+        "lightning": {"name": "legacy", "teamspace": "old/space"},
+    })
+    if resource is None:
+        assert record.resource == ResourceRef(name="legacy", scope="old/space")
+    else:
+        assert record.resource == ResourceRef.model_validate(resource)
+
+
+def test_record_without_legacy_lightning_identity_still_loads():
+    record = DeploymentRecord.model_validate({
+        "id": "old", "model": "fish-s2-pro", "provider": "lightning", "lightning": None,
+    })
+    assert record.resource is None and record.account == "ambient"
 
 
 @pytest.fixture

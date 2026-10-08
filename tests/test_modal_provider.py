@@ -485,8 +485,10 @@ def test_pooled_account_without_proxy_tokens_is_refused_naming_the_account(
     sample_profile, sample_runtime
 ):
     account = modal_pool("team-a", proxy=False).resolve("modal", "team-a")
-    with pytest.raises(ProviderAuthError, match="team-a") as exc_info:
+    with pytest.raises(ProviderOperationError, match="team-a") as exc_info:
         ModalProvider().preflight(_request(sample_profile), sample_profile, sample_runtime, account)
+    assert exc_info.value.kind is FailureKind.PERMISSION
+    assert not exc_info.value.resource_may_exist
     assert "requires_proxy_auth" in str(exc_info.value)
     assert "SENTINEL" not in str(exc_info.value)
 
@@ -495,7 +497,7 @@ def test_pooled_account_ignores_ambient_proxy_env_tokens(sample_profile, sample_
     """The conftest ambient MODAL_PROXY_TOKEN_* must not satisfy a pooled account."""
     assert os.environ["MODAL_PROXY_TOKEN_ID"]
     account = modal_pool("team-a", proxy=False).resolve("modal", "team-a")
-    with pytest.raises(ProviderAuthError):
+    with pytest.raises(ProviderOperationError):
         ModalProvider().preflight(_request(sample_profile), sample_profile, sample_runtime, account)
 
 
@@ -529,11 +531,54 @@ async def test_misconfigured_pooled_account_fails_locally_before_any_modal_call(
     with (
         patch("modal.Client.from_credentials") as from_credentials,
         patch("modal.App.deploy") as mock_deploy,
-        pytest.raises(ProviderAuthError, match="only"),
+        pytest.raises(ProviderOperationError, match="only"),
     ):
         await service.provision([candidate], sample_profile)
     from_credentials.assert_not_called()
     mock_deploy.assert_not_called()
+    [health] = manager.health()
+    assert health.state == "rate_limited" and health.in_flight == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin", [None, "a"])
+async def test_missing_proxy_tokens_fail_over_or_respect_pinned_account(
+    sample_profile, sample_runtime, pin
+):
+    env = {}
+    manager = modal_pool("a", "b", environ=env, strategy="failover")
+    del env["T_A_PID"]
+    del env["T_A_PSECRET"]
+    repository = InMemoryDeploymentRepository()
+    service = ProvisioningService(manager, repository)
+    candidate = _candidate(ModalProvider(), sample_profile, sample_runtime)
+    with (
+        patch("modal.Client.from_credentials", side_effect=lambda token_id, _secret: token_id),
+        patch("modal.App.deploy") as mock_deploy,
+        patch("modal.Function.get_web_url", return_value="https://live.modal.run"),
+        patch("modal.App.lookup") as mock_lookup,
+    ):
+        if pin:
+            with pytest.raises(ProviderOperationError) as caught:
+                await service.provision([candidate], sample_profile, account=pin)
+            assert caught.value.kind is FailureKind.PERMISSION
+            mock_deploy.assert_not_called()
+            assert await repository.list_all() == []
+        else:
+            record, _ = await service.provision([candidate], sample_profile)
+            assert record.account == "b"
+            assert (await service.provision([candidate], sample_profile))[0].account == "b"
+            assert all(
+                call.kwargs["client"] == "SENTINEL-modal-b-id"
+                for call in mock_deploy.call_args_list
+            )
+            assert len(mock_deploy.call_args_list) == 2
+            assert all(r.account == "b" for r in await repository.list_all())
+        mock_lookup.assert_not_called()
+    health = {h.account_id: h for h in manager.health()}
+    assert health["a"].state == "rate_limited"
+    assert health["a"].consecutive_failures == 0
+    assert all(h.in_flight == 0 for h in health.values())
 
 
 # --- error classification / redaction ---------------------------------------------------------
@@ -572,6 +617,8 @@ async def test_modal_errors_are_classified_by_exception_class(
     assert exc_info.value.kind is kind
     assert "'a'" in str(exc_info.value)
     assert exc_info.value.deployment_id == record.id
+    assert exc_info.value.resource_may_exist is (not kind.is_definitive_rejection)
+    assert exc_info.value.operation_may_continue is (not kind.is_definitive_rejection)
 
 
 @pytest.mark.asyncio
@@ -618,10 +665,9 @@ async def test_provisioning_service_fails_over_modal_account_on_auth_error(
     sample_profile, sample_runtime
 ):
     """End to end with the real service: a rejected key fails over to the next account."""
-    import modal
-
     manager = modal_pool("a", "b", strategy="failover")
-    service = ProvisioningService(manager, InMemoryDeploymentRepository())
+    repository = InMemoryDeploymentRepository()
+    service = ProvisioningService(manager, repository)
     candidate = _candidate(ModalProvider(), sample_profile, sample_runtime)
     calls: list[object] = []
 
@@ -634,21 +680,57 @@ async def test_provisioning_service_fails_over_modal_account_on_auth_error(
         patch("modal.Client.from_credentials", side_effect=lambda token_id, _secret: token_id),
         patch("modal.App.deploy", side_effect=deploy),
         patch("modal.Function.get_web_url", return_value="https://live.modal.run"),
-        patch("modal.App.lookup", side_effect=modal.exception.NotFoundError("x")),
+        patch("modal.App.lookup", side_effect=_modal_error("AuthError", "bad token")) as lookup,
     ):
         record, _ = await service.provision([candidate], sample_profile)
 
     assert calls == ["SENTINEL-modal-a-id", "SENTINEL-modal-b-id"]
     assert record.account == "b"
     assert record.state == DeploymentState.STARTING
+    lookup.assert_not_called()
+    health = {h.account_id: h for h in manager.health()}
+    assert health["a"].state == "revoked" and health["a"].in_flight == 0
+    [failed] = [r for r in await repository.list_all() if r.state == DeploymentState.FAILED]
+    assert failed.account == "a"
+    assert not failed.needs_reconciliation and not failed.creation_may_continue
+
+
+@pytest.mark.asyncio
+async def test_endpoint_lookup_rejection_after_deploy_still_cleans_up(
+    sample_profile, sample_runtime
+):
+    import modal
+
+    manager = modal_pool("a", "b", strategy="failover")
+    repository = InMemoryDeploymentRepository()
+    service = ProvisioningService(manager, repository)
+    candidate = _candidate(ModalProvider(), sample_profile, sample_runtime)
+    with (
+        patch("modal.Client.from_credentials", side_effect=lambda token_id, _secret: token_id),
+        patch("modal.App.deploy") as mock_deploy,
+        patch("modal.Function.get_web_url", side_effect=[
+            _modal_error("AuthError"), "https://live.modal.run",
+        ]),
+        patch("modal.App.lookup", side_effect=[
+            MagicMock(), modal.exception.NotFoundError("gone"),
+        ]) as lookup,
+        patch("modal.experimental.stop_app") as stop,
+    ):
+        record, _ = await service.provision([candidate], sample_profile)
+    assert record.account == "b"
+    assert mock_deploy.call_count == 2
+    stop.assert_called_once()
+    assert stop.call_args.kwargs["client"] == "SENTINEL-modal-a-id"
+    assert lookup.call_count == 2
+    assert all(c.kwargs["client"] == "SENTINEL-modal-a-id" for c in lookup.call_args_list)
+    [failed] = [r for r in await repository.list_all() if r.state == DeploymentState.FAILED]
+    assert not failed.needs_reconciliation and not failed.creation_may_continue
 
 
 @pytest.mark.asyncio
 async def test_all_pooled_accounts_rejected_raises_no_account_available(
     sample_profile, sample_runtime
 ):
-    import modal
-
     manager = modal_pool("a", "b", strategy="failover", max_attempts=2)
     service = ProvisioningService(manager, InMemoryDeploymentRepository())
     candidate = _candidate(ModalProvider(), sample_profile, sample_runtime)
@@ -656,7 +738,9 @@ async def test_all_pooled_accounts_rejected_raises_no_account_available(
     with (
         patch("modal.Client.from_credentials", return_value=MagicMock()),
         patch("modal.App.deploy", side_effect=_modal_error("AuthError", "bad")),
-        patch("modal.App.lookup", side_effect=modal.exception.NotFoundError("x")),
+        patch("modal.App.lookup", side_effect=_modal_error("AuthError", "bad")) as lookup,
         pytest.raises(NoAccountAvailableError),
     ):
         await service.provision([candidate], sample_profile)
+    lookup.assert_not_called()
+    assert all(h.state == "revoked" and h.in_flight == 0 for h in manager.health())

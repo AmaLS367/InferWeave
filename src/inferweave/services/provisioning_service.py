@@ -222,6 +222,13 @@ class ProvisioningService:
             provider.preflight(request, profile, runtime, account)
             deployment_id = provider.new_deployment_id(profile)
             resource = provider.resource_ref(deployment_id, request, account)
+        except ProviderOperationError as err:
+            # Classified account-specific preflight failures use the same scheduling path
+            # as remote rejections; no write-ahead record or reconciliation is needed yet.
+            err.resource_may_exist = False
+            err.operation_may_continue = False
+            await lease.report_failure(err)
+            raise
         except BaseException:
             # Local validation failed before anything remote happened; not the account's fault.
             await lease.report_success()

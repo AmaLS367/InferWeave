@@ -32,7 +32,12 @@ from inferweave.adapters.auth import (
 )
 from inferweave.adapters.auth.endpoint_auth import LightningEndpointAuth, NoEndpointAuth
 from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
-from inferweave.core.exceptions import InferenceError, ProviderAuthError
+from inferweave.core.exceptions import (
+    InferenceError,
+    ProviderAuthError,
+    ProviderOperationError,
+)
+from inferweave.core.failures import FailureKind
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.healthcheck import ProbeResult
 from inferweave.domain.options import DeploymentOptions, RuntimeOptions
@@ -597,8 +602,12 @@ async def test_pooled_modal_deploy_without_proxy_tokens_fails_fast_naming_the_ac
     db_path: Path,
 ):
     weave = make_weave(db_path, accounts=modal_pool("team-a", proxy=False))
-    with patched_modal() as mocks, pytest.raises(ProviderAuthError, match="team-a"):
+    with patched_modal() as mocks, pytest.raises(ProviderOperationError, match="team-a") as caught:
         await weave.deploy(model=AUDIO_MODEL, provider="modal", wait_for_ready=False)
+    assert caught.value.kind is FailureKind.PERMISSION
+    assert not caught.value.resource_may_exist
+    [health] = weave.account_health()
+    assert health.state == "rate_limited" and health.in_flight == 0
     assert await weave.list_records() == []  # nothing half-created
     mocks.stop_app.assert_not_awaited()
     mocks.from_credentials.assert_not_called()

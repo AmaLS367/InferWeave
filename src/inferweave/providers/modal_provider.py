@@ -119,10 +119,17 @@ class ModalProvider(ComputeProvider):
                 )
             else:
                 hint = f"configure proxy_token_id/proxy_token_secret for account '{account.id}'"
-            raise ProviderAuthError(
+            message = (
                 "Modal endpoints are protected with proxy auth, but no proxy token was found. "
                 f"Create a token in the Modal workspace settings and {hint}, or deliberately "
                 "opt out with custom_args={'requires_proxy_auth': False}."
+            )
+            if account.is_ambient:
+                raise ProviderAuthError(message)
+            # Missing endpoint credentials prevent this account serving the request, but do
+            # not prove its control-plane credentials invalid. Park it and allow failover.
+            raise ProviderOperationError(
+                message, FailureKind.PERMISSION, resource_may_exist=False,
             )
 
     # --- credentials -----------------------------------------------------------------------
@@ -162,7 +169,7 @@ class ModalProvider(ComputeProvider):
             kind,
             retry_after=retry_after_from_error(err),
             deployment_id=deployment_id,
-            resource_may_exist=operation == "deploy",
+            resource_may_exist=operation == "deploy" and not kind.is_definitive_rejection,
             operation_may_continue=operation == "deploy" and not kind.is_definitive_rejection,
         )
 
@@ -288,7 +295,15 @@ class ModalProvider(ComputeProvider):
         def _deploy_sync() -> str | None:
             client = self._client(account)
             app.deploy(name=app_name, environment_name=environment, client=client)
-            return serve.get_web_url()
+            # From here on the app exists: even a definitive endpoint-lookup rejection
+            # must preserve cleanup/reconciliation under the owning account.
+            record.creation_may_continue = False
+            try:
+                return serve.get_web_url()
+            except Exception as err:  # noqa: BLE001 - sanitized, resource already deployed
+                failure = self._failure("endpoint lookup", err, account, record.id)
+                failure.resource_may_exist = True
+                raise failure from None
 
         endpoint_url = await self._call("deploy", record, account, _deploy_sync)
         record.creation_may_continue = False

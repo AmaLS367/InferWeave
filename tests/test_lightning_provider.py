@@ -7,8 +7,10 @@ No test here starts a subprocess or contacts Lightning. The fake runner records 
 import asyncio
 import hashlib
 import io
+import json
 import os
 import shlex
+import sqlite3
 import sys
 import wave
 from dataclasses import dataclass, field
@@ -1629,6 +1631,40 @@ async def test_removed_owner_account_is_never_replaced_by_another(runner, weave_
         await dep.stop()
     assert len(runner.calls) == before
     assert runner.resources  # the resource is untouched rather than deleted as another account
+
+
+@pytest.mark.asyncio
+async def test_restart_attach_refresh_stop_with_legacy_lightning_record(
+    runner, weave_factory, ambient_env, tmp_path, monkeypatch
+):
+    first = weave_factory(runner)
+    dep = await first.deploy(AUDIO_MODEL, provider="lightning")
+    record = await first.lifecycle_service.get_record(dep.id)
+    legacy = record.model_dump(mode="json")
+    resource = legacy.pop("resource")
+    legacy.pop("account")
+    legacy.pop("owner_fingerprint")
+    legacy["lightning"] = {
+        "name": resource["name"], "teamspace": resource["scope"],
+        "resource_id": resource["resource_id"], "owned": resource["owned"],
+    }
+    await first.close()
+    previous_calls = len(runner.calls)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("UPDATE deployments SET data_json = ? WHERE id = ?", (json.dumps(legacy), dep.id))
+
+    # Ambient config may change after an upgrade; operations must use the persisted scope.
+    monkeypatch.setenv("LIGHTNING_TEAMSPACE", "other/space")
+    second = weave_factory(runner)
+    attached = await second.attach(dep.id)
+    assert attached.account == "ambient"
+    assert (await attached.refresh()).state == DeploymentState.HEALTHY
+    await attached.stop()
+    assert not runner.resources
+    calls = [c for c in runner.calls[previous_calls:] if c.op in {"inspect", "delete"}]
+    assert calls
+    assert all(c.payload["teamspace"] == "owner/tests" for c in calls)
+    assert all(c.payload["target"] == resource["resource_id"] for c in calls)
 
 
 @pytest.mark.asyncio
