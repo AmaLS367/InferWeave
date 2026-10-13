@@ -1,9 +1,11 @@
 """Model hardware requirements, healthcheck parameters, and profile definitions."""
 
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from inferweave.core.credentials import is_sensitive_key
 from inferweave.models.enums import WorkloadType
 
 
@@ -72,6 +74,144 @@ class HealthcheckConfig(BaseModel):
     )
 
 
+class ContainerSpec(BaseModel):
+    """Specification for running a model or service in a custom container."""
+
+    image: str = Field(
+        ...,
+        description="Non-empty container image reference (tag or SHA256 digest)",
+    )
+    args: list[str] = Field(
+        default_factory=list,
+        description="Argv token list for container entrypoint, never a shell command",
+    )
+    port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        description="Exposed container port (integer from 1 to 65535)",
+    )
+    setup_commands: list[str] = Field(
+        default_factory=list,
+        description="Commands executed before container process execution",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Dictionary of nonsecret environment variables",
+    )
+    add_python: str | None = Field(
+        default=None,
+        description="Optional Python version string to install, e.g. '3.12'",
+    )
+
+    @field_validator("image")
+    @classmethod
+    def _validate_image(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError("image must be a string")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Container image reference cannot be empty")
+        if any(c.isspace() for c in stripped):
+            raise ValueError(
+                f"Container image reference cannot contain whitespace: {value!r}"
+            )
+        return stripped
+
+    @field_validator("args", mode="before")
+    @classmethod
+    def _validate_args(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            raise ValueError(  # noqa: TRY004
+                "args must be a list of argv strings, never a shell command string"
+            )
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(
+                f"args must be a list of strings, got {type(value).__name__}"
+            )
+        for item in value:
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"Each arg in args must be a string, got {type(item).__name__}"
+                )
+        return [str(item) for item in value]
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _validate_port(cls, value: Any) -> int:
+        if isinstance(value, bool):
+            raise TypeError("port must be an integer, not a boolean")
+        try:
+            port_val = int(value)
+        except (ValueError, TypeError) as err:
+            raise ValueError(f"Invalid port: {value}") from err
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError(f"port must be an integer, got {value}")
+        if port_val < 1 or port_val > 65535:
+            raise ValueError(f"port must be an integer from 1 to 65535, got {port_val}")
+        return port_val
+
+    @field_validator("setup_commands", mode="before")
+    @classmethod
+    def _validate_setup_commands(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise ValueError(  # noqa: TRY004
+                "setup_commands must be a list of strings, not a single string"
+            )
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(
+                f"setup_commands must be a list of strings, got {type(value).__name__}"
+            )
+        for item in value:
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"Each setup command must be a string, got {type(item).__name__}"
+                )
+        return [str(item) for item in value]
+
+    @field_validator("env")
+    @classmethod
+    def _validate_env(cls, value: dict[str, str]) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise TypeError(f"env must be a dictionary, got {type(value).__name__}")
+        for key, val in value.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"Environment variable name must be a string, got {type(key).__name__}"
+                )
+            if not isinstance(val, str):
+                raise TypeError(
+                    f"Environment variable value for '{key}' must be a string, got {type(val).__name__}"
+                )
+            if is_sensitive_key(key):
+                raise ValueError(
+                    f"Platform credentials and sensitive keys are forbidden in ContainerSpec.env: '{key}'"
+                )
+        return value
+
+    @field_validator("add_python")
+    @classmethod
+    def _validate_add_python(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError(
+                f"add_python must be a string or None, got {type(value).__name__}"
+            )
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("add_python cannot be empty")
+        if not re.match(r"^\d+(\.\d+)*$", cleaned):
+            raise ValueError(
+                f"Invalid Python version string '{value}'; expected format like '3.12'"
+            )
+        return cleaned
+
+
 class ModelProfile(BaseModel):
     """Metadata and resource profile for a deployable AI model."""
 
@@ -99,9 +239,103 @@ class ModelProfile(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict, description="Additional arbitrary metadata"
     )
+    container: ContainerSpec | None = Field(
+        default=None,
+        description="Custom container configuration for container-backed workloads",
+    )
+
+    @field_validator("default_env")
+    @classmethod
+    def _validate_default_env(cls, value: dict[str, str]) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return value
+        for key in value:
+            if is_sensitive_key(key):
+                raise ValueError(
+                    f"Platform credentials and sensitive keys are forbidden in profile default_env: '{key}'"
+                )
+        return value
+
+    @classmethod
+    def for_container(
+        cls,
+        id: str,
+        image: str,
+        args: list[str] | None = None,
+        port: int = 8000,
+        health_path: str = "/health",
+        min_vram_gb: float = 0.0,
+        *,
+        name: str | None = None,
+        setup_commands: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        add_python: str | None = None,
+        gpu_count: int = 1,
+        recommended_gpus: list[str] | None = None,
+        min_cpu_cores: int = 4,
+        min_ram_gb: float = 16.0,
+        min_cuda_version: str | None = "12.1",
+        hardware: HardwareRequirements | None = None,
+        healthcheck: HealthcheckConfig | None = None,
+        source: str = "container",
+        artifact_id: str | None = None,
+        default_env: dict[str, str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> "ModelProfile":
+        """Convenience factory to construct a ModelProfile for a containerized workload."""
+        container_args = list(args) if args is not None else []
+        container_spec = ContainerSpec(
+            image=image,
+            args=container_args,
+            port=port,
+            setup_commands=list(setup_commands) if setup_commands is not None else [],
+            env=dict(env or {}),
+            add_python=add_python,
+        )
+
+        if hardware is not None:
+            hw = hardware
+        else:
+            hw_kwargs: dict[str, Any] = {
+                "min_vram_gb": min_vram_gb,
+                "gpu_count": gpu_count,
+                "min_cpu_cores": min_cpu_cores,
+                "min_ram_gb": min_ram_gb,
+                "min_cuda_version": min_cuda_version,
+            }
+            if recommended_gpus is not None:
+                hw_kwargs["recommended_gpus"] = recommended_gpus
+            hw = HardwareRequirements(**hw_kwargs)
+
+        if healthcheck is not None:
+            hc = healthcheck
+        else:
+            hc = HealthcheckConfig(port=port, path=health_path)
+
+        profile_env = dict(env or {})
+        if default_env:
+            profile_env.update(default_env)
+
+        workload_type = kwargs.pop("workload_type", WorkloadType.CUSTOM)
+        default_runtime = kwargs.pop("default_runtime", "container")
+
+        return cls(
+            id=id,
+            name=name or id,
+            workload_type=workload_type,
+            default_runtime=default_runtime,
+            source=source,
+            artifact_id=artifact_id,
+            hardware=hw,
+            healthcheck=hc,
+            default_env=profile_env,
+            metadata=metadata or {},
+            container=container_spec,
+            **kwargs,
+        )
 
     @property
     def target_artifact(self) -> str:
         """Returns the external repository/artifact ID if defined, else falls back to model ID."""
         return self.artifact_id or self.id
-

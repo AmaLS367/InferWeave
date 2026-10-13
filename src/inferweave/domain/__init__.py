@@ -1,6 +1,6 @@
 """Domain layer containing core business rules, domain services, and hardware validation."""
 
-from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.domain.deployment_record import DeploymentRecord, is_sensitive_key
 from inferweave.domain.hardware_validator import HardwareValidator
 from inferweave.domain.healthcheck import (
     HealthEvaluator,
@@ -36,4 +36,5 @@ __all__ = [
     "ReadinessReport",
     "ReadinessState",
     "RuntimeOptions",
+    "is_sensitive_key",
 ]

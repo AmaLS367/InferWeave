@@ -25,13 +25,31 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "FailureKind": ("inferweave.core.failures", "FailureKind"),
     "ResourceRef": ("inferweave.domain.deployment_record", "ResourceRef"),
     # Adapters
-    "HttpxHealthcheckProbeAdapter": ("inferweave.adapters.healthcheck", "HttpxHealthcheckProbeAdapter"),
-    "MockHealthcheckProbeAdapter": ("inferweave.adapters.healthcheck", "MockHealthcheckProbeAdapter"),
-    "AsyncioWatchdogAdapter": ("inferweave.adapters.lifecycle", "AsyncioWatchdogAdapter"),
-    "InMemoryDeploymentRepository": ("inferweave.adapters.lifecycle", "InMemoryDeploymentRepository"),
-    "JsonDeploymentRepository": ("inferweave.adapters.lifecycle", "JsonDeploymentRepository"),
+    "HttpxHealthcheckProbeAdapter": (
+        "inferweave.adapters.healthcheck",
+        "HttpxHealthcheckProbeAdapter",
+    ),
+    "MockHealthcheckProbeAdapter": (
+        "inferweave.adapters.healthcheck",
+        "MockHealthcheckProbeAdapter",
+    ),
+    "AsyncioWatchdogAdapter": (
+        "inferweave.adapters.lifecycle",
+        "AsyncioWatchdogAdapter",
+    ),
+    "InMemoryDeploymentRepository": (
+        "inferweave.adapters.lifecycle",
+        "InMemoryDeploymentRepository",
+    ),
+    "JsonDeploymentRepository": (
+        "inferweave.adapters.lifecycle",
+        "JsonDeploymentRepository",
+    ),
     "MockWatchdogAdapter": ("inferweave.adapters.lifecycle", "MockWatchdogAdapter"),
-    "SqliteDeploymentRepository": ("inferweave.adapters.lifecycle", "SqliteDeploymentRepository"),
+    "SqliteDeploymentRepository": (
+        "inferweave.adapters.lifecycle",
+        "SqliteDeploymentRepository",
+    ),
     # Auth, clients, inference errors
     "CompositeEndpointAuth": ("inferweave.adapters.auth", "CompositeEndpointAuth"),
     "LightningEndpointAuth": ("inferweave.adapters.auth", "LightningEndpointAuth"),
@@ -44,25 +62,46 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "InferenceConfig": ("inferweave.clients", "InferenceConfig"),
     "InferenceTransport": ("inferweave.clients", "InferenceTransport"),
     "ReferenceAudio": ("inferweave.clients", "ReferenceAudio"),
-    "AmbiguousDeploymentError": ("inferweave.core.exceptions", "AmbiguousDeploymentError"),
-    "DeploymentNotActiveError": ("inferweave.core.exceptions", "DeploymentNotActiveError"),
+    "AmbiguousDeploymentError": (
+        "inferweave.core.exceptions",
+        "AmbiguousDeploymentError",
+    ),
+    "DeploymentNotActiveError": (
+        "inferweave.core.exceptions",
+        "DeploymentNotActiveError",
+    ),
     "EndpointNotReadyError": ("inferweave.core.exceptions", "EndpointNotReadyError"),
     "InferenceError": ("inferweave.core.exceptions", "InferenceError"),
     "InferenceTimeoutError": ("inferweave.core.exceptions", "InferenceTimeoutError"),
-    "InvalidInferenceResponseError": ("inferweave.core.exceptions", "InvalidInferenceResponseError"),
+    "InvalidInferenceResponseError": (
+        "inferweave.core.exceptions",
+        "InvalidInferenceResponseError",
+    ),
     "ProviderAuthError": ("inferweave.core.exceptions", "ProviderAuthError"),
-    "UnsupportedWorkloadError": ("inferweave.core.exceptions", "UnsupportedWorkloadError"),
+    "UnsupportedWorkloadError": (
+        "inferweave.core.exceptions",
+        "UnsupportedWorkloadError",
+    ),
     "EndpointAuthPort": ("inferweave.ports.auth", "EndpointAuthPort"),
     # Core Exceptions
     "DeploymentError": ("inferweave.core.exceptions", "DeploymentError"),
-    "DeploymentNotFoundError": ("inferweave.core.exceptions", "DeploymentNotFoundError"),
+    "DeploymentNotFoundError": (
+        "inferweave.core.exceptions",
+        "DeploymentNotFoundError",
+    ),
     "HealthcheckError": ("inferweave.core.exceptions", "HealthcheckError"),
     "HealthcheckFailedError": ("inferweave.core.exceptions", "HealthcheckFailedError"),
-    "HealthcheckTimeoutError": ("inferweave.core.exceptions", "HealthcheckTimeoutError"),
+    "HealthcheckTimeoutError": (
+        "inferweave.core.exceptions",
+        "HealthcheckTimeoutError",
+    ),
     "InferWeaveError": ("inferweave.core.exceptions", "InferWeaveError"),
     "InsufficientVramError": ("inferweave.core.exceptions", "InsufficientVramError"),
     "ModelNotFoundError": ("inferweave.core.exceptions", "ModelNotFoundError"),
-    "NoFeasibleProviderError": ("inferweave.core.exceptions", "NoFeasibleProviderError"),
+    "NoFeasibleProviderError": (
+        "inferweave.core.exceptions",
+        "NoFeasibleProviderError",
+    ),
     "ProviderNotFoundError": ("inferweave.core.exceptions", "ProviderNotFoundError"),
     "ProviderPlatformError": ("inferweave.core.exceptions", "ProviderPlatformError"),
     "UnknownGpuError": ("inferweave.core.exceptions", "UnknownGpuError"),
@@ -76,7 +115,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ReadinessState": ("inferweave.domain.healthcheck", "ReadinessState"),
     "AutostopAction": ("inferweave.domain.lifecycle", "AutostopAction"),
     "AutostopPolicy": ("inferweave.domain.lifecycle", "AutostopPolicy"),
-    "DeploymentLifecycleEvaluator": ("inferweave.domain.lifecycle", "DeploymentLifecycleEvaluator"),
+    "DeploymentLifecycleEvaluator": (
+        "inferweave.domain.lifecycle",
+        "DeploymentLifecycleEvaluator",
+    ),
     "LifecycleState": ("inferweave.domain.lifecycle", "LifecycleState"),
     "DeploymentOptions": ("inferweave.domain.options", "DeploymentOptions"),
     "ProviderOptions": ("inferweave.domain.options", "ProviderOptions"),
@@ -91,6 +133,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WorkloadType": ("inferweave.models.enums", "WorkloadType"),
     "HardwareRequirements": ("inferweave.models.profile", "HardwareRequirements"),
     "HealthcheckConfig": ("inferweave.models.profile", "HealthcheckConfig"),
+    "ContainerSpec": ("inferweave.models.profile", "ContainerSpec"),
     "ModelProfile": ("inferweave.models.profile", "ModelProfile"),
     "GpuSpec": ("inferweave.models.routing", "GpuSpec"),
     "InstanceOffer": ("inferweave.models.routing", "InstanceOffer"),
@@ -99,14 +142,20 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "RoutingDecision": ("inferweave.models.routing", "RoutingDecision"),
     "VramCheckResult": ("inferweave.models.routing", "VramCheckResult"),
     # Ports
-    "DeploymentRepositoryPort": ("inferweave.ports.deployment_repository", "DeploymentRepositoryPort"),
+    "DeploymentRepositoryPort": (
+        "inferweave.ports.deployment_repository",
+        "DeploymentRepositoryPort",
+    ),
     "HealthcheckProbePort": ("inferweave.ports.healthcheck", "HealthcheckProbePort"),
     "AutostopWatchdogPort": ("inferweave.ports.lifecycle", "AutostopWatchdogPort"),
     "ComputeProviderPort": ("inferweave.ports.provider", "ComputeProviderPort"),
     # Registry & SDK & Services
     "ModelRegistry": ("inferweave.registry.base", "ModelRegistry"),
     "InferWeave": ("inferweave.sdk", "InferWeave"),
-    "HealthcheckService": ("inferweave.services.healthcheck_service", "HealthcheckService"),
+    "HealthcheckService": (
+        "inferweave.services.healthcheck_service",
+        "HealthcheckService",
+    ),
     "LifecycleService": ("inferweave.services.lifecycle_service", "LifecycleService"),
 }
 
@@ -124,6 +173,7 @@ __all__ = [
     "AutostopWatchdogPort",
     "CompositeEndpointAuth",
     "ComputeProviderPort",
+    "ContainerSpec",
     "Deployment",
     "DeploymentError",
     "DeploymentLifecycleEvaluator",
@@ -318,6 +368,7 @@ if TYPE_CHECKING:
     )
     from inferweave.models.enums import DeploymentState, ProviderType, WorkloadType
     from inferweave.models.profile import (
+        ContainerSpec,
         HardwareRequirements,
         HealthcheckConfig,
         ModelProfile,

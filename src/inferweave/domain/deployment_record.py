@@ -5,28 +5,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from inferweave.core.credentials import (
+    _REDACTED,
+    _SENSITIVE_KEY_TERMS,
+    _is_sensitive_key,
+    is_sensitive_key,
+)
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState, WorkloadType
 
-_SENSITIVE_KEY_TERMS = (
-    "token",
-    "secret",
-    "password",
-    "api_key",
-    "api-key",
-    "apikey",
-    "credential",
-    "authorization",
-    "bearer",
-    "modal-key",
-    "modal_key",
-)
-_REDACTED = "[REDACTED]"
-
-
-def _is_sensitive_key(key: str) -> bool:
-    lower_k = key.lower()
-    return any(term in lower_k for term in _SENSITIVE_KEY_TERMS)
+__all__ = [
+    "_REDACTED",
+    "_SENSITIVE_KEY_TERMS",
+    "DeploymentRecord",
+    "_is_sensitive_key",
+    "_redact_value",
+    "is_sensitive_key",
+]
 
 
 def _redact_value(value: object) -> object:
@@ -222,7 +217,10 @@ class DeploymentRecord(BaseModel):
             return sanitized
 
         # Sanitize extra_provider_args
-        if sanitized.options.provider and sanitized.options.provider.extra_provider_args:
+        if (
+            sanitized.options.provider
+            and sanitized.options.provider.extra_provider_args
+        ):
             extra_args = dict(sanitized.options.provider.extra_provider_args)
             if "secrets" in extra_args:
                 sec = extra_args["secrets"]
@@ -257,7 +255,7 @@ class DeploymentRecord(BaseModel):
         if sanitized.options.runtime and sanitized.options.runtime.extra_env:
             env_copy = dict(sanitized.options.runtime.extra_env)
             for k in list(env_copy.keys()):
-                if _is_sensitive_key(k) or "key" in k.lower() or "auth" in k.lower():
+                if is_sensitive_key(k):
                     env_copy[k] = _REDACTED
             sanitized.options.runtime.extra_env = env_copy
 
