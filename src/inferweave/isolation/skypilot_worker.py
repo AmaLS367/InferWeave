@@ -21,6 +21,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -323,7 +324,7 @@ def _endpoint_of(sky: Any, cluster: str, port: int | None) -> str | None:
         return None
     if not endpoints:
         return None
-    endpoint = endpoints.get(port) if port else None
+    endpoint = (endpoints.get(port) or endpoints.get(str(port))) if port else None
     endpoint = endpoint or next(iter(endpoints.values()), None)
     if not endpoint:
         return None
@@ -331,10 +332,34 @@ def _endpoint_of(sky: Any, cluster: str, port: int | None) -> str | None:
 
 
 def op_launch(sky: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    run_args = payload.get("run_args")
+    if run_args is not None:
+        if (
+            not isinstance(run_args, list)
+            or not run_args
+            or not all(isinstance(a, str) for a in run_args)
+            or not run_args[0].strip()
+            or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", run_args[0].strip())
+        ):
+            raise WorkerError(
+                "invalid_request",
+                "SkyPilot launch requires non-empty structured run_args.",
+                False,
+            )
+        run_script = shlex.join(run_args)
+    else:
+        raw_run = payload.get("run")
+        if not isinstance(raw_run, str) or not raw_run.strip():
+            raise WorkerError(
+                "invalid_request",
+                "SkyPilot launch requires a non-empty run command.",
+                False,
+            )
+        run_script = raw_run
     task = sky.Task(
         name=payload["cluster"],
         setup=payload.get("setup"),
-        run=payload["run"],
+        run=run_script,
         envs=payload.get("envs") or {},
         workdir=payload.get("workdir"),
     )

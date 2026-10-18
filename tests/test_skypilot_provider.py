@@ -910,3 +910,638 @@ async def test_stop_error_is_not_swallowed(linux_host, tmp_path):
             ambient(),
             action=AutostopAction.DOWN,
         )
+
+
+# --- custom container support (T1.3b) ---------------------------------------------------------
+
+
+def _container_profile(
+    model_id: str = "custom/container-svc",
+    image: str = "ghcr.io/org/custom-inference:1.2.0",
+    args: list[str] | None = None,
+    port: int = 8080,
+    health_path: str = "/v1/ready",
+    **kwargs: Any,
+) -> ModelProfile:
+    if args is None:
+        args = ["python", "-m", "custom_server", "--port", str(port)]
+    return ModelProfile.for_container(
+        id=model_id,
+        image=image,
+        args=args,
+        port=port,
+        health_path=health_path,
+        **kwargs,
+    )
+
+
+def _render_container(
+    profile: ModelProfile, provider_name: str = "runpod", **request_kwargs: Any
+) -> tuple[DeploymentRequest, RuntimeSpec]:
+    from inferweave.runtimes.templates import get_runtime_template
+
+    request = DeploymentRequest(
+        model=profile.id, provider=provider_name, **request_kwargs
+    )
+    template = get_runtime_template(profile.default_runtime)
+    return request, template.render(profile, request)
+
+
+@pytest.mark.parametrize(
+    ("image_ref", "expected_image_id"),
+    [
+        ("ghcr.io/org/custom-inference:1.2.0", "docker:ghcr.io/org/custom-inference:1.2.0"),
+        (
+            "ghcr.io/org/custom-inference@sha256:45b23d06496e983443b4ff5f707f9f423806046399d50f16fbdb4094f43f972b",
+            "docker:ghcr.io/org/custom-inference@sha256:45b23d06496e983443b4ff5f707f9f423806046399d50f16fbdb4094f43f972b",
+        ),
+        ("docker:ghcr.io/org/already-prefixed:2.0", "docker:ghcr.io/org/already-prefixed:2.0"),
+    ],
+)
+def test_skypilot_custom_container_preserves_image_setup_env_port_and_gpu(
+    tmp_path, image_ref: str, expected_image_id: str
+):
+    """ContainerTemplate RuntimeSpec maps image, argv, setup, env, port, and hardware to SkyPilot payload."""
+    hw = HardwareRequirements(
+        min_vram_gb=48.0,
+        gpu_count=2,
+        recommended_gpus=["A100-80GB", "H100"],
+        min_cpu_cores=8,
+        min_ram_gb=64.0,
+    )
+    hc = HealthcheckConfig(
+        port=9090,
+        path="/v2/ready",
+        method="HEAD",
+        expected_status_codes=[200, 204],
+        consecutive_successes=2,
+    )
+    profile = _container_profile(
+        model_id="org/custom-worker",
+        image=image_ref,
+        args=["/app/bin/serve", "--host", "0.0.0.0", "--port", "9090"],
+        port=9090,
+        setup_commands=["pip install uv", "mkdir -p /models/cache"],
+        env={"MODEL_DIR": "/models/cache", "LOG_LEVEL": "INFO", "OVERRIDE_ME": "container"},
+        default_env={"DEFAULT_FLAG": "true", "OVERRIDE_ME": "default"},
+        add_python="3.12",
+        hardware=hw,
+        healthcheck=hc,
+    )
+    request, runtime = _render_container(
+        profile,
+        provider_name="runpod",
+        env={"REQUEST_VAR": "req", "OVERRIDE_ME": "request"},
+        custom_args={
+            "extra_cli_args": ["--workers", "4"],
+            "runtime_args": {
+                "engine_args": {"max_batch_size": 32},
+                "extra_env": {"EXTRA_VAR": "extra", "OVERRIDE_ME": "extra"},
+            },
+        },
+    )
+    assert runtime.name == "container"
+    assert runtime.add_python == "3.12"
+
+    provider = make_provider(tmp_path, "runpod")
+    provider.preflight(request.model_copy(update={"dry_run": True}), profile, runtime, ambient("runpod"))
+    record = make_record(provider, request, ambient("runpod"), "iw-custom-cluster")
+    payload = provider.launch_payload(record, request, profile, runtime)
+
+    expected_argv = [
+        "/app/bin/serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9090",
+        "--max-batch-size",
+        "32",
+        "--workers",
+        "4",
+    ]
+    assert runtime.run_args == expected_argv
+    assert payload["cluster"] == "iw-custom-cluster"
+    assert payload["run"] == shlex.join(expected_argv)
+    assert shlex.split(payload["run"]) == expected_argv
+    assert payload["setup"] == "pip install uv\nmkdir -p /models/cache"
+    assert payload["envs"] == {
+        "MODEL_DIR": "/models/cache",
+        "LOG_LEVEL": "INFO",
+        "DEFAULT_FLAG": "true",
+        "REQUEST_VAR": "req",
+        "EXTRA_VAR": "extra",
+        "OVERRIDE_ME": "extra",
+    }
+    assert payload["workdir"] is None
+    assert "PYTHONPATH" not in payload["envs"]
+    assert payload["port"] == 9090
+    assert payload["resources"] == {
+        "cloud": "runpod",
+        "accelerators": "A100-80GB:2",
+        "ports": [9090],
+        "use_spot": True,
+        "image_id": expected_image_id,
+    }
+    assert provider.dry_run_endpoint("iw-custom-cluster", runtime) == "http://dryrun-iw-custom-cluster.cloud:9090"
+
+
+def test_skypilot_custom_container_respects_runtime_hardware_and_request_overrides(tmp_path):
+    """SkyPilotProvider uses runtime.hardware (falling back to profile.hardware) and request GPU overrides."""
+    profile = _container_profile(
+        recommended_gpus=["L4"],
+        gpu_count=1,
+    )
+    request, runtime = _render_container(profile)
+    provider = make_provider(tmp_path, "runpod")
+    record = make_record(provider, request, ambient())
+
+    # 1. Runtime hardware overrides profile hardware when set on RuntimeSpec
+    overridden_hw = HardwareRequirements(min_vram_gb=80.0, gpu_count=4, recommended_gpus=["H100"])
+    runtime_with_hw = runtime.model_copy(update={"hardware": overridden_hw})
+    payload = provider.launch_payload(record, request, profile, runtime_with_hw)
+    assert payload["resources"]["accelerators"] == "H100:4"
+
+    # 2. Explicit request gpu_type and num_gpus take top precedence
+    explicit_req = request.model_copy(update={"gpu_type": "A100", "num_gpus": 2})
+    payload_explicit = provider.launch_payload(record, explicit_req, profile, runtime_with_hw)
+    assert payload_explicit["resources"]["accelerators"] == "A100:2"
+
+
+def test_skypilot_custom_container_with_inferweave_substring_in_args_does_not_stage_workdir(tmp_path):
+    """Arguments mentioning 'inferweave' (e.g. model repo or service tag) must not force workdir staging."""
+    profile = _container_profile(
+        model_id="inferweave/custom-model",
+        args=["/app/server", "--model", "inferweave/custom-model", "--tag", "inferweave-prod"],
+        port=8080,
+    )
+    request, runtime = _render_container(profile)
+    provider = make_provider(tmp_path)
+    record = make_record(provider, request, ambient())
+
+    payload = provider.launch_payload(record, request, profile, runtime)
+
+    assert payload["workdir"] is None
+    assert "PYTHONPATH" not in payload["envs"]
+
+
+@pytest.mark.parametrize(
+    "adversarial_args",
+    [
+        ["python3", "-m", "server", "--prompt", "; touch /tmp/pwned", "--port", "8080"],
+        ["/app/bin/serve", "--path", "dir with spaces/model", "$(rm -rf /)"],
+        ["python3", "run.py", "`id`", "| cat /etc/passwd", "&& whoami", "$HOME"],
+        ["/usr/bin/env", "python3", "-c", "print('hello \"world\"')", "arg\nwith\nnewlines", ""],
+        ["/app/serve", "*", "*.py", "quote'arg", "tab\targ", "--opt=a;b|c&d"],
+    ],
+)
+@pytest.mark.asyncio
+async def test_skypilot_custom_container_executes_run_args_safely_without_shell_interpretation(
+    linux_host, tmp_path, adversarial_args: list[str]
+):
+    """SkyPilotProvider quotes every argv token from run_args and ignores tampered run_command."""
+    from test_skypilot_worker import FakeSky
+
+    profile = _container_profile(args=adversarial_args, port=8080)
+    request, runtime = _render_container(
+        profile,
+        custom_args={"extra_cli_args": ["--extra", "literal;value $(id)"]},
+    )
+    expected_argv = [*adversarial_args, "--extra", "literal;value $(id)"]
+    assert runtime.run_args == expected_argv
+
+    # Even if run_command is mutated to contain unquoted shell injection, SkyPilotProvider ignores it.
+    tampered_runtime = runtime.model_copy(
+        update={"run_command": "echo pwned && touch /tmp/injected; rm -rf /"}
+    )
+
+    fake_sky = FakeSky()
+    fake_sky.results["endpoints"] = {8080: "10.0.0.5:8080"}
+
+    class WorkerVerifyingRunner(FakeRunner):
+        async def run(self, operation, payload, **kwargs):
+            await super().run(operation, payload, **kwargs)
+            if operation == "launch":
+                return worker.op_launch(fake_sky, payload)
+            return self.responses[operation]
+
+    runner = WorkerVerifyingRunner()
+    provider = make_provider(tmp_path, "runpod", runner)
+    record = make_record(provider, request, ambient())
+
+    result = await provider.provision(record, request, profile, tampered_runtime, ambient())
+
+    assert result.state == DeploymentState.STARTING
+    assert result.endpoint_url == "http://10.0.0.5:8080"
+    (call,) = runner.calls
+    assert "injected" not in call.payload["run"]
+    assert call.payload["run"] == shlex.join(expected_argv)
+    # POSIX shell lexing of the generated Task.run script recovers the exact discrete argv tokens.
+    assert shlex.split(call.payload["run"]) == expected_argv
+    (task,) = fake_sky.tasks
+    assert task.kwargs["run"] == shlex.join(expected_argv)
+    assert shlex.split(task.kwargs["run"]) == expected_argv
+
+
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        [],
+        [""],
+        ["   "],
+        ["   ", "--port", "8080"],
+        ["LD_PRELOAD=/tmp/evil.so", "python3", "-m", "server"],
+        ["RUNPOD_API_KEY=leaked", "/app/serve"],
+    ],
+)
+@pytest.mark.asyncio
+async def test_skypilot_custom_container_rejects_empty_or_blank_argv(
+    linux_host, tmp_path, bad_args: list[str]
+):
+    """Empty argv or blank executable is rejected in preflight, launch_payload, and provision."""
+    from inferweave.core.exceptions import DeploymentError, InferWeaveError
+    from inferweave.providers.skypilot import SkyPilotConfigurationError
+
+    profile = _container_profile(args=bad_args, port=8080)
+    request, runtime = _render_container(profile)
+    dry_run_request, _ = _render_container(profile, dry_run=True)
+
+    runner = FakeRunner()
+    provider = make_provider(tmp_path, "runpod", runner)
+
+    for req in (request, dry_run_request):
+        with pytest.raises((SkyPilotConfigurationError, DeploymentError, InferWeaveError, ValueError)) as exc_info:
+            provider.preflight(req, profile, runtime, ambient())
+        assert isinstance(exc_info.value, ValueError)
+        assert isinstance(exc_info.value, DeploymentError)
+        assert "argv" in str(exc_info.value).lower() or "run_args" in str(exc_info.value).lower()
+
+    record = make_record(provider, request, ambient())
+    with pytest.raises(SkyPilotConfigurationError):
+        provider.launch_payload(record, request, profile, runtime)
+
+    record.creation_may_continue = True
+    with pytest.raises(SkyPilotConfigurationError):
+        await provider.provision(record, request, profile, runtime, ambient())
+
+    assert runner.calls == []
+    assert record.creation_may_continue is False
+
+
+@pytest.mark.asyncio
+async def test_skypilot_rejects_empty_run_args_even_when_run_command_is_non_empty(
+    linux_host, tmp_path, sample_profile, sample_runtime
+):
+    """SkyPilotProvider never falls back to run_command when run_args is empty."""
+    runner = FakeRunner()
+    provider = make_provider(tmp_path, "runpod", runner)
+    emptied = sample_runtime.model_copy(
+        update={"run_args": [], "run_command": "python -m vllm --port 8000"}
+    )
+    request = DeploymentRequest(model=sample_profile.id, provider="runpod")
+    record = make_record(provider, request, ambient())
+
+    with pytest.raises(ValueError, match="run_args"):
+        provider.preflight(request, sample_profile, emptied, ambient())
+
+    with pytest.raises(ValueError, match="run_args"):
+        provider.launch_payload(record, request, sample_profile, emptied)
+
+    with pytest.raises(ValueError, match="run_args"):
+        await provider.provision(record, request, sample_profile, emptied, ambient())
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_skypilot_empty_argv_through_provisioning_service_does_not_penalize_account(
+    linux_host, tmp_path
+):
+    """Empty container argv fails locally in ProvisioningService without blaming the pooled account."""
+    profile = _container_profile(args=[], port=8080)
+    request, runtime = _render_container(profile, provider_name="runpod")
+    manager = pooled_manager(tmp_path, "runpod", ("a", "b"))
+    runner = FakeRunner()
+    provider = make_provider(tmp_path, "runpod", runner)
+    repository = InMemoryDeploymentRepository()
+    service = ProvisioningService(manager, repository)
+    candidate = ProvisionCandidate(provider=provider, request=request, runtime=runtime)
+
+    with pytest.raises(ValueError, match="argv"):
+        await service.provision([candidate], profile)
+
+    assert runner.calls == []
+    assert await repository.list_all() == []
+    assert all(
+        h.state == "available" and h.in_flight == 0 and h.consecutive_failures == 0
+        for h in manager.health()
+    )
+
+
+@pytest.mark.asyncio
+async def test_skypilot_custom_container_allows_empty_args_when_extra_cli_args_provides_argv(
+    linux_host, tmp_path
+):
+    """If ContainerSpec.args is empty but request extra_cli_args supplies the command, it succeeds."""
+    profile = _container_profile(args=[], port=8080)
+    request, runtime = _render_container(
+        profile,
+        custom_args={"extra_cli_args": ["python3", "-m", "http.server", "8080"]},
+    )
+    assert runtime.run_args == ["python3", "-m", "http.server", "8080"]
+
+    runner = FakeRunner(launch={"endpoint": "http://1.2.3.4:8080"})
+    provider = make_provider(tmp_path, "runpod", runner)
+    provider.preflight(request, profile, runtime, ambient())
+    record = make_record(provider, request, ambient())
+
+    result = await provider.provision(record, request, profile, runtime, ambient())
+
+    assert result.state == DeploymentState.STARTING
+    assert result.endpoint_url == "http://1.2.3.4:8080"
+    (call,) = runner.calls
+    assert call.payload["run"] == "python3 -m http.server 8080"
+
+
+@pytest.mark.asyncio
+async def test_skypilot_custom_container_rejects_invalid_mutated_runtime_fields(
+    linux_host, tmp_path
+):
+    """SkyPilotProvider rejects mutated RuntimeSpec with invalid port, image, setup, env, or add_python."""
+    profile = _container_profile(port=8080)
+    request, runtime = _render_container(profile)
+    runner = FakeRunner()
+    provider = make_provider(tmp_path, "runpod", runner)
+
+    # 1. Mismatched runtime.port vs runtime.healthcheck.port
+    mismatched_port = runtime.model_copy(update={"port": 9000})
+    with pytest.raises(ValueError, match="port"):
+        provider.preflight(request, profile, mismatched_port, ambient())
+
+    # 2. Mismatched runtime.port vs profile.healthcheck.port when runtime.healthcheck is None
+    mismatched_profile_port = runtime.model_copy(update={"port": 9000, "healthcheck": None})
+    with pytest.raises(ValueError, match="port"):
+        provider.preflight(request, profile, mismatched_profile_port, ambient())
+
+    # 3. Invalid port numbers / boolean port
+    for invalid_port in (0, -1, 65536, True, False):
+        bad_port_spec = runtime.model_copy(update={"port": invalid_port, "healthcheck": None})
+        with pytest.raises(ValueError, match="port"):
+            provider.preflight(
+                request, profile.model_copy(update={"container": None}), bad_port_spec, ambient()
+            )
+
+    # 4. Sensitive environment variable injected into mutated container RuntimeSpec
+    for secret_key in ("RUNPOD_API_KEY", "VAST_API_KEY", "MODAL_TOKEN_SECRET", "AWS_SECRET_ACCESS_KEY"):
+        leaked_env = runtime.model_copy(update={"env_vars": {secret_key: "leaked"}})
+        with pytest.raises(ValueError, match="forbidden"):
+            provider.preflight(request, profile, leaked_env, ambient())
+
+    # 5. Non-string env key or value on mutated RuntimeSpec
+    bad_env_val = runtime.model_copy(update={"env_vars": {"PORT": 8080}})  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match="strings"):
+        provider.preflight(request, profile, bad_env_val, ambient())
+
+    # 6. Invalid image reference on mutated container RuntimeSpec
+    for bad_img in ("", "   ", "docker:", "image with space:latest"):
+        bad_img_spec = runtime.model_copy(update={"docker_image": bad_img})
+        with pytest.raises(ValueError, match="image"):
+            provider.preflight(request, profile, bad_img_spec, ambient())
+
+    # 7. Invalid add_python on mutated RuntimeSpec
+    for bad_py in ("", "   ", "python3.12", "3.12; rm -rf /", 312):
+        bad_py_spec = runtime.model_copy(update={"add_python": bad_py})
+        with pytest.raises(ValueError, match="add_python"):
+            provider.preflight(request, profile, bad_py_spec, ambient())
+
+    # 8. Invalid setup_commands on mutated RuntimeSpec
+    bad_setup = runtime.model_copy(update={"setup_commands": "pip install foo"})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="setup_commands"):
+        provider.preflight(request, profile, bad_setup, ambient())
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cloud", ["runpod", "vast"])
+async def test_skypilot_custom_container_preserves_pooled_account_isolation_and_lifecycle(
+    linux_host, monkeypatch, tmp_path, cloud: str
+):
+    """Custom containers preserve private account home, secret channel, failover, status, and teardown."""
+    monkeypatch.setenv("RUNPOD_API_KEY", AMBIENT_SENTINEL)
+    monkeypatch.setenv("VAST_API_KEY", AMBIENT_SENTINEL)
+    manager = pooled_manager(tmp_path, cloud, ("a", "b"))
+    account_a = manager.resolve(cloud, "a")
+
+    profile = _container_profile(
+        model_id="org/isolated-container",
+        image="ghcr.io/org/isolated:1.0.0",
+        args=["/bin/serve", "--port", "8088"],
+        port=8088,
+        setup_commands=["echo 'preparing container'"],
+        env={"SERVICE_MODE": "production"},
+        recommended_gpus=["L40S"],
+        gpu_count=2,
+    )
+    request, runtime = _render_container(profile, provider_name=cloud)
+    runner = FakeRunner(
+        launch={"endpoint": "http://10.20.30.40:8088"},
+        status={"exists": True, "status": "UP", "endpoint": "http://10.20.30.40:8088"},
+    )
+    provider = make_provider(tmp_path, cloud, runner)
+    provider.preflight(request, profile, runtime, account_a)
+    record = make_record(provider, request, account_a, "iw-custom-iso")
+
+    result = await provider.provision(record, request, profile, runtime, account_a)
+    assert result.state == DeploymentState.STARTING
+    assert result.endpoint_url == "http://10.20.30.40:8088"
+    record.endpoint_url = result.endpoint_url
+
+    status = await provider.status(record, account_a)
+    assert status.state == DeploymentState.STARTING
+    assert status.endpoint_url == "http://10.20.30.40:8088"
+
+    await provider.stop(record, account_a, action=AutostopAction.DOWN)
+
+    launch_call, status_call, down_call = runner.calls
+    secret = f"SENTINEL-{cloud}-a-secret"
+    for call in (launch_call, status_call, down_call):
+        assert call.account_id == "a"
+        assert call.payload["mode"] == "account"
+        assert call.payload["cloud"] == cloud
+        assert call.secrets == {"api_key": secret}
+        assert secret not in json.dumps(call.payload)
+        assert not any(secret in v for v in call.env.values())
+        assert not any(AMBIENT_SENTINEL in v for v in call.env.values())
+
+    assert launch_call.payload["port"] == 8088
+    assert launch_call.payload["resources"]["ports"] == [8088]
+    assert launch_call.payload["resources"]["accelerators"] == "L40S:2"
+    assert launch_call.payload["resources"]["image_id"] == "docker:ghcr.io/org/isolated:1.0.0"
+    assert down_call.op == "down"
+
+
+@pytest.mark.asyncio
+async def test_skypilot_custom_container_end_to_end_deploy_readiness_and_stop(
+    linux_host, tmp_path: Path
+):
+    """End-to-end InferWeave.deploy with ContainerTemplate on SkyPilot, readiness probe, and stop."""
+    from inferweave import InferWeave
+    from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
+    from inferweave.adapters.lifecycle.watchdog import MockWatchdogAdapter
+    from inferweave.domain.healthcheck import ProbeOutcome, ProbeResult
+    from inferweave.providers.router import ProviderRouter
+    from inferweave.services.healthcheck_service import HealthcheckService
+    from inferweave.services.lifecycle_service import LifecycleService
+
+    probe_calls: list[dict[str, Any]] = []
+
+    class RecordingProbe(MockHealthcheckProbeAdapter):
+        async def probe(
+            self,
+            url: str,
+            method: str = "GET",
+            timeout_seconds: float = 5.0,
+            headers=None,
+            expected_status_codes=None,
+        ):
+            probe_calls.append(
+                {
+                    "url": url,
+                    "method": method,
+                    "headers": dict(headers or {}),
+                    "expected_status_codes": list(expected_status_codes or []),
+                }
+            )
+            return await super().probe(
+                url, method, timeout_seconds, headers, expected_status_codes
+            )
+
+    probe = RecordingProbe(
+        canned_results=[
+            ProbeResult(is_healthy=False, outcome=ProbeOutcome.CONNECTION_REFUSED),
+            ProbeResult(is_healthy=True, outcome=ProbeOutcome.SUCCESS, status_code=204),
+            ProbeResult(is_healthy=True, outcome=ProbeOutcome.SUCCESS, status_code=204),
+        ]
+    )
+    runner = FakeRunner(
+        launch={"endpoint": "http://203.0.113.10:9095"},
+        status={"exists": True, "status": "UP", "endpoint": "http://203.0.113.10:9095"},
+    )
+    manager = pooled_manager(tmp_path, "runpod", ("acct-1",))
+    repo = InMemoryDeploymentRepository()
+    healthcheck_svc = HealthcheckService(probe_port=probe)
+    lifecycle_svc = LifecycleService(
+        watchdog_port=MockWatchdogAdapter(),
+        repository=repo,
+        healthcheck_service=healthcheck_svc,
+        accounts=manager,
+    )
+    router = ProviderRouter()
+    router.register(SkyPilotProvider("runpod", state_dir=tmp_path, runner=runner))  # type: ignore[arg-type]
+    weave = InferWeave(
+        router=router,
+        healthcheck_service=healthcheck_svc,
+        lifecycle_service=lifecycle_svc,
+        accounts=manager,
+    )
+
+    hc = HealthcheckConfig(
+        port=9095,
+        path="/custom/readyz",
+        initial_delay_seconds=0.0,
+        timeout_seconds=1.0,
+        probe_interval_seconds=0.01,
+        expected_status_codes=[200, 204],
+        consecutive_successes=2,
+        method="HEAD",
+        headers={"X-Custom-Probe": "1"},
+    )
+    profile = ModelProfile.for_container(
+        id="org/sky-ready-container",
+        image="ghcr.io/org/sky-ready:1.0.0",
+        args=["/bin/sky-ready", "--port", "9095", "--flag", "a b"],
+        port=9095,
+        setup_commands=["echo setup-step-1"],
+        env={"CONTAINER_ENV": "val1"},
+        healthcheck=hc,
+        min_vram_gb=16.0,
+        recommended_gpus=["L4"],
+    )
+    weave.register_model(profile)
+
+    dep = await weave.deploy(
+        model="org/sky-ready-container",
+        provider="runpod",
+        gpu_type="L4",
+        wait_for_ready=True,
+        destroy_after_idle_mins=30,
+        env={"DEPLOY_ENV": "val2"},
+    )
+    assert dep.state == DeploymentState.HEALTHY
+    assert dep.account == "acct-1"
+    assert dep.endpoint_url == "http://203.0.113.10:9095"
+    assert dep.autostop_mins == 30
+
+    assert len(probe_calls) == 3
+    for p_call in probe_calls:
+        assert p_call["url"] == "http://203.0.113.10:9095/custom/readyz"
+        assert p_call["method"] == "HEAD"
+        assert p_call["expected_status_codes"] == [200, 204]
+        assert p_call["headers"]["X-Custom-Probe"] == "1"
+
+    launch_call = runner.calls[0]
+    assert launch_call.op == "launch"
+    assert launch_call.payload["run"] == "/bin/sky-ready --port 9095 --flag 'a b'"
+    assert launch_call.payload["setup"] == "echo setup-step-1"
+    assert launch_call.payload["envs"] == {"CONTAINER_ENV": "val1", "DEPLOY_ENV": "val2"}
+    assert launch_call.payload["port"] == 9095
+    assert launch_call.payload["resources"]["ports"] == [9095]
+    assert launch_call.payload["resources"]["image_id"] == "docker:ghcr.io/org/sky-ready:1.0.0"
+
+    await dep.stop()
+    assert dep.state == DeploymentState.STOPPED
+    assert [c.op for c in runner.calls] == ["launch", "stop"]
+    await weave.close()
+
+
+@pytest.mark.parametrize(
+    ("template_name", "model_id", "expects_workdir"),
+    [
+        ("vllm", "meta-llama/Meta-Llama-3-8B-Instruct", False),
+        ("fish-speech-s2", "fish-s2-pro", False),
+        ("flux-diffusers", "black-forest-labs/FLUX.1-schnell", True),
+        ("wan-video", "wan-video/wan-2.1", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_skypilot_builtin_models_regression_behavior_preserved(
+    linux_host, tmp_path, template_name: str, model_id: str, expects_workdir: bool
+):
+    """Built-in models preserve existing SkyPilot task payload, workdir staging, and provision behavior."""
+    from inferweave.registry.base import ModelRegistry
+    from inferweave.runtimes.templates import get_runtime_template
+
+    profile = ModelRegistry().get(model_id)
+    assert profile.default_runtime == template_name
+    request = DeploymentRequest(model=profile.id, provider="runpod")
+    runtime = get_runtime_template(template_name).render(profile, request)
+
+    runner = FakeRunner(launch={"endpoint": f"http://1.2.3.4:{runtime.port}"})
+    provider = make_provider(tmp_path, "runpod", runner)
+    provider.preflight(request, profile, runtime, ambient())
+    record = make_record(provider, request, ambient())
+
+    payload = provider.launch_payload(record, request, profile, runtime)
+    result = await provider.provision(record, request, profile, runtime, ambient())
+
+    assert payload["run"] == shlex.join(runtime.run_args)
+    assert payload["port"] == runtime.port
+    assert payload["resources"]["ports"] == [runtime.port]
+    assert payload["resources"]["image_id"] == f"docker:{runtime.docker_image}"
+    if expects_workdir:
+        assert payload["workdir"] is not None
+        assert payload["envs"].get("PYTHONPATH") == ".:$PYTHONPATH"
+    else:
+        assert payload["workdir"] is None
+    assert result.state == DeploymentState.STARTING
+    assert result.endpoint_url == f"http://1.2.3.4:{runtime.port}"

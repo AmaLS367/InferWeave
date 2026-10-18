@@ -938,3 +938,118 @@ def test_server_group_ignores_zombies_foreign_groups_and_exited_processes(monkey
     monkeypatch.setattr(worker.importlib, "import_module", lambda name: psutil)
     monkeypatch.setattr(os, "getpgid", getpgid, raising=False)
     assert worker._group_processes(31337) == [processes[0]]
+
+
+# --- custom container worker support (T1.3b) -------------------------------------------------
+
+
+def test_main_launch_custom_container_digest_port_and_string_endpoint_key(
+    monkeypatch, capsys, sky, home
+):
+    """Worker launches custom container with digest image, custom port, and string-keyed endpoint map."""
+    import shlex
+
+    digest_image = (
+        "docker:ghcr.io/org/custom-svc@sha256:45b23d06496e983443b4ff5f707f9f423806046399d50f16fbdb4094f43f972b"
+    )
+    argv = ["/app/bin/serve", "--port", "9090", "--prompt", "; echo pwned $(id)"]
+    sky.results["endpoints"] = {"9090": "198.51.100.7:9090"}
+    payload = {
+        "mode": "ambient",
+        "cloud": "runpod",
+        "cluster": "iw-custom-svc",
+        "setup": "pip install uv\nmkdir -p /models",
+        "run": shlex.join(argv),
+        "envs": {"MODEL_DIR": "/models", "CUSTOM_PORT": "9090"},
+        "workdir": None,
+        "resources": {
+            "cloud": "runpod",
+            "accelerators": "A100-80GB:2",
+            "ports": [9090],
+            "use_spot": False,
+            "image_id": digest_image,
+        },
+        "idle_minutes": 30,
+        "down": True,
+        "port": 9090,
+    }
+
+    code, message = run_main(monkeypatch, capsys, {"op": "launch", "payload": payload})
+
+    assert code == 0
+    assert message == {
+        "iw_worker": 1,
+        "ok": True,
+        "result": {"endpoint": "http://198.51.100.7:9090"},
+    }
+    (task,) = sky.tasks
+    assert task.kwargs == {
+        "name": "iw-custom-svc",
+        "setup": "pip install uv\nmkdir -p /models",
+        "run": shlex.join(argv),
+        "envs": {"MODEL_DIR": "/models", "CUSTOM_PORT": "9090"},
+        "workdir": None,
+    }
+    assert shlex.split(task.kwargs["run"]) == argv
+    assert sky.resources == [
+        {
+            "accelerators": "A100-80GB:2",
+            "ports": [9090],
+            "use_spot": False,
+            "image_id": digest_image,
+            "cloud": "cloud:runpod",
+        }
+    ]
+    assert sky.call("endpoints") == (("iw-custom-svc",), {"port": 9090})
+
+
+def test_main_launch_accepts_structured_run_args_and_quotes_tokens(
+    monkeypatch, capsys, sky, home
+):
+    """When payload provides structured run_args, op_launch shell-quotes every token and ignores run."""
+    import shlex
+
+    argv = ["/bin/server", "--arg", "space & $(rm -rf /)", "--empty", ""]
+    payload = {
+        **LAUNCH_PAYLOAD,
+        "run": "echo ignored && touch /tmp/bad",
+        "run_args": argv,
+    }
+
+    code, message = run_main(monkeypatch, capsys, {"op": "launch", "payload": payload})
+
+    assert code == 0
+    assert message["ok"] is True
+    (task,) = sky.tasks
+    assert task.kwargs["run"] == shlex.join(argv)
+    assert shlex.split(task.kwargs["run"]) == argv
+    assert "ignored" not in task.kwargs["run"]
+
+
+@pytest.mark.parametrize(
+    "bad_payload_patch",
+    [
+        {"run": ""},
+        {"run": "   "},
+        {"run": None},
+        {"run_args": []},
+        {"run_args": [""]},
+        {"run_args": ["   ", "--port", "8000"]},
+        {"run_args": ["LD_PRELOAD=/tmp/evil.so", "python3"]},
+        {"run_args": ["python", 123]},
+    ],
+)
+def test_main_launch_rejects_empty_or_invalid_run_command_before_sky_launch(
+    monkeypatch, capsys, sky, home, bad_payload_patch
+):
+    """Worker refuses to launch a SkyPilot cluster when run or run_args is empty or invalid."""
+    payload = {**LAUNCH_PAYLOAD, **bad_payload_patch}
+
+    code, message = run_main(monkeypatch, capsys, {"op": "launch", "payload": payload})
+
+    assert code == 1
+    assert message["ok"] is False
+    assert message["error"]["kind"] == "invalid_request"
+    assert message["error"]["resource_may_exist"] is False
+    assert sky.tasks == []
+    assert sky.calls == []

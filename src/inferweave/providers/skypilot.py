@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -21,7 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from inferweave.accounts.models import ProviderAccount
-from inferweave.core.exceptions import ProviderOperationError, ProviderPlatformError
+from inferweave.core.credentials import is_sensitive_key
+from inferweave.core.exceptions import (
+    DeploymentError,
+    ProviderOperationError,
+    ProviderPlatformError,
+)
 from inferweave.core.failures import FailureKind
 from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.domain.lifecycle import AutostopAction
@@ -45,6 +51,18 @@ POOLED_CLOUDS = frozenset({"runpod", "vast"})
 _PORT_BASE = 47000
 _PORT_SLOTS = 1000
 _ports_lock = threading.Lock()
+
+
+class SkyPilotConfigurationError(DeploymentError, ValueError):
+    """Raised when a runtime or container specification is invalid for SkyPilot."""
+
+
+def _uses_inferweave_worker(run_args: list[str]) -> bool:
+    """Whether the launch argv invokes an in-tree inferweave Python module."""
+    return any(
+        arg == "inferweave" or arg.startswith("inferweave.")
+        for arg in run_args
+    )
 
 
 def resolve_worker_workdir(
@@ -134,6 +152,115 @@ class SkyPilotProvider(ComputeProvider):
                 f"  2. Use a native Windows-compatible provider like Modal: `provider='modal'`"
             )
 
+    @staticmethod
+    def _validate_runtime(profile: ModelProfile, runtime: RuntimeSpec) -> list[str]:
+        """Validates runtime image, port, Python metadata, setup, env vars, and structured argv for SkyPilot."""
+        is_container = runtime.name == "container" or profile.container is not None
+
+        if not isinstance(runtime.docker_image, str):
+            raise SkyPilotConfigurationError(
+                f"SkyPilot runtime.docker_image must be a string, got {type(runtime.docker_image).__name__}."
+            )
+        stripped_image = runtime.docker_image.strip()
+        if is_container and not stripped_image:
+            raise SkyPilotConfigurationError(
+                f"SkyPilot container deployments require a non-empty container image reference, "
+                f"got {runtime.docker_image!r}."
+            )
+        if runtime.docker_image and (
+            not stripped_image
+            or stripped_image == "docker:"
+            or any(c.isspace() for c in stripped_image)
+        ):
+            raise SkyPilotConfigurationError(
+                f"SkyPilot container image reference cannot be whitespace or contain whitespace, "
+                f"got {runtime.docker_image!r}."
+            )
+
+        if runtime.add_python is not None:
+            if not isinstance(runtime.add_python, str):
+                raise SkyPilotConfigurationError(
+                    f"SkyPilot runtime.add_python must be a string or None, got {type(runtime.add_python).__name__}."
+                )
+            cleaned_py = runtime.add_python.strip()
+            if not cleaned_py or not re.fullmatch(r"^\d+(\.\d+)*$", cleaned_py):
+                raise SkyPilotConfigurationError(
+                    f"Invalid Python version string {runtime.add_python!r} in runtime.add_python; "
+                    "expected format like '3.12'."
+                )
+
+        if (
+            isinstance(runtime.port, bool)
+            or not isinstance(runtime.port, int)
+            or runtime.port < 1
+            or runtime.port > 65535
+        ):
+            raise SkyPilotConfigurationError(
+                f"SkyPilot runtime.port must be an integer from 1 to 65535, got {runtime.port!r}."
+            )
+
+        if runtime.healthcheck is not None and runtime.port != runtime.healthcheck.port:
+            raise SkyPilotConfigurationError(
+                f"Inconsistent configuration: runtime.port ({runtime.port}) and "
+                f"runtime.healthcheck.port ({runtime.healthcheck.port}) must match."
+            )
+
+        if (
+            profile.container is not None
+            and profile.healthcheck is not None
+            and runtime.port != profile.healthcheck.port
+        ):
+            raise SkyPilotConfigurationError(
+                f"Inconsistent configuration: runtime.port ({runtime.port}) and "
+                f"profile.healthcheck.port ({profile.healthcheck.port}) must match."
+            )
+
+        if not isinstance(runtime.setup_commands, (list, tuple)) or any(
+            not isinstance(cmd, str) for cmd in runtime.setup_commands
+        ):
+            raise SkyPilotConfigurationError(
+                "SkyPilot runtime.setup_commands must be a list of strings."
+            )
+
+        if not isinstance(runtime.env_vars, dict):
+            raise SkyPilotConfigurationError(
+                f"SkyPilot runtime.env_vars must be a dict, got {type(runtime.env_vars).__name__}."
+            )
+        for k, v in runtime.env_vars.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise SkyPilotConfigurationError(
+                    "SkyPilot environment variable keys and values must be strings."
+                )
+            if is_container and is_sensitive_key(k):
+                raise SkyPilotConfigurationError(
+                    f"Platform credentials and sensitive keys are forbidden in SkyPilot container env_vars: '{k}'"
+                )
+
+        if not isinstance(runtime.run_args, (list, tuple)) or not runtime.run_args:
+            raise SkyPilotConfigurationError(
+                "SkyPilot deployments require non-empty command argv (runtime.run_args / container.args); "
+                "SkyPilot Task.run requires an explicit launch command and cannot execute an empty argv."
+            )
+
+        for item in runtime.run_args:
+            if not isinstance(item, str):
+                raise SkyPilotConfigurationError(
+                    f"Each argument in runtime.run_args must be a string, got {type(item).__name__}."
+                )
+
+        if not runtime.run_args[0].strip():
+            raise SkyPilotConfigurationError(
+                "SkyPilot runtime.run_args executable (argv[0]) cannot be empty or whitespace."
+            )
+
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", runtime.run_args[0].strip()):
+            raise SkyPilotConfigurationError(
+                f"SkyPilot runtime.run_args executable (argv[0]) must be a command or path, "
+                f"not a shell variable assignment: {runtime.run_args[0]!r}."
+            )
+
+        return list(runtime.run_args)
+
     def new_deployment_id(self, profile: ModelProfile) -> str:
         return f"iw-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
 
@@ -152,6 +279,7 @@ class SkyPilotProvider(ComputeProvider):
         runtime: RuntimeSpec,
         account: ProviderAccount,
     ) -> None:
+        self._validate_runtime(profile, runtime)
         if request.dry_run:
             return
         self._ensure_supported_platform()
@@ -241,12 +369,14 @@ class SkyPilotProvider(ComputeProvider):
     ) -> dict[str, Any]:
         """Translates ModelProfile and RuntimeSpec into the worker's SkyPilot task spec."""
         assert record.resource is not None
+        run_args = self._validate_runtime(profile, runtime)
+        hardware = runtime.hardware or profile.hardware
         gpu_spec = request.gpu_type or (
-            profile.hardware.recommended_gpus[0]
-            if profile.hardware.recommended_gpus
+            hardware.recommended_gpus[0]
+            if hardware.recommended_gpus
             else "A10G"
         )
-        gpu_count = request.num_gpus or profile.hardware.gpu_count
+        gpu_count = request.num_gpus or hardware.gpu_count
         provider_opts = request.options.provider if request.options else None
         workdir = None
         if provider_opts and provider_opts.extra_provider_args:
@@ -255,8 +385,8 @@ class SkyPilotProvider(ComputeProvider):
         # SkyPilot's Task.run is a shell string. It is built exclusively from the structured
         # argv (every token shell-quoted), never from the free-form run_command, so model IDs,
         # engine args and extra_cli_args stay literal arguments instead of shell fragments.
-        run_script = shlex.join(runtime.run_args)
-        if workdir is None and "inferweave" in run_script:
+        run_script = shlex.join(run_args)
+        if workdir is None and _uses_inferweave_worker(run_args):
             workdir = resolve_worker_workdir()
 
         task_envs = dict(runtime.env_vars) if runtime.env_vars else {}
@@ -283,7 +413,10 @@ class SkyPilotProvider(ComputeProvider):
             "use_spot": provider_opts.allow_spot if provider_opts else True,
         }
         if runtime.docker_image:
-            resources["image_id"] = f"docker:{runtime.docker_image}"
+            image_ref = runtime.docker_image.strip()
+            resources["image_id"] = (
+                image_ref if image_ref.startswith("docker:") else f"docker:{image_ref}"
+            )
         if provider_opts and provider_opts.preferred_regions:
             resources["region"] = provider_opts.preferred_regions[0]
         if provider_opts and provider_opts.disk_size_gb:
@@ -313,9 +446,14 @@ class SkyPilotProvider(ComputeProvider):
         runtime: RuntimeSpec,
         account: ProviderAccount,
     ) -> ProvisionResult:
+        try:
+            payload = self.launch_payload(record, request, profile, runtime)
+        except BaseException:
+            record.creation_may_continue = False
+            raise
         result = await self._run(
             "launch",
-            self.launch_payload(record, request, profile, runtime),
+            payload,
             account,
             timeout=3600,
             deployment_id=record.id,
