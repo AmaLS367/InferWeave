@@ -740,24 +740,20 @@ def test_model_profile_rejects_secret_in_required_identity_id():
     """Verifies that ModelProfile safely rejects secret tokens in required identity field 'id'."""
     from inferweave.models.profile import ModelProfile
 
-    # Reject known secret prefixes / patterns
-    with pytest.raises(ValueError, match="contains sensitive credentials or patterns"):
-        ModelProfile.for_container(
-            id="sk-secret-token-1234567890",
-            image="alpine:latest",
-        )
-
-    with pytest.raises(ValueError, match="contains sensitive credentials or patterns"):
-        ModelProfile.for_container(
-            id="hf_abcxyz1234567890",
-            image="alpine:latest",
-        )
-
-    with pytest.raises(ValueError, match="contains sensitive credentials or patterns"):
-        ModelProfile.for_container(
-            id="ghp_abc1234567890",
-            image="alpine:latest",
-        )
+    # Reject known secret prefixes / patterns without leaking them
+    for secret in (
+        "sk-secret-token-1234567890",
+        "hf_abcxyz1234567890",
+        "ghp_abc1234567890",
+    ):
+        with pytest.raises(ValueError, match="contains sensitive credentials or patterns") as exc_info:
+            ModelProfile.for_container(
+                id=secret,
+                image="alpine:latest",
+            )
+        err = exc_info.value
+        assert secret not in str(err)
+        assert secret not in repr(err)
 
     with pytest.raises(ValueError, match="cannot contain redaction markers"):
         ModelProfile.for_container(
@@ -782,9 +778,171 @@ def test_model_profile_rejects_secret_in_required_identity_id():
     )
     assert p2.id == "custom/secret-sharing-scheme"
 
-    # If explicitly known secret matches ID, to_sanitized must refuse to sanitize with ValueError
-    with pytest.raises(ValueError, match="cannot be safely sanitized without breaking required identity"):
+    # If explicitly known secret matches ID, to_sanitized must refuse to sanitize with ValueError without leaking
+    with pytest.raises(ValueError, match="cannot be safely sanitized without breaking required identity") as exc_info:
         p1.to_sanitized(secrets=["token-classifier"])
+    assert "token-classifier" not in str(exc_info.value)
+    assert "token-classifier" not in repr(exc_info.value)
+
+
+def test_model_profile_id_validation_error_redacts_credentials_in_message_and_input_value():
+    """Verifies secret-bearing model IDs never leak through ValueError or Pydantic ValidationError."""
+    import traceback
+
+    from pydantic import ValidationError
+
+    from inferweave.models.enums import WorkloadType
+    from inferweave.models.profile import HardwareRequirements, ModelProfile
+
+    secret_candidates = [
+        "sk-proj-secret-token-1234567890",
+        "hf_abcxyz12345678901234567890",
+        "ghp_abcdefghijklmnopqrstuvwxyz1234",
+        "github_pat_11AAAAAAA0000000000000_1234567890",
+        "AKIAIOSFODNN7EXAMPLE",
+        "xoxb-123456789012-345678901234-abcdef123456",
+        "SENTINEL-adversarial-model-secret-key",
+    ]
+
+    for secret in secret_candidates:
+        # 1. for_container factory
+        with pytest.raises(ValidationError) as exc_info:
+            ModelProfile.for_container(id=secret, image="alpine:latest")
+        err = exc_info.value
+        err_str = str(err)
+        err_repr = repr(err)
+        err_json = err.json()
+        assert secret not in err_str, f"Secret leaked in str(ValidationError): {err_str}"
+        assert secret not in err_repr, f"Secret leaked in repr(ValidationError): {err_repr}"
+        assert secret not in str(err.errors()), f"Secret leaked in errors(): {err.errors()}"
+        assert secret not in err_json, f"Secret leaked in json(): {err_json}"
+        assert err.errors()[0]["input"] == "[REDACTED]"
+        assert "[REDACTED]" in err_str
+
+        # Traceback format check
+        tb_str = "".join(traceback.format_exception(err))
+        assert secret not in tb_str, f"Secret leaked in traceback: {tb_str}"
+
+        # 2. Direct constructor
+        with pytest.raises(ValidationError) as exc_info:
+            ModelProfile(
+                id=secret,
+                name="test-model",
+                workload_type=WorkloadType.CUSTOM,
+                default_runtime="container",
+                hardware=HardwareRequirements(min_vram_gb=0),
+            )
+        err2 = exc_info.value
+        assert secret not in str(err2)
+        assert secret not in repr(err2)
+        assert secret not in str(err2.errors())
+        assert err2.errors()[0]["input"] == "[REDACTED]"
+
+        # 3. model_validate with full payload
+        with pytest.raises(ValidationError) as exc_info:
+            ModelProfile.model_validate(
+                {
+                    "id": secret,
+                    "name": "test-model",
+                    "workload_type": "custom",
+                    "default_runtime": "container",
+                    "hardware": {"min_vram_gb": 0},
+                }
+            )
+        err3 = exc_info.value
+        assert secret not in str(err3)
+        assert secret not in repr(err3)
+        assert secret not in str(err3.errors())
+        assert err3.errors()[0]["input"] == "[REDACTED]"
+
+        # 4. model_validate_json
+        payload_json = (
+            f'{{"id": "{secret}", "name": "test-model", "workload_type": "custom", '
+            f'"default_runtime": "container", "hardware": {{"min_vram_gb": 0}}}}'
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            ModelProfile.model_validate_json(payload_json)
+        err4 = exc_info.value
+        assert secret not in str(err4)
+        assert secret not in repr(err4)
+        assert secret not in str(err4.errors())
+        assert err4.errors()[0]["input"] == "[REDACTED]"
+
+        # 5. Direct classmethod validator call
+        with pytest.raises(ValueError, match="contains sensitive credentials or patterns") as val_info:
+            ModelProfile._validate_id(secret)
+        assert secret not in str(val_info.value)
+        assert secret not in repr(val_info.value)
+
+
+def test_model_profile_missing_fields_with_secret_id_does_not_leak_in_pydantic_context():
+    """Verifies that missing field errors in Pydantic do not leak secret ID from context dict."""
+    from pydantic import ValidationError
+
+    from inferweave.models.profile import ModelProfile
+
+    secret = "sk-leaking-context-secret-999"
+    with pytest.raises(ValidationError) as exc_info:
+        ModelProfile.model_validate({"id": secret})
+
+    err = exc_info.value
+    err_str = str(err)
+    err_repr = repr(err)
+    err_errors = str(err.errors())
+    err_json = err.json()
+
+    assert secret not in err_str, f"Secret leaked in missing-field str(e): {err_str}"
+    assert secret not in err_repr, f"Secret leaked in missing-field repr(e): {err_repr}"
+    assert secret not in err_errors, f"Secret leaked in missing-field errors(): {err_errors}"
+    assert secret not in err_json, f"Secret leaked in missing-field json(): {err_json}"
+
+    for error_detail in err.errors():
+        inp = error_detail.get("input")
+        if isinstance(inp, dict):
+            assert inp.get("id") == "[REDACTED]"
+        elif error_detail.get("loc") == ("id",):
+            assert inp == "[REDACTED]"
+
+
+def test_model_profile_ambient_env_credentials_rejected_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verifies ambient platform credentials in model ID are rejected and redacted in errors."""
+    from pydantic import ValidationError
+
+    from inferweave.models.profile import ModelProfile
+
+    ambient_secret = "SENTINEL-ambient-modal-credential-123"
+    monkeypatch.setenv("MODAL_TOKEN_ID", ambient_secret)
+
+    with pytest.raises(ValidationError) as exc_info:
+        ModelProfile.for_container(
+            id=f"custom/model-{ambient_secret}",
+            image="alpine:latest",
+        )
+
+    err = exc_info.value
+    assert ambient_secret not in str(err)
+    assert ambient_secret not in repr(err)
+    assert ambient_secret not in str(err.errors())
+    assert err.errors()[0]["input"] == "[REDACTED]"
+
+
+def test_model_profile_to_sanitized_does_not_leak_secret_in_value_error():
+    """Verifies to_sanitized ValueError does not leak secret model ID in exception message."""
+    from inferweave.models.profile import ModelProfile
+
+    secret_name = "secret-classified-name"
+    p = ModelProfile.for_container(
+        id=f"custom/{secret_name}",
+        image="alpine:latest",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        p.to_sanitized(secrets=[secret_name])
+
+    err = exc_info.value
+    assert secret_name not in str(err)
+    assert secret_name not in repr(err)
 
 
 @pytest.mark.asyncio

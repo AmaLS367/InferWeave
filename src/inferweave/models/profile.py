@@ -8,10 +8,12 @@ from pydantic import (
     BaseModel,
     Field,
     FieldSerializationInfo,
+    ValidationError,
     field_serializer,
     field_validator,
     model_validator,
 )
+from pydantic_core import InitErrorDetails
 
 from inferweave.core.credentials import (
     _REDACTED,
@@ -378,9 +380,80 @@ class ModelProfile(BaseModel):
             raise ValueError("ModelProfile id cannot contain redaction markers")
         if sanitize_text(stripped) != stripped:
             raise ValueError(
-                f"ModelProfile id contains sensitive credentials or patterns: {value!r}"
+                "ModelProfile id contains sensitive credentials or patterns"
             )
         return stripped
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _sanitize_validation_errors(cls, v: Any, handler: Any) -> Any:
+        try:
+            return handler(v)
+        except ValidationError as exc:
+            new_errors: list[InitErrorDetails] = []
+            for err in exc.errors():
+                loc = err.get("loc", ())
+                raw_input = err.get("input")
+                err_type = err.get("type", "value_error")
+                msg = err.get("msg", "")
+
+                if isinstance(raw_input, str):
+                    if sanitize_text(raw_input) != raw_input:
+                        sanitized_input: Any = _REDACTED
+                    else:
+                        sanitized_input = raw_input
+                elif isinstance(raw_input, dict):
+                    sanitized_dict = dict(raw_input)
+                    if (
+                        "id" in sanitized_dict
+                        and isinstance(sanitized_dict["id"], str)
+                        and (
+                            sanitize_text(sanitized_dict["id"]) != sanitized_dict["id"]
+                            or contains_redacted(sanitized_dict["id"])
+                        )
+                    ):
+                        sanitized_dict["id"] = _REDACTED
+                    sanitized_input = sanitize_metadata(sanitized_dict)
+                elif isinstance(raw_input, (list, tuple)):
+                    sanitized_input = [
+                        _REDACTED
+                        if isinstance(item, str) and sanitize_text(item) != item
+                        else (sanitize_metadata(item) if isinstance(item, dict) else item)
+                        for item in raw_input
+                    ]
+                else:
+                    sanitized_input = raw_input
+
+                if loc == ("id",) and "contains sensitive credentials or patterns" in msg:
+                    sanitized_input = _REDACTED
+
+                sanitized_msg = sanitize_text(msg)
+
+                ctx = dict(err.get("ctx") or {})
+                if "error" in ctx:
+                    inner_err = ctx["error"]
+                    if isinstance(inner_err, Exception):
+                        clean_err_msg = sanitize_text(str(inner_err))
+                        ctx["error"] = type(inner_err)(clean_err_msg)
+                    elif isinstance(inner_err, str):
+                        ctx["error"] = ValueError(sanitize_text(inner_err))
+                elif err_type in ("value_error", "assertion_error"):
+                    clean_msg = sanitized_msg.removeprefix("Value error, ")
+                    ctx["error"] = ValueError(clean_msg)
+
+                for k, val in list(ctx.items()):
+                    if k != "error" and isinstance(val, str):
+                        ctx[k] = sanitize_text(val)
+
+                new_errors.append(
+                    InitErrorDetails(
+                        type=err_type,
+                        loc=loc,
+                        input=sanitized_input,
+                        ctx=ctx,
+                    )
+                )
+            raise ValidationError.from_exception_data(cls.__name__, new_errors) from None
 
     @model_validator(mode="after")
     def _validate_container_profile(self) -> "ModelProfile":
@@ -459,7 +532,7 @@ class ModelProfile(BaseModel):
         secret_tuple = known_secret_values(secrets)
         if sanitize_text(self.id, secret_tuple) != self.id:
             raise ValueError(
-                f"ModelProfile id '{self.id}' contains sensitive credentials and cannot "
+                "ModelProfile id contains sensitive credentials and cannot "
                 "be safely sanitized without breaking required identity."
             )
         copy_prof = self.model_copy(deep=True)
