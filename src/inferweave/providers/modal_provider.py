@@ -8,14 +8,19 @@ letting Modal resolve ``MODAL_TOKEN_*`` / ``~/.modal.toml`` exactly as it does n
 
 import asyncio
 import logging
-import shlex
+import re
 import threading
 import uuid
 from typing import Any
 
 from inferweave.accounts.models import ProviderAccount
 from inferweave.adapters.auth import default_endpoint_auth
-from inferweave.core.exceptions import ProviderAuthError, ProviderOperationError
+from inferweave.core.credentials import is_sensitive_key
+from inferweave.core.exceptions import (
+    DeploymentError,
+    ProviderAuthError,
+    ProviderOperationError,
+)
 from inferweave.core.failures import FailureKind, retry_after_from_error
 from inferweave.domain.deployment_record import DeploymentRecord, ResourceRef
 from inferweave.domain.lifecycle import AutostopAction
@@ -42,6 +47,10 @@ _ERROR_KINDS = {
     "ImageBuildError": FailureKind.INVALID_REQUEST,
     "VersionError": FailureKind.INVALID_REQUEST,
 }
+
+
+class ModalConfigurationError(DeploymentError, ValueError):
+    """Raised when a runtime or container specification is invalid for Modal."""
 
 
 class ModalProvider(ComputeProvider):
@@ -84,6 +93,88 @@ class ModalProvider(ComputeProvider):
                 "Modal SDK is not installed. Install it via: pip install 'inferweave[modal]'"
             ) from e
 
+    @staticmethod
+    def _validate_runtime(profile: ModelProfile, runtime: RuntimeSpec) -> list[str]:
+        """Validates runtime image, port, Python injection, env vars, and structured argv for Modal."""
+        if (
+            not isinstance(runtime.docker_image, str)
+            or not runtime.docker_image.strip()
+            or any(c.isspace() for c in runtime.docker_image.strip())
+        ):
+            raise ModalConfigurationError(
+                f"Modal deployments require a non-empty container image reference without whitespace, "
+                f"got {runtime.docker_image!r}."
+            )
+
+        if runtime.add_python is not None:
+            if not isinstance(runtime.add_python, str):
+                raise ModalConfigurationError(
+                    f"Modal runtime.add_python must be a string or None, got {type(runtime.add_python).__name__}."
+                )
+            cleaned_py = runtime.add_python.strip()
+            if not cleaned_py or not re.fullmatch(r"^\d+(\.\d+)*$", cleaned_py):
+                raise ModalConfigurationError(
+                    f"Invalid Python version string {runtime.add_python!r} for Modal add_python; "
+                    "expected format like '3.12'."
+                )
+
+        if (
+            isinstance(runtime.port, bool)
+            or not isinstance(runtime.port, int)
+            or runtime.port < 1
+            or runtime.port > 65535
+        ):
+            raise ModalConfigurationError(
+                f"Modal runtime.port must be an integer from 1 to 65535, got {runtime.port!r}."
+            )
+
+        if runtime.healthcheck is not None and runtime.port != runtime.healthcheck.port:
+            raise ModalConfigurationError(
+                f"Inconsistent configuration: runtime.port ({runtime.port}) and "
+                f"runtime.healthcheck.port ({runtime.healthcheck.port}) must match."
+            )
+
+        if (
+            profile.container is not None
+            and profile.healthcheck is not None
+            and runtime.port != profile.healthcheck.port
+        ):
+            raise ModalConfigurationError(
+                f"Inconsistent configuration: runtime.port ({runtime.port}) and "
+                f"profile.healthcheck.port ({profile.healthcheck.port}) must match."
+            )
+
+        if (runtime.name == "container" or profile.container is not None) and runtime.env_vars:
+            for k, v in runtime.env_vars.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise ModalConfigurationError(
+                        "Modal container environment variable keys and values must be strings."
+                    )
+                if is_sensitive_key(k):
+                    raise ModalConfigurationError(
+                        f"Platform credentials and sensitive keys are forbidden in Modal container env_vars: '{k}'"
+                    )
+
+        if not isinstance(runtime.run_args, (list, tuple)) or not runtime.run_args:
+            raise ModalConfigurationError(
+                "Modal deployments require non-empty command argv (runtime.run_args / container.args); "
+                "Modal clears the container image entrypoint (ENTRYPOINT) for its web_server harness "
+                "and cannot execute an empty argv."
+            )
+
+        for item in runtime.run_args:
+            if not isinstance(item, str):
+                raise ModalConfigurationError(
+                    f"Each argument in runtime.run_args must be a string, got {type(item).__name__}."
+                )
+
+        if not runtime.run_args[0].strip():
+            raise ModalConfigurationError(
+                "Modal runtime.run_args executable (argv[0]) cannot be empty or whitespace."
+            )
+
+        return list(runtime.run_args)
+
     def new_deployment_id(self, profile: ModelProfile) -> str:
         return f"iw-modal-{profile.id.replace('/', '-').lower()}-{uuid.uuid4().hex[:6]}"
 
@@ -103,6 +194,7 @@ class ModalProvider(ComputeProvider):
         account: ProviderAccount,
     ) -> None:
         self._get_modal_module()
+        self._validate_runtime(profile, runtime)
         requires_proxy_auth = (
             request.options.provider.requires_proxy_auth if request.options else True
         )
@@ -208,7 +300,12 @@ class ModalProvider(ComputeProvider):
         account: ProviderAccount,
     ) -> ProvisionResult:
         """Configures and launches a serverless deployment on Modal."""
-        modal = self._get_modal_module()
+        try:
+            modal = self._get_modal_module()
+            run_args = self._validate_runtime(profile, runtime)
+        except BaseException:
+            record.creation_may_continue = False
+            raise
         assert record.resource is not None
         app_name = record.resource.name
         environment = record.resource.scope
@@ -217,11 +314,16 @@ class ModalProvider(ComputeProvider):
         )
 
         # Build container image dynamically from runtime template spec
-        image = modal.Image.from_registry(
-            runtime.docker_image,
-            setup_dockerfile_commands=runtime.metadata.get(
+        from_registry_kwargs: dict[str, Any] = {
+            "setup_dockerfile_commands": runtime.metadata.get(
                 "modal_setup_dockerfile_commands", []
             ),
+        }
+        if runtime.add_python is not None:
+            from_registry_kwargs["add_python"] = runtime.add_python.strip()
+        image = modal.Image.from_registry(
+            runtime.docker_image.strip(),
+            **from_registry_kwargs,
         ).entrypoint([])
         if runtime.setup_commands:
             image = image.run_commands(*runtime.setup_commands)
@@ -237,12 +339,13 @@ class ModalProvider(ComputeProvider):
         app = modal.App(name=app_name)
 
         # Map hardware to Modal GPU specification
+        hardware = runtime.hardware or profile.hardware
         gpu_type = request.gpu_type or (
-            profile.hardware.recommended_gpus[0]
-            if profile.hardware.recommended_gpus
+            hardware.recommended_gpus[0]
+            if hardware.recommended_gpus
             else "A10G"
         )
-        gpu_count = request.num_gpus or profile.hardware.gpu_count
+        gpu_count = request.num_gpus or hardware.gpu_count
         gpu_spec = f"{gpu_type}:{gpu_count}" if gpu_count > 1 else gpu_type
 
         # Configure container scaling and timeout parameters from options
@@ -273,13 +376,6 @@ class ModalProvider(ComputeProvider):
             if "memory" in provider_opts.extra_provider_args:
                 fn_kwargs["memory"] = provider_opts.extra_provider_args["memory"]
 
-        # Structured argv execution without shell interpretation
-        run_args = (
-            list(runtime.run_args)
-            if runtime.run_args
-            else shlex.split(runtime.run_command)
-        )
-
         # Register containerized web server function listening on runtime port
         @app.function(**fn_kwargs)
         @modal.web_server(
@@ -290,7 +386,7 @@ class ModalProvider(ComputeProvider):
         def serve() -> None:
             import subprocess
 
-            subprocess.Popen(run_args, shell=False)
+            subprocess.Popen(list(run_args), shell=False)
 
         def _deploy_sync() -> str | None:
             client = self._client(account)
