@@ -5,10 +5,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState, WorkloadType
+from inferweave.models.routing import InstanceOffer
+from inferweave.models.usage import UsageReport
 
 if TYPE_CHECKING:
     from inferweave.clients.audio import ReferenceAudio
@@ -17,6 +19,8 @@ if TYPE_CHECKING:
 
 class DeploymentRequest(BaseModel):
     """User request specification for deploying a model."""
+
+    _selected_offer: InstanceOffer | None = PrivateAttr(default=None)
 
     model: str = Field(..., description="Target model name or HuggingFace ID")
     provider: str = Field(
@@ -99,6 +103,7 @@ class Deployment:
         last_activity_fn: Callable[[], datetime | None] | None = None,
         workload_type: WorkloadType | None = None,
         inference_client: "InferenceClient | None" = None,
+        usage_fn: Callable[[float | None], Coroutine[Any, Any, UsageReport]] | None = None,
     ) -> None:
         self._status = status
         self._owner_fingerprint: str | None = None
@@ -112,6 +117,17 @@ class Deployment:
         self._last_activity_fn = last_activity_fn
         self._workload_type = workload_type
         self._inference_client = inference_client
+        self._usage_fn = usage_fn
+
+    async def usage(self, *, compute_seconds: float | None = None) -> UsageReport:
+        """Reads persisted usage and an optional catalog-based compute duration scenario.
+
+        No provider billing is queried. Without an externally supplied duration, live
+        compute cost is unknown. The supplied seconds are per allocation, not GPU-seconds.
+        """
+        if self._usage_fn is None:
+            raise RuntimeError("No usage reader configured for this deployment.")
+        return await self._usage_fn(compute_seconds)
 
     @property
     def id(self) -> str:

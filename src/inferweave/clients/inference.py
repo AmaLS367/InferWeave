@@ -1,7 +1,9 @@
 """Unified inference client: workload validation, activity tracking, and client dispatch."""
 
+import asyncio
 import inspect
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -10,6 +12,11 @@ import httpx
 
 from inferweave.clients.audio import FishSpeechClient, ReferenceAudio
 from inferweave.clients.image import ImageGenerationClient
+from inferweave.clients.metering import (
+    TransferMeasurement,
+    UsageDelta,
+    current_transfer,
+)
 from inferweave.clients.transport import InferenceTransport
 from inferweave.core.exceptions import UnsupportedWorkloadError
 from inferweave.models.enums import WorkloadType
@@ -44,6 +51,8 @@ class InferenceClient:
         on_activity: ActivityCallback | None = None,
         on_request_start: Callable[[], None] | None = None,
         on_request_end: Callable[[], None] | None = None,
+        on_usage: Callable[[UsageDelta], Awaitable[None]] | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.deployment_id = deployment_id
         self.workload_type = workload_type
@@ -51,6 +60,8 @@ class InferenceClient:
         self._on_activity = on_activity
         self._on_request_start = on_request_start
         self._on_request_end = on_request_end
+        self._on_usage = on_usage
+        self._clock = clock
         self._audio = FishSpeechClient(transport)
         self._image = ImageGenerationClient(transport)
 
@@ -79,13 +90,58 @@ class InferenceClient:
 
     @asynccontextmanager
     async def _activity(self) -> AsyncIterator[None]:
+        measurement = TransferMeasurement()
+        token = current_transfer.set(measurement)
+        started_at = self._clock()
+        recorded_start = False
+        outcome = "failures"
         self._notify(self._on_request_start)
         try:
+            recorded_start, interrupted = await self._persist_usage(UsageDelta(requests=1))
+            if interrupted:
+                raise asyncio.CancelledError
             await self._report_activity()
             yield
+            outcome = "successes"
+        except asyncio.CancelledError:
+            outcome = "cancellations"
+            raise
         finally:
+            current_transfer.reset(token)
             self._notify(self._on_request_end)
+            if recorded_start:
+                delta = UsageDelta(
+                    **{outcome: 1},
+                    total_latency_seconds=max(0, self._clock() - started_at),
+                    request_body_bytes=measurement.request_body_bytes,
+                    response_body_bytes=measurement.response_body_bytes,
+                    incomplete_transfers=int(measurement.incomplete),
+                )
+                _, interrupted = await self._persist_usage(delta)
+                if interrupted:
+                    raise asyncio.CancelledError
             await self._report_activity()
+
+    async def _persist_usage(self, delta: UsageDelta) -> tuple[bool, bool]:
+        """Drain storage even under repeated cancellation; never retry a committed increment."""
+        task = asyncio.create_task(self._record_usage(delta))
+        interrupted = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                interrupted = True
+        return task.result(), interrupted
+
+    async def _record_usage(self, delta: UsageDelta) -> bool:
+        if self._on_usage is None:
+            return False
+        try:
+            await self._on_usage(delta)
+            return True
+        except Exception as err:  # noqa: BLE001 - metering must preserve inference behavior
+            logger.warning("Usage persistence failed (%s).", type(err).__name__)
+            return False
 
     def _notify(self, callback: Callable[[], None] | None) -> None:
         if callback is None:

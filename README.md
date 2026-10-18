@@ -132,7 +132,7 @@ drives all providers. `inferweave[all]` retains SkyPilot, Modal and workers; it 
 - [Handle cold starts](docs/how-to/handle-cold-starts.md)
 - [Long-lived services](docs/how-to/run-in-a-long-lived-service.md)
 - [API](docs/reference/client-api.md), [configuration](docs/reference/configuration.md), [models](docs/reference/supported-models.md)
-- [Architecture](docs/explanation/architecture.md), [lifecycle and cost](docs/explanation/lifecycle-and-cost.md)
+- [Architecture](docs/explanation/architecture.md), [lifecycle and cost](docs/explanation/lifecycle-and-cost.md), [usage metering and estimates](docs/reference/client-api.md#usage-and-estimates)
 - [Runnable examples](examples/README.md), [roadmap](docs/ROADMAP.md), [changelog](CHANGELOG.md)
 
 ## 🏗️ Architecture

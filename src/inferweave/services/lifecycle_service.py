@@ -167,13 +167,7 @@ class LifecycleService:
                 record.profile_snapshot = {"__invalid_snapshot__": True}
         self._last_persisted_activity[deployment.id] = current_time
 
-        # Synchronous write for fast in-memory availability
-        if hasattr(self._repository, "_records"):
-            self._repository._records[record.id] = record.to_sanitized_record(
-                self._accounts.secret_values()
-            )
-
-        await self._repository.save(record)
+        await self._repository.save(record.to_sanitized_record(self._accounts.secret_values()))
 
         if schedule_watchdog:
             await self._schedule_watchdog(deployment.id, policy)
@@ -232,8 +226,13 @@ class LifecycleService:
         self._last_persisted_activity[record.id] = last_activity
 
         if record.last_activity_at is None:
-            record.last_activity_at = last_activity
-            await self._repository.save(record)
+            def backfill(current: DeploymentRecord) -> None:
+                if current.last_activity_at is None:
+                    current.last_activity_at = last_activity
+            try:
+                await self._repository.update(record.id, backfill)
+            except NotImplementedError:
+                logger.warning("Repository lacks atomic updates; recovered activity was not persisted.")
 
         if schedule_watchdog:
             await self._schedule_watchdog(record.id, record.options.autostop)
@@ -253,11 +252,14 @@ class LifecycleService:
             < self._activity_persist_interval
         ):
             return
-        record = await self._repository.get(deployment_id)
-        if record is None or record.state == DeploymentState.STOPPED:
+        def touch(record: DeploymentRecord) -> None:
+            if record.state != DeploymentState.STOPPED:
+                record.last_activity_at = current_time
+        try:
+            await self._repository.update(deployment_id, touch)
+        except NotImplementedError:
+            logger.warning("Repository lacks atomic updates; activity was not persisted.")
             return
-        record.last_activity_at = current_time
-        await self._repository.save(record)
         self._last_persisted_activity[deployment_id] = current_time
 
     def begin_request(self, deployment_id: str) -> None:
@@ -408,6 +410,7 @@ class LifecycleService:
             if deployment and hasattr(deployment, "_status"):
                 deployment._status.state = DeploymentState.STOPPED
             record.mark_stopped(now=current_time)
+            record.last_stop_action = target_action
             record.needs_reconciliation = False
             await self._repository.save(record)
         except Exception as err:
@@ -751,6 +754,7 @@ class LifecycleService:
             )
             return False
         record.needs_reconciliation = False
+        record.resources_confirmed_absent_at = current_time
         await self._repository.save(record)
         return True
 

@@ -20,9 +20,11 @@ from inferweave.core.credentials import (
     sanitize_text,
 )
 from inferweave.core.exceptions import ModelNotFoundError
+from inferweave.domain.lifecycle import AutostopAction
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState, WorkloadType
 from inferweave.models.profile import ModelProfile
+from inferweave.models.usage import ComputePricing, DeploymentUsage
 
 __all__ = [
     "_REDACTED",
@@ -160,6 +162,10 @@ class DeploymentRecord(BaseModel):
     id: str = Field(..., description="Unique deployment identifier")
     model: str = Field(..., description="Model identifier or HuggingFace ID")
     provider: str = Field(..., description="Compute infrastructure provider name")
+    usage: DeploymentUsage | None = None  # None means historical usage was not tracked.
+    pricing: ComputePricing | None = None
+    last_stop_action: AutostopAction | None = None
+    resources_confirmed_absent_at: datetime | None = None
     account: str | None = Field(
         default=AMBIENT_ACCOUNT,
         description=(
@@ -349,6 +355,12 @@ class DeploymentRecord(BaseModel):
             sanitized.model = sanitize_text(sanitized.model, secret_tuple)
         if sanitized.provider:
             sanitized.provider = sanitize_text(sanitized.provider, secret_tuple)
+        if sanitized.pricing:
+            sanitized.pricing = sanitized.pricing.model_copy(update={
+                key: sanitize_text(value, secret_tuple)
+                for key, value in sanitized.pricing.model_dump().items()
+                if key in {"provider", "gpu_type", "instance_type", "region"} and isinstance(value, str)
+            })
         if sanitized.resource:
             if sanitized.resource.name:
                 sanitized.resource.name = sanitize_text(

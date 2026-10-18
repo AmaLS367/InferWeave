@@ -29,6 +29,7 @@ from inferweave.domain.lifecycle import AutostopPolicy
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
 from inferweave.models.enums import DeploymentState
 from inferweave.models.profile import ModelProfile
+from inferweave.models.usage import UsageReport
 from inferweave.ports.auth import EndpointAuthPort
 from inferweave.providers.base import ComputeProvider
 from inferweave.providers.router import ProviderRouter
@@ -40,6 +41,7 @@ from inferweave.services.provisioning_service import (
     ProvisionCandidate,
     ProvisioningService,
 )
+from inferweave.services.usage_service import UsageService
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,7 @@ class InferWeave:
         self.provisioning_service = ProvisioningService(
             self.accounts, self.lifecycle_service.repository
         )
+        self._usage_service = UsageService(self.lifecycle_service.repository, self.accounts)
         self._inference_config = inference_config
         self._inference_http_client = inference_http_client
         self._active_deployments: dict[str, Deployment] = {}
@@ -322,6 +325,7 @@ class InferWeave:
         produce identically behaving handles.
         """
         lifecycle = self.lifecycle_service
+        deployment._usage_fn = lambda seconds: self.get_usage(deployment.id, compute_seconds=seconds)
         deployment._autostop_mins = autostop_mins
         deployment._workload_type = profile.workload_type
         deployment._record_activity_fn = lambda: lifecycle.record_activity(deployment.id)
@@ -430,6 +434,7 @@ class InferWeave:
                 on_activity=lambda: lifecycle.touch_activity(deployment.id),
                 on_request_start=lambda: lifecycle.begin_request(deployment.id),
                 on_request_end=lambda: lifecycle.end_request(deployment.id),
+                on_usage=lambda delta: self._usage_service.record(deployment.id, delta),
             )
 
     def _resolve_profile(self, record: DeploymentRecord) -> ModelProfile:
@@ -558,6 +563,17 @@ class InferWeave:
     async def list_records(self) -> list[DeploymentRecord]:
         """Returns all persisted deployment records across sessions and CLI invocations."""
         return await self.lifecycle_service.list_records()
+
+    async def get_usage(
+        self, deployment_id: str, *, compute_seconds: float | None = None,
+    ) -> UsageReport:
+        """Reads durable local usage/quotes, including stopped/failed/dry-run deployments.
+
+        Default costs are unknown without provider compute duration. Optional
+        compute_seconds produces an indicative compute-only scenario, never a bill.
+        This method makes no cloud calls and never infers duration from request latency.
+        """
+        return await self._usage_service.report(deployment_id, compute_seconds)
 
     async def stop(
         self,

@@ -94,6 +94,8 @@ class ProviderRouter:
     ) -> ComputeProvider:
         """Resolves target provider, validates hardware VRAM, and selects optimal instance."""
         name = provider_name.lower()
+        if request is not None:
+            request._selected_offer = None
 
         # Case 1: Auto routing across all providers
         if name == "auto":
@@ -111,6 +113,9 @@ class ProviderRouter:
             decision = await self._routing_service.aresolve(profile=profile, request=req)
             self._last_decision = decision
 
+            if request is not None:
+                request._selected_offer = decision.chosen_offer.model_copy(deep=True)
+
             if request is not None and not request.gpu_type:
                 request.gpu_type = decision.chosen_offer.gpu_spec.name
 
@@ -122,6 +127,10 @@ class ProviderRouter:
         # If user explicitly specified a GPU, validate hardware VRAM compatibility
         if request is not None and request.gpu_type:
             self._hardware_service.validate_deployment_hardware(profile, request)
+            try:
+                request._selected_offer = await self._routing_service.quoted_offer(profile, request, name)
+            except Exception:  # noqa: BLE001 - unavailable pricing must not prevent provisioning
+                request._selected_offer = None
             return compute_provider
 
         # If user did NOT specify a GPU, run provider-scoped routing to pick best GPU for this provider
@@ -139,6 +148,8 @@ class ProviderRouter:
                 target_provider=name,
             )
             self._last_decision = decision
+            if request is not None:
+                request._selected_offer = decision.chosen_offer.model_copy(deep=True)
             if request is not None and not request.gpu_type:
                 request.gpu_type = decision.chosen_offer.gpu_spec.name
         except NoFeasibleProviderError as err:
@@ -189,6 +200,7 @@ class ProviderRouter:
             alternative = request.model_copy(
                 deep=True, update={"provider": name, "gpu_type": ranked.offer.gpu_spec.name}
             )
+            alternative._selected_offer = ranked.offer.model_copy(deep=True)
             candidates.append((self._providers[name], alternative))
         return candidates
 

@@ -83,6 +83,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "LightningOptions": ("inferweave.domain.options", "LightningOptions"),
     "RuntimeOptions": ("inferweave.domain.options", "RuntimeOptions"),
     # Models
+    "DeploymentUsage": ("inferweave.models.usage", "DeploymentUsage"),
+    "ComputePricing": ("inferweave.models.usage", "ComputePricing"),
+    "CostEstimate": ("inferweave.models.usage", "CostEstimate"),
+    "UsageReport": ("inferweave.models.usage", "UsageReport"),
     "Deployment": ("inferweave.models.deployment", "Deployment"),
     "DeploymentRequest": ("inferweave.models.deployment", "DeploymentRequest"),
     "DeploymentStatus": ("inferweave.models.deployment", "DeploymentStatus"),
@@ -124,8 +128,10 @@ __all__ = [
     "AutostopPolicy",
     "AutostopWatchdogPort",
     "CompositeEndpointAuth",
+    "ComputePricing",
     "ComputeProviderPort",
     "ContainerSpec",
+    "CostEstimate",
     "Deployment",
     "DeploymentError",
     "DeploymentLifecycleEvaluator",
@@ -137,6 +143,7 @@ __all__ = [
     "DeploymentRequest",
     "DeploymentState",
     "DeploymentStatus",
+    "DeploymentUsage",
     "EndpointAuthPort",
     "EndpointNotReadyError",
     "FailureKind",
@@ -201,6 +208,7 @@ __all__ = [
     "StaticHeaderAuth",
     "UnknownGpuError",
     "UnsupportedWorkloadError",
+    "UsageReport",
     "VramCheckResult",
     "WorkloadType",
     "lightning_account",
@@ -332,6 +340,12 @@ if TYPE_CHECKING:
         RoutingConstraints,
         RoutingDecision,
         VramCheckResult,
+    )
+    from inferweave.models.usage import (
+        ComputePricing,
+        CostEstimate,
+        DeploymentUsage,
+        UsageReport,
     )
     from inferweave.ports.auth import EndpointAuthPort
     from inferweave.ports.deployment_repository import DeploymentRepositoryPort

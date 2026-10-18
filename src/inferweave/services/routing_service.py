@@ -31,6 +31,22 @@ class SmartRoutingService:
         self._catalog = catalog or StaticCatalogAdapter()
         self._probe = availability_probe
 
+    async def quoted_offer(
+        self, profile: ModelProfile, request: DeploymentRequest, provider: str,
+    ) -> InstanceOffer | None:
+        """Find an unambiguous indicative quote for explicit hardware, without rerouting."""
+        count = request.num_gpus or profile.hardware.gpu_count
+        regions = request.options.provider.preferred_regions if request.options else []
+        offers = [
+            offer for offer in await self._catalog.get_offers(provider_name=provider)
+            if offer.provider.lower() == provider.lower()
+            and request.gpu_type is not None
+            and offer.gpu_spec.name.lower() == request.gpu_type.lower()
+            and offer.gpu_count == count
+            and (not offer.region or bool(regions) and offer.region == regions[0])
+        ]
+        return offers[0].model_copy(deep=True) if len(offers) == 1 else None
+
     async def aresolve(
         self,
         profile: ModelProfile,

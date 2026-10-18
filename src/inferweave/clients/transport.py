@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from inferweave.clients.metering import current_transfer
 from inferweave.core.exceptions import (
     EndpointNotReadyError,
     InferenceError,
@@ -247,7 +248,17 @@ class InferenceTransport:
                 params=params,
                 extensions={"timeout": timeout.as_dict()},
             )
-            response = await self._send_single_request(client, request)
+            measurement = current_transfer.get()
+            if measurement is not None:
+                measurement.request_body_bytes += len(request.content)
+            try:
+                response = await self._send_single_request(client, request)
+            except BaseException:
+                if measurement is not None:
+                    measurement.incomplete = True
+                raise
+            if measurement is not None:
+                measurement.response_body_bytes += len(response.content)
             params = None  # Redirect queries belong to Location, not the original request.
             location = response.headers.get("location")
             if response.status_code not in _REDIRECT_STATUSES or not location:

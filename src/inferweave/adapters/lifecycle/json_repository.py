@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -39,7 +39,7 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
         except OSError as err:
             logger.warning("Could not create directory for deployments file: %s", err)
 
-    def _read_records_sync(self) -> dict[str, DeploymentRecord]:
+    def _read_records_sync(self, *, strict: bool = False) -> dict[str, DeploymentRecord]:
         """Synchronously reads and parses records from the JSON file."""
         if not self.file_path.exists():
             return {}
@@ -50,6 +50,8 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
                 return {}
             raw_data = json.loads(content)
             if not isinstance(raw_data, dict):
+                if strict:
+                    raise ValueError("Cannot mutate invalid deployment storage.")
                 logger.warning(
                     "Deployments file at '%s' has unexpected format. Expected dict, got %s.",
                     self.file_path,
@@ -62,14 +64,20 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
                 try:
                     records[dep_id] = DeploymentRecord.model_validate(item)
                 except Exception as exc:  # noqa: BLE001
+                    if strict:
+                        raise ValueError("Cannot mutate invalid deployment storage.") from None
                     logger.warning(
-                        "Failed to validate deployment record '%s': %s", dep_id, exc
+                        "Failed to validate a deployment record (%s).", type(exc).__name__
                     )
             return records
         except json.JSONDecodeError as exc:
+            if strict:
+                raise ValueError("Cannot mutate invalid deployment storage.") from None
             logger.warning("Corrupt JSON in '%s': %s", self.file_path, exc)
             return {}
         except OSError as exc:
+            if strict:
+                raise OSError("Cannot read deployment storage for mutation.") from None
             logger.warning("Failed to read deployments file '%s': %s", self.file_path, exc)
             return {}
 
@@ -112,22 +120,41 @@ class JsonDeploymentRepository(DeploymentRepositoryPort):
         with file_lock(directory / digest) as acquired:
             yield acquired
 
-    def _mutate_sync(self, record: DeploymentRecord | None, deployment_id: str) -> None:
+    def _mutate_sync(
+        self, record: DeploymentRecord | None, deployment_id: str,
+        mutate: Callable[[DeploymentRecord], None] | None = None,
+    ) -> DeploymentRecord | None:
         lock_path = self.file_path.resolve().with_suffix(self.file_path.suffix + ".write.lock")
         with file_lock(lock_path, blocking=True) as acquired:
             if not acquired:
                 raise OSError("Cannot acquire deployment storage lock")
-            records = self._read_records_sync()
-            if record is None:
+            records = self._read_records_sync(strict=True)
+            if mutate is not None:
+                record = records.get(deployment_id)
+                if record is None:
+                    return None
+                mutate(record)
+                records[deployment_id] = record
+            elif record is None:
                 records.pop(deployment_id, None)
             else:
-                records[deployment_id] = record.model_copy(deep=True)
+                saved = record.model_copy(deep=True)
+                if previous := records.get(deployment_id):
+                    saved.usage = previous.usage
+                records[deployment_id] = saved
             self._write_records_sync(records)
+            return record.to_sanitized_record() if record is not None else None
+
+    async def update(
+        self, deployment_id: str, mutate: Callable[[DeploymentRecord], None],
+    ) -> DeploymentRecord | None:
+        async with self._lock:
+            return await asyncio.to_thread(self._mutate_sync, None, deployment_id, mutate)
 
     async def save(self, record: DeploymentRecord) -> None:
         """Persists an update with a cross-process read/modify/write lock."""
         async with self._lock:
-            await asyncio.to_thread(self._mutate_sync, record, record.id)
+            await asyncio.to_thread(self._mutate_sync, record.model_copy(deep=True), record.id)
 
     async def get(self, deployment_id: str) -> DeploymentRecord | None:
         """Retrieves a deployment record by ID, or None if not found."""

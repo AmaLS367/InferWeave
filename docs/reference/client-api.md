@@ -53,6 +53,7 @@ sharing. The SDK has no async context manager; use `try/finally` and `close()`.
 | `register_model(profile: ModelProfile)` | `None`; register before deploy/attach |
 | `list_deployments()` | `list[Deployment]`; local tracked handles |
 | `await list_records()` | `list[DeploymentRecord]`; persisted records |
+| `await get_usage(deployment_id: str, *, compute_seconds: float \| None = None)` | `UsageReport`; read persisted counters and pricing without cloud calls, including stopped/failed/dry-run records |
 | `await stop(deployment_id: str, action: Any \| None = None)` | `None`; stop by ID across restarts |
 | `await get_status(deployment_id: str)` | `DeploymentStatus`; provider reconciliation and known-profile probe |
 | `await reconcile(min_age_seconds: float = 1800.0, *, confirmed_settled: tuple[str, ...] = ())` | `list[DeploymentRecord]`; clean settled leftovers under their owners; pending remote creation requires explicit provider-history confirmation |
@@ -147,6 +148,7 @@ in-flight requests prevent idle shutdown.
 | `await refresh()` | `DeploymentStatus`; provider reconciliation/probe |
 | `await check_health()` | `ProbeResult`; authenticated probe (source annotation: `Any`) |
 | `await wait_for_ready(timeout_seconds: int \| None = None)` | `DeploymentStatus`; authenticated polling |
+| `await usage(*, compute_seconds: float \| None = None)` | `UsageReport`; same reader as `weave.get_usage(id)` |
 | `record_activity()` | `None`; synchronous in-memory reset |
 | `is_idle()` | `bool`; evaluate policy/in-flight count |
 
@@ -159,7 +161,8 @@ InferenceTransport(deployment_id, endpoint_fn, auth_headers_fn=None, config=None
                    http_client=None, default_port=None, sleep=asyncio.sleep,
                    random_fn=random.random)
 InferenceClient(deployment_id, workload_type, transport, on_activity=None,
-                on_request_start=None, on_request_end=None)
+                on_request_start=None, on_request_end=None, on_usage=None,
+                clock=time.perf_counter)
 FishSpeechClient(transport)
 ImageGenerationClient(transport)
 ```
@@ -177,6 +180,87 @@ key; the ambient account uses environment variables); `is_configured_for(provide
 account: ProviderAccount | None = None) -> bool` checks availability. Implementations: `ModalProxyAuth(token_id=None,
 token_secret=None, token_getter=None)`, `StaticHeaderAuth(headers, providers=())`,
 `CompositeEndpointAuth(*auths)`, `NoEndpointAuth()`. See [security](../how-to/secure-your-endpoint.md).
+
+## Usage and estimates
+
+`UsageReport`, `DeploymentUsage`, `ComputePricing`, and `CostEstimate` are public,
+immutable models exported from `inferweave`. Reports are detached snapshots; read
+again for changes from other handles/processes. Reading does not reset idle timers.
+The owning account must still be resolvable for live records, as with attach/status.
+
+```python
+report = await deployment.usage()
+if report.usage is not None:
+    print(report.usage.requests, report.usage.successes, report.usage.failures)
+    print(report.usage.cancellations, report.usage.unfinished_requests)
+    print(report.usage.average_latency_seconds)
+print(report.cost.estimated_cost_usd)  # None for live deployments without duration
+print(report.cost.unavailable_reasons)
+
+# A scenario using an externally obtained compute duration, NOT request latency.
+scenario = await weave.get_usage(deployment.id, compute_seconds=90)
+print(scenario.pricing, scenario.cost.estimated_cost_usd)
+```
+
+`DeploymentUsage` counts generic HTTP, audio and image calls at the unified client
+boundary. Wrong-workload/stopped/dry-run handle rejection is excluded. Calls that
+enter that boundary but fail local payload validation count as failures. Success
+requires the entire operation, including audio/image decoding, to succeed. Retries
+and redirects are one logical request; a render of multiple images is one request.
+Health probes, direct low-level client/transport calls and requests from outside
+this SDK are excluded.
+
+`total_latency_seconds` sums monotonic elapsed time of completed calls, including
+retry delays and client-side start bookkeeping, excluding terminal persistence.
+`average_latency_seconds` divides by successes + failures + cancellations and is
+`None` until one call finishes. Concurrent request latencies overlap and cannot be
+added up to derive GPU consumption.
+
+`request_body_bytes` counts serialized HTTP body bytes submitted to the transport;
+delivery is not guaranteed. `response_body_bytes` counts fully buffered decoded
+HTTP response body bytes, including failed attempts/redirects. These include JSON,
+base64 or MessagePack envelopes; they exclude headers, compression/TLS/network
+overhead and image-result decoding. `incomplete_transfers` counts calls with an
+unmeasurable transport outcome (connection/read failure or cancellation). Partial
+response bodies are not included. These counters are not provider egress billing.
+
+Counters persist at start and completion, independently of throttled idle activity.
+A hard process kill can leave an `unfinished_requests` entry. It remains unknown
+rather than being replayed or converted to a failure; this field is not a distributed
+live in-flight gauge. Legacy records have `usage=None` until their first observed
+call; `tracking_started_at` identifies the start of available history. Earlier
+requests cannot be recovered. Persistence failure is logged by error type and does
+not change inference results; usage may then be incomplete. Cancellation drains
+pending metering writes before returning. SQLite transactions and JSON file locks
+protect increments across processes; lifecycle saves preserve current usage. Custom
+repositories must implement atomic `update()` and preserve usage in `save()` to
+support metering; the default port refuses an unsafe read/modify/save fallback.
+Older custom repositories keep local activity tracking and attach support, but
+cannot persist activity updates or meter requests until they implement that contract;
+their report's `usage` is `None`.
+
+`ComputePricing` snapshots the candidate's provider, requested GPU type/count,
+catalog instance/region, whole-configuration USD hourly rate, spot/on-demand kind,
+billing increment and capture time. `source="catalog"` is an indicative quote,
+including when the built-in static catalog supplies it; it is not a current provider
+price confirmation. Unmatched/ambiguous GPU overrides, count/region mismatches and
+missing spot rates remain unavailable; another GPU or on-demand rate is never
+substituted. Provider failover records each candidate's own quote. Arbitrary catalog
+metadata, endpoint URLs, headers and credentials are not included.
+
+`compute_seconds` must be finite and nonnegative and represents one allocation's
+duration, not GPU-seconds. Its scenario rounds **once** upward to the captured billing
+increment and multiplies by the configuration rate / 3600; GPU count is already in
+that rate. For multiple containers, replicas or billing sessions, calculate separate
+scenarios using their externally known durations and applicable quotes. This API
+does not infer replicas or aggregate rounding across sessions. Missing rate or
+duration returns `estimated_cost_usd=None` with `unavailable_reasons`; uncertain
+provisioning/cleanup also prevents an estimate. Dry runs report a zero compute
+estimate without making cloud calls.
+
+`measured_gpu_seconds` and `actual_billed_cost_usd` remain `None`: no provider
+consumption/invoice integration is implemented. See [lifecycle and cost](../explanation/lifecycle-and-cost.md)
+for provider differences and exclusions.
 
 ## Errors
 

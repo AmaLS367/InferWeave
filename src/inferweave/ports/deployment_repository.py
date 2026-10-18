@@ -1,7 +1,7 @@
 """Port contract for persisting, retrieving, and updating deployment records."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from inferweave.domain.deployment_record import DeploymentRecord
@@ -9,6 +9,22 @@ from inferweave.domain.deployment_record import DeploymentRecord
 
 class DeploymentRepositoryPort(ABC):
     """Abstract repository for persisting deployment metadata and lifecycle state."""
+
+    @property
+    def supports_atomic_updates(self) -> bool:
+        """Whether this implementation opted into the atomic mutation contract."""
+        return type(self).update is not DeploymentRepositoryPort.update
+
+    async def update(
+        self, deployment_id: str, mutate: Callable[[DeploymentRecord], None],
+    ) -> DeploymentRecord | None:
+        """Atomically mutate the latest record, without inserting a missing record.
+
+        Durable custom repositories must override this with a transaction. No unsafe
+        read/save fallback is provided. save() must preserve usage on existing records;
+        only update() may change it. Existing custom stores remain usable without metering.
+        """
+        raise NotImplementedError("Repository does not support atomic usage updates.")
 
     @contextmanager
     def operation_lock(self, deployment_id: str) -> Iterator[bool]:

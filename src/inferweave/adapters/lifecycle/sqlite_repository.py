@@ -5,7 +5,7 @@ import hashlib
 import logging
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -72,42 +72,67 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
         return conn
 
     def _save_sync(self, record: DeploymentRecord) -> None:
+        with closing(self._get_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT data_json FROM deployments WHERE id = ?", (record.id,)).fetchone()
+            if row is not None:
+                record.usage = DeploymentRecord.model_validate_json(row["data_json"]).usage
+            self._write_record(conn, record)
+
+    def _update_sync(
+        self, deployment_id: str, mutate: Callable[[DeploymentRecord], None],
+    ) -> DeploymentRecord | None:
+        with closing(self._get_connection()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT data_json FROM deployments WHERE id = ?", (deployment_id,)).fetchone()
+            if row is None:
+                return None
+            record = DeploymentRecord.model_validate_json(row["data_json"])
+            mutate(record)
+            self._write_record(conn, record)
+            return record.to_sanitized_record()
+
+    @staticmethod
+    def _write_record(conn: sqlite3.Connection, record: DeploymentRecord) -> None:
         sanitized = record.to_sanitized_record()
         data_json = sanitized.model_dump_json()
-        with closing(self._get_connection()) as conn, conn:
-            conn.execute(
-                """
-                INSERT INTO deployments (
-                    id, model, provider, state, endpoint_url, error_message,
-                    created_at, ready_at, stopped_at, is_dry_run, data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    model=excluded.model,
-                    provider=excluded.provider,
-                    state=excluded.state,
-                    endpoint_url=excluded.endpoint_url,
-                    error_message=excluded.error_message,
-                    created_at=excluded.created_at,
-                    ready_at=excluded.ready_at,
-                    stopped_at=excluded.stopped_at,
-                    is_dry_run=excluded.is_dry_run,
-                    data_json=excluded.data_json;
-                """,
-                (
-                    sanitized.id,
-                    sanitized.model,
-                    sanitized.provider,
-                    sanitized.state.value if hasattr(sanitized.state, "value") else str(sanitized.state),
-                    sanitized.endpoint_url,
-                    sanitized.error_message,
-                    sanitized.created_at.isoformat(),
-                    sanitized.ready_at.isoformat() if sanitized.ready_at else None,
-                    sanitized.stopped_at.isoformat() if sanitized.stopped_at else None,
-                    1 if sanitized.is_dry_run else 0,
-                    data_json,
-                ),
-            )
-            conn.commit()
+        conn.execute(
+            """
+            INSERT INTO deployments (
+                id, model, provider, state, endpoint_url, error_message,
+                created_at, ready_at, stopped_at, is_dry_run, data_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                model=excluded.model,
+                provider=excluded.provider,
+                state=excluded.state,
+                endpoint_url=excluded.endpoint_url,
+                error_message=excluded.error_message,
+                created_at=excluded.created_at,
+                ready_at=excluded.ready_at,
+                stopped_at=excluded.stopped_at,
+                is_dry_run=excluded.is_dry_run,
+                data_json=excluded.data_json;
+            """,
+            (
+                sanitized.id,
+                sanitized.model,
+                sanitized.provider,
+                sanitized.state.value if hasattr(sanitized.state, "value") else str(sanitized.state),
+                sanitized.endpoint_url,
+                sanitized.error_message,
+                sanitized.created_at.isoformat(),
+                sanitized.ready_at.isoformat() if sanitized.ready_at else None,
+                sanitized.stopped_at.isoformat() if sanitized.stopped_at else None,
+                1 if sanitized.is_dry_run else 0,
+                data_json,
+            ),
+        )
+
+    async def update(
+        self, deployment_id: str, mutate: Callable[[DeploymentRecord], None],
+    ) -> DeploymentRecord | None:
+        return await asyncio.to_thread(self._update_sync, deployment_id, mutate)
 
     def _get_sync(self, deployment_id: str) -> DeploymentRecord | None:
         with closing(self._get_connection()) as conn, conn:
@@ -118,7 +143,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
             try:
                 return DeploymentRecord.model_validate_json(row["data_json"])
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to parse deployment record '%s': %s", deployment_id, exc)
+                logger.warning("Failed to parse a deployment record (%s).", type(exc).__name__)
                 return None
 
     def _list_all_sync(self) -> list[DeploymentRecord]:
@@ -129,7 +154,7 @@ class SqliteDeploymentRepository(DeploymentRepositoryPort):
                 try:
                     records.append(DeploymentRecord.model_validate_json(row["data_json"]))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to parse record in list_all: %s", exc)
+                    logger.warning("Failed to parse record in list_all (%s).", type(exc).__name__)
         return records
 
     def _delete_sync(self, deployment_id: str) -> None:

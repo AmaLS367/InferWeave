@@ -1,6 +1,7 @@
 """In-memory implementation of DeploymentRepositoryPort."""
 
 import asyncio
+from collections.abc import Callable
 
 from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
@@ -19,7 +20,22 @@ class InMemoryDeploymentRepository(DeploymentRepositoryPort):
     async def save(self, record: DeploymentRecord) -> None:
         """Saves or updates a deployment record in memory."""
         async with self._lock:
-            self._records[record.id] = record.to_sanitized_record()
+            saved = record.to_sanitized_record()
+            if previous := self._records.get(record.id):
+                saved.usage = previous.usage
+            self._records[record.id] = saved
+
+    async def update(
+        self, deployment_id: str, mutate: Callable[[DeploymentRecord], None],
+    ) -> DeploymentRecord | None:
+        async with self._lock:
+            previous = self._records.get(deployment_id)
+            if previous is None:
+                return None
+            record = previous.model_copy(deep=True)
+            mutate(record)
+            self._records[deployment_id] = record.to_sanitized_record()
+            return self._records[deployment_id].model_copy(deep=True)
 
     async def get(self, deployment_id: str) -> DeploymentRecord | None:
         """Retrieves a clone of the deployment record by ID, or None if not found."""

@@ -20,6 +20,7 @@ import logging
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from inferweave.accounts.manager import AccountLease, AccountManager
@@ -37,11 +38,13 @@ from inferweave.domain.deployment_record import DeploymentRecord
 from inferweave.domain.lifecycle import AutostopAction
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.deployment import DeploymentRequest
-from inferweave.models.enums import DeploymentState
+from inferweave.models.enums import DeploymentState, ProviderType
 from inferweave.models.profile import ModelProfile
+from inferweave.models.usage import DeploymentUsage
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 from inferweave.providers.base import ComputeProvider
 from inferweave.runtimes.base import RuntimeSpec
+from inferweave.services.usage_service import capture_pricing
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,13 @@ class ProvisioningService:
             is_dry_run=True,
             workload_type=profile.workload_type,
             profile_snapshot=dry_snapshot,
+            usage=DeploymentUsage() if self._repository.supports_atomic_updates else None,
+            pricing=capture_pricing(
+                request, profile, provider.name,
+                uses_spot=provider.provider_type == ProviderType.SKYPILOT
+                and bool(request.options and request.options.provider.allow_spot),
+                secrets=self._accounts.secret_values(),
+            ),
         )
         await self._repository.save(record)
         return record
@@ -251,6 +261,13 @@ class ProvisioningService:
             needs_reconciliation=True,
             owner_fingerprint=account.owner_fingerprint,
             creation_may_continue=True,
+            usage=DeploymentUsage() if self._repository.supports_atomic_updates else None,
+            pricing=capture_pricing(
+                request, profile, provider.name,
+                uses_spot=provider.provider_type == ProviderType.SKYPILOT
+                and bool(request.options and request.options.provider.allow_spot),
+                secrets=(*self._accounts.secret_values(), *account.secret_values()),
+            ),
         )
         with self._repository.operation_lock(record.id) as acquired:
             if not acquired:
@@ -402,6 +419,7 @@ class ProvisioningService:
             if record.creation_may_continue:
                 return False
             if not await provider.resource_exists(record, account):
+                record.resources_confirmed_absent_at = datetime.now(UTC)
                 return True
             logger.warning(
                 "Deployment '%s' exists on %s account '%s' after a failed create; removing it "
@@ -411,7 +429,10 @@ class ProvisioningService:
                 account.id,
             )
             await provider.stop(record, account, action=AutostopAction.DOWN)
-            return not await provider.resource_exists(record, account)
+            absent = not await provider.resource_exists(record, account)
+            if absent:
+                record.resources_confirmed_absent_at = datetime.now(UTC)
+            return absent
         except Exception as err:  # noqa: BLE001 - reconciliation failure means "unknown"
             logger.error(
                 "Could not reconcile deployment '%s' on %s account '%s' (%s).",

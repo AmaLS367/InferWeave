@@ -60,6 +60,40 @@ stop for shared deployments.
 
 ## Cost
 
+InferWeave measures local logical request usage, separately from estimated compute
+cost and actual provider billing. Use `await deployment.usage()` or
+`await weave.get_usage(id)` across restarts, including after stop/failure. Usage is
+preserved by `attach()`/`find()`. See the [API and examples](../reference/client-api.md#usage-and-estimates)
+for counters, byte definitions, persistence and optional duration scenarios.
+
+No adapter currently supplies reliable billable compute duration. Therefore live
+cost defaults to **unknown (`None`)**, even with a known catalog rate, an old
+deployment, a stopped endpoint or successful requests. Modal container activity,
+Lightning replica activity and SkyPilot allocation history require different
+provider evidence; deployment timestamps and request latency supply none of it.
+Scale-to-zero, concurrent requests, cold starts, warm idle, spot eviction and
+native autostop all prevent wall-clock lifetime from being actual GPU consumption.
+Even Lightning `min_replicas > 0` is not a measured replica history.
+
+When compute duration is externally known, `compute_seconds=` offers a rounded,
+compute-only catalog scenario. Static prices may be stale; discounts, credits,
+reserved rates, account/region differences and dynamic spot prices are not modeled.
+SkyPilot can choose a different concrete instance from a catalog example: its quote
+describes requested GPUs, not proof of the allocated SKU or provider charge.
+The snapshot is retained rather than silently repriced on restart or failover.
+Disk/storage, CPU/RAM when billed separately, egress, taxes and plan charges are
+excluded. There are no spending caps, exact invoices or real-time billing guarantees.
+
+Lifecycle reports distinguish `not_provisioned` (dry run), `retained_or_unknown`
+(successful STOP), `down_acknowledged` (successful DOWN), `confirmed_absent`
+(reconciliation/cleanup confirmed absence), and `unknown` (including uncertain
+operations). These record local evidence and do not poll cloud state. STOP may
+retain billable resources; DOWN acknowledgment and confirmed deletion do not
+establish historical GPU duration or erase earlier charges. Failed readiness
+timestamps likewise do not prove compute stopped. Provider-specific stop adapters
+may establish more internally (Lightning confirms deletion); this conservative
+report never infers confirmed absence solely from a STOPPED lifecycle state.
+
 Modal bills loading, processing inputs and warm time after input. Scale-to-zero
 ends container compute charges; cold starts trade reload latency/cost against
 warm idle cost. Storage/egress/plan charges may be separate. Consult
