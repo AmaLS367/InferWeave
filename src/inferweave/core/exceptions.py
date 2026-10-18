@@ -14,12 +14,14 @@ class InferWeaveError(Exception):
 class ModelNotFoundError(InferWeaveError):
     """Raised when a requested model is not found in the registry."""
 
-    def __init__(self, model_id: str) -> None:
+    def __init__(self, model_id: str, reason: str | None = None) -> None:
+        detail = f" ({reason})" if reason else ""
         super().__init__(
-            f"Model '{model_id}' was not found in the InferWeave registry. "
+            f"Model '{model_id}' was not found in the InferWeave registry{detail}. "
             f"You can register it using weave.register_model(...)."
         )
         self.model_id = model_id
+        self.reason = reason
 
 
 class ProviderNotFoundError(InferWeaveError):

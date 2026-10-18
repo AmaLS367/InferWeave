@@ -24,6 +24,7 @@ from typing import Any
 
 from inferweave.accounts.manager import AccountLease, AccountManager
 from inferweave.accounts.models import ProviderAccount
+from inferweave.core.credentials import PLATFORM_CREDENTIAL_ENV
 from inferweave.core.exceptions import (
     InferWeaveError,
     NoAccountAvailableError,
@@ -43,21 +44,6 @@ from inferweave.providers.base import ComputeProvider
 from inferweave.runtimes.base import RuntimeSpec
 
 logger = logging.getLogger(__name__)
-
-PLATFORM_CREDENTIAL_ENV = frozenset(
-    {
-        "MODAL_TOKEN_ID",
-        "MODAL_TOKEN_SECRET",
-        "MODAL_PROXY_TOKEN_ID",
-        "MODAL_PROXY_TOKEN_SECRET",
-        "LIGHTNING_USER_ID",
-        "LIGHTNING_API_KEY",
-        "LIGHTNING_AUTH_TOKEN",
-        "RUNPOD_API_KEY",
-        "VAST_API_KEY",
-    }
-)
-"""Control-plane credential variables that must never reach a model container."""
 
 
 @dataclass(frozen=True)
@@ -204,6 +190,7 @@ class ProvisioningService:
             options=(request.options or DeploymentOptions()).model_copy(deep=True),
             is_dry_run=True,
             workload_type=profile.workload_type,
+            profile_snapshot=profile.to_sanitized(self._accounts.secret_values()),
         )
         await self._repository.save(record)
         return record
@@ -246,6 +233,9 @@ class ProvisioningService:
             state=DeploymentState.PROVISIONING,
             options=options,
             workload_type=profile.workload_type,
+            profile_snapshot=profile.to_sanitized(
+                (*self._accounts.secret_values(), *account.secret_values())
+            ),
             needs_reconciliation=True,
             owner_fingerprint=account.owner_fingerprint,
             creation_may_continue=True,

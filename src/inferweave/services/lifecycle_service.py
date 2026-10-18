@@ -27,6 +27,7 @@ from inferweave.domain.lifecycle import (
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.deployment import DeploymentStatus
 from inferweave.models.enums import DeploymentState, WorkloadType
+from inferweave.models.profile import ModelProfile
 from inferweave.ports.auth import EndpointAuthPort
 from inferweave.ports.deployment_repository import DeploymentRepositoryPort
 from inferweave.ports.lifecycle import AutostopWatchdogPort
@@ -115,6 +116,7 @@ class LifecycleService:
         provider: Any | None = None,
         workload_type: WorkloadType | None = None,
         options: DeploymentOptions | None = None,
+        profile_snapshot: ModelProfile | None = None,
     ) -> LifecycleState:
         """Registers a freshly created deployment, stores/updates its record, and schedules watchdog.
 
@@ -156,11 +158,17 @@ class LifecycleService:
         record.last_activity_at = current_time
         if workload_type is not None:
             record.workload_type = workload_type
+        if profile_snapshot is not None:
+            record.profile_snapshot = profile_snapshot.to_sanitized(
+                self._accounts.secret_values()
+            )
         self._last_persisted_activity[deployment.id] = current_time
 
         # Synchronous write for fast in-memory availability
         if hasattr(self._repository, "_records"):
-            self._repository._records[record.id] = record.model_copy(deep=True)
+            self._repository._records[record.id] = record.to_sanitized_record(
+                self._accounts.secret_values()
+            )
 
         await self._repository.save(record)
 

@@ -1,6 +1,7 @@
 """Model hardware requirements, healthcheck parameters, and profile definitions."""
 
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import (
@@ -12,7 +13,15 @@ from pydantic import (
     model_validator,
 )
 
-from inferweave.core.credentials import _REDACTED, is_sensitive_key
+from inferweave.core.credentials import (
+    _REDACTED,
+    is_sensitive_header,
+    is_sensitive_key,
+    known_secret_values,
+    sanitize_args,
+    sanitize_metadata,
+    sanitize_text,
+)
 from inferweave.models.enums import WorkloadType
 
 
@@ -35,13 +44,15 @@ class HardwareRequirements(BaseModel):
 
 
 def _is_sensitive_header(key: str) -> bool:
-    lower_k = key.lower()
-    return is_sensitive_key(key) or lower_k in ("cookie", "set-cookie")
+    return is_sensitive_header(key)
 
 
-def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+def _redact_headers(
+    headers: dict[str, str], secrets: Iterable[str] = ()
+) -> dict[str, str]:
+    secret_tuple = known_secret_values(secrets)
     return {
-        k: (_REDACTED if _is_sensitive_header(k) else v)
+        k: (_REDACTED if _is_sensitive_header(k) else sanitize_text(v, secret_tuple))
         for k, v in headers.items()
     }
 
@@ -105,19 +116,23 @@ class HealthcheckConfig(BaseModel):
         for k, v in super().__repr_args__():
             if k == "headers" and isinstance(v, dict):
                 args.append((k, _redact_headers(v)))
+            elif k == "path" and isinstance(v, str):
+                args.append((k, sanitize_text(v)))
             else:
                 args.append((k, v))
         return args
 
-    def to_sanitized(self) -> "HealthcheckConfig":
+    def to_sanitized(self, secrets: Iterable[str] = ()) -> "HealthcheckConfig":
         """Returns a copy of the healthcheck config with sensitive headers redacted."""
+        secret_tuple = known_secret_values(secrets)
         copy_cfg = self.model_copy(deep=True)
-        copy_cfg.headers = _redact_headers(copy_cfg.headers)
+        copy_cfg.path = sanitize_text(copy_cfg.path, secret_tuple)
+        copy_cfg.headers = _redact_headers(copy_cfg.headers, secret_tuple)
         return copy_cfg
 
-    def to_sanitized_dict(self) -> dict[str, Any]:
+    def to_sanitized_dict(self, secrets: Iterable[str] = ()) -> dict[str, Any]:
         """Returns a dict representation with sensitive headers redacted."""
-        return self.to_sanitized().model_dump()
+        return self.to_sanitized(secrets).model_dump()
 
 
 class ContainerSpec(BaseModel):
@@ -253,6 +268,38 @@ class ContainerSpec(BaseModel):
             )
         return cleaned
 
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        sanitized = self.to_sanitized()
+        sanitized_map: dict[str | None, Any] = {
+            "image": sanitized.image,
+            "args": sanitized.args,
+            "setup_commands": sanitized.setup_commands,
+            "env": sanitized.env,
+        }
+        return [
+            (k, sanitized_map.get(k, v))
+            for k, v in super().__repr_args__()
+        ]
+
+    def to_sanitized(self, secrets: Iterable[str] = ()) -> "ContainerSpec":
+        """Returns a copy of the container spec with credentials and tokens redacted."""
+        secret_tuple = known_secret_values(secrets)
+        copy_spec = self.model_copy(deep=True)
+        copy_spec.image = sanitize_text(copy_spec.image, secret_tuple)
+        copy_spec.args = sanitize_args(copy_spec.args, secret_tuple)
+        copy_spec.setup_commands = [
+            sanitize_text(cmd, secret_tuple) for cmd in copy_spec.setup_commands
+        ]
+        copy_spec.env = {
+            k: (_REDACTED if is_sensitive_key(k) else sanitize_text(v, secret_tuple))
+            for k, v in copy_spec.env.items()
+        }
+        return copy_spec
+
+    def to_sanitized_dict(self, secrets: Iterable[str] = ()) -> dict[str, Any]:
+        """Returns a dict representation with credentials and tokens redacted."""
+        return self.to_sanitized(secrets).model_dump()
+
 
 class ModelProfile(BaseModel):
     """Metadata and resource profile for a deployable AI model."""
@@ -308,6 +355,43 @@ class ModelProfile(BaseModel):
                 f"and healthcheck.port ({self.healthcheck.port}) must match."
             )
         return self
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        sanitized = self.to_sanitized()
+        sanitized_map: dict[str | None, Any] = {
+            "artifact_id": sanitized.artifact_id,
+            "healthcheck": sanitized.healthcheck,
+            "default_env": sanitized.default_env,
+            "metadata": sanitized.metadata,
+            "container": sanitized.container,
+        }
+        return [
+            (k, sanitized_map.get(k, v))
+            for k, v in super().__repr_args__()
+        ]
+
+    def to_sanitized(self, secrets: Iterable[str] = ()) -> "ModelProfile":
+        """Returns a deep copy of the profile with all sensitive fields redacted."""
+        secret_tuple = known_secret_values(secrets)
+        copy_prof = self.model_copy(deep=True)
+        if copy_prof.artifact_id is not None:
+            copy_prof.artifact_id = sanitize_text(copy_prof.artifact_id, secret_tuple)
+        if copy_prof.healthcheck is not None:
+            copy_prof.healthcheck = copy_prof.healthcheck.to_sanitized(secret_tuple)
+        if copy_prof.default_env:
+            copy_prof.default_env = {
+                k: (_REDACTED if is_sensitive_key(k) else sanitize_text(v, secret_tuple))
+                for k, v in copy_prof.default_env.items()
+            }
+        if copy_prof.metadata:
+            copy_prof.metadata = sanitize_metadata(copy_prof.metadata, secret_tuple)
+        if copy_prof.container is not None:
+            copy_prof.container = copy_prof.container.to_sanitized(secret_tuple)
+        return copy_prof
+
+    def to_sanitized_dict(self, secrets: Iterable[str] = ()) -> dict[str, Any]:
+        """Returns a dict representation of the profile with all sensitive fields redacted."""
+        return self.to_sanitized(secrets).model_dump()
 
     @classmethod
     def for_container(

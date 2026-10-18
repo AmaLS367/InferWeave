@@ -323,3 +323,103 @@ async def test_sqlite_repo_sanitizes_secrets(temp_sqlite_file: Path):
     assert "NORMAL_VAR" in raw_data_json
     assert "hello" in raw_data_json
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["json", "sqlite"])
+async def test_profile_snapshot_round_trip_and_sanitization(tmp_path: Path, backend: str):
+    """Validates that profile_snapshot round-trips through JSON and SQLite with secrets sanitized."""
+    from inferweave.adapters.lifecycle.sqlite_repository import (
+        SqliteDeploymentRepository,
+    )
+    from inferweave.models.profile import HealthcheckConfig, ModelProfile
+
+    repo = (
+        JsonDeploymentRepository(tmp_path / "deployments.json")
+        if backend == "json"
+        else SqliteDeploymentRepository(tmp_path / "deployments.db")
+    )
+
+    clean_profile = ModelProfile.for_container(
+        id="custom/token-classifier-model",
+        image="ghcr.io/org/token-classifier:24.08-py3",
+        args=[
+            "tritonserver",
+            "--model-repository=/models",
+            "--tokenizer",
+            "fast",
+            "--max-new-tokens=512",
+            "--eos-token-id",
+            "2",
+        ],
+        port=8001,
+        health_path="/v2/health/ready",
+        setup_commands=["mkdir -p /models"],
+        env={"TRITON_SERVER_CPU_ONLY": "0"},
+        min_vram_gb=24.0,
+        metadata={"revision": "r1", "tags": ["triton", "custom"]},
+    )
+    rec = DeploymentRecord(
+        id="iw-roundtrip-1",
+        model=clean_profile.id,
+        provider="modal",
+        state=DeploymentState.HEALTHY,
+        endpoint_url="https://iw-roundtrip.modal.run",
+        profile_snapshot=clean_profile,
+    )
+    await repo.save(rec)
+
+    loaded = await repo.get("iw-roundtrip-1")
+    assert loaded is not None
+    assert isinstance(loaded.profile_snapshot, ModelProfile)
+    assert loaded.profile_snapshot == clean_profile
+
+    # Now test with secret-bearing profile fields
+    secret_profile = ModelProfile.for_container(
+        id="custom/secret-roundtrip",
+        image="https://user:pass123@registry.example.com/org/image:latest",
+        args=["--api-key=sk-secret-arg-987654", "--token", "hf_secret_token_abcdef"],
+        port=8000,
+        healthcheck=HealthcheckConfig(
+            port=8000,
+            path="/health?token=secret_query_token",
+            headers={
+                "Authorization": "Bearer sk-header-secret-111222",
+                "X-Custom-Header": "normal-value",
+            },
+        ),
+        setup_commands=[
+            "curl -H 'Authorization: Bearer sk-setup-secret-333444' -H 'X-Auth-Token: custom_raw_secret_777' https://example.com"
+        ],
+        metadata={"credentials": {"password": "my-db-password-555"}},
+    )
+    secret_rec = DeploymentRecord(
+        id="iw-roundtrip-secret",
+        model=secret_profile.id,
+        provider="modal",
+        state=DeploymentState.HEALTHY,
+        profile_snapshot=secret_profile,
+    )
+    await repo.save(secret_rec)
+
+    raw_bytes = (
+        (tmp_path / "deployments.json").read_bytes()
+        if backend == "json"
+        else (tmp_path / "deployments.db").read_bytes()
+    )
+    for leaked in (
+        b"pass123",
+        b"sk-secret-arg-987654",
+        b"hf_secret_token_abcdef",
+        b"secret_query_token",
+        b"sk-header-secret-111222",
+        b"sk-setup-secret-333444",
+        b"custom_raw_secret_777",
+        b"my-db-password-555",
+    ):
+        assert leaked not in raw_bytes
+
+    loaded_secret = await repo.get("iw-roundtrip-secret")
+    assert loaded_secret is not None
+    assert isinstance(loaded_secret.profile_snapshot, ModelProfile)
+    assert loaded_secret.profile_snapshot.healthcheck.headers["Authorization"] == "[REDACTED]"
+    assert loaded_secret.profile_snapshot.healthcheck.headers["X-Custom-Header"] == "normal-value"

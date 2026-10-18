@@ -161,6 +161,69 @@ async def test_json_repository_file_is_clean(tmp_path: Path) -> None:
     assert_clean(content)
 
 
+async def test_profile_snapshot_never_persists_or_reprs_sentinel_secrets(
+    tmp_path: Path,
+) -> None:
+    from fakes import LIGHTNING_ENV
+
+    from inferweave.models.profile import ModelProfile
+
+    db = tmp_path / "snapshot_secrets.db"
+    fake = FakeProvider()
+    weave = make_weave(db, accounts_config(cooldown_seconds=0), dict(MODAL_ENV), [fake])
+    modal_sentinel = MODAL_ENV["IW_MODAL_A_TOKEN_SECRET"]
+    other_sentinel = LIGHTNING_ENV["IW_LIGHTNING_A_API_KEY"]
+
+    custom = ModelProfile.for_container(
+        id="custom/sentinel-check",
+        image="vllm/vllm-openai:latest",
+        args=["--api-key", modal_sentinel, "--model", "custom/sentinel-check"],
+        setup_commands=[f"export SECRET_TOKEN={modal_sentinel}"],
+        healthcheck=HealthcheckConfig(
+            port=8000,
+            headers={"Authorization": f"Bearer {modal_sentinel}"},
+        ),
+        metadata={"nested": [{"token": modal_sentinel}, f"inline {modal_sentinel}"]},
+    )
+    assert_clean(repr(custom), str(custom), repr(custom.container))
+    weave.register_model(custom)
+
+    # Live deploy with platform credential in container args/setup_commands is refused by guard_runtime
+    with pytest.raises(ProviderAuthError):
+        await weave.deploy(custom.id, provider="modal", wait_for_ready=False)
+
+    # Dry-run record and live deploy with non-account sentinel secrets must never persist secrets
+    d_dry = await weave.deploy(
+        custom.id, provider="modal", dry_run=True, wait_for_ready=False
+    )
+    live_secret_profile = ModelProfile.for_container(
+        id="custom/sentinel-live",
+        image="vllm/vllm-openai:latest",
+        args=["--api-key", other_sentinel, "--model", "custom/sentinel-live"],
+        setup_commands=[f"export CUSTOM_TOKEN={other_sentinel}"],
+        healthcheck=HealthcheckConfig(
+            port=8000,
+            headers={"Authorization": f"Bearer {other_sentinel}"},
+        ),
+        metadata={"nested": [{"token": other_sentinel}, f"inline {other_sentinel}"]},
+    )
+    assert_clean(
+        repr(live_secret_profile),
+        str(live_secret_profile),
+        repr(live_secret_profile.container),
+    )
+    weave.register_model(live_secret_profile)
+    d_live = await weave.deploy(
+        live_secret_profile.id, provider="modal", wait_for_ready=False
+    )
+
+    for dep_id in (d_dry.id, d_live.id):
+        rec = await weave.lifecycle_service.get_record(dep_id)
+        assert rec is not None
+        assert_clean(repr(rec), rec.model_dump_json())
+    assert_clean(_db_bytes(db))
+
+
 # --- logs & exceptions ---------------------------------------------------------------------------
 
 

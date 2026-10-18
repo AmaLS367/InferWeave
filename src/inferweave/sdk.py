@@ -18,8 +18,12 @@ from inferweave.core.exceptions import (
     DeploymentNotFoundError,
     HealthcheckError,
     HealthcheckTimeoutError,
+    ModelNotFoundError,
 )
-from inferweave.domain.deployment_record import DeploymentRecord
+from inferweave.domain.deployment_record import (
+    DeploymentRecord,
+    recover_profile_from_snapshot,
+)
 from inferweave.domain.healthcheck import ProbeResult
 from inferweave.domain.lifecycle import AutostopPolicy
 from inferweave.models.deployment import Deployment, DeploymentRequest, DeploymentStatus
@@ -244,6 +248,7 @@ class InferWeave:
                 provider=compute_provider,
                 workload_type=profile.workload_type,
                 options=record.options,
+                profile_snapshot=profile,
             )
             self._wire_deployment(
                 deployment,
@@ -425,6 +430,15 @@ class InferWeave:
                 on_request_end=lambda: lifecycle.end_request(deployment.id),
             )
 
+    def _resolve_profile(self, record: DeploymentRecord) -> ModelProfile:
+        """Resolves a deployment's ModelProfile from the registry or its persisted snapshot."""
+        try:
+            return self.registry.get(record.model)
+        except ModelNotFoundError:
+            return recover_profile_from_snapshot(
+                record, secrets=self.accounts.secret_values()
+            )
+
     async def attach(self, deployment_id: str) -> Deployment:
         """Recovers a live ``Deployment`` handle for a persisted deployment.
 
@@ -441,7 +455,7 @@ class InferWeave:
             DeploymentNotFoundError: no persisted record for ``deployment_id``.
             DeploymentNotActiveError: the deployment is stopped, failed, or a dry run.
             ModelNotFoundError: the deployment's model profile is not registered in this
-                process (call ``register_model`` for custom models before attaching).
+                process and cannot be safely recovered from a persisted snapshot.
             ProviderNotFoundError: the deployment's provider is unknown to this SDK instance.
         """
         async with self._attach_lock:
@@ -460,7 +474,7 @@ class InferWeave:
             if existing is not None and existing.state != DeploymentState.STOPPED:
                 return existing
 
-            profile = self.registry.get(record.model)
+            profile = self._resolve_profile(record)
             provider = self.router.get(record.provider)
             # Fail fast when the owning account is gone; never adopt another account.
             self.accounts.resolve_owner(record)
@@ -567,7 +581,7 @@ class InferWeave:
         record = await self.lifecycle_service.get_record(deployment_id)
         if record is not None:
             try:
-                healthcheck_config = self.registry.get(record.model).healthcheck
+                healthcheck_config = self._resolve_profile(record).healthcheck
             except Exception as err:  # noqa: BLE001
                 logger.debug(
                     "No model profile for '%s'; skipping readiness probe: %s",

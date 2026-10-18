@@ -1,18 +1,27 @@
 """Domain entity representing a deployment record and its persistent lifecycle state."""
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from inferweave.core.credentials import (
     _REDACTED,
     _SENSITIVE_KEY_TERMS,
     _is_sensitive_key,
+    contains_redacted,
+    is_sensitive_header,
     is_sensitive_key,
+    known_secret_values,
+    redact_deep,
+    sanitize_metadata,
+    sanitize_text,
 )
+from inferweave.core.exceptions import ModelNotFoundError
 from inferweave.domain.options import DeploymentOptions
 from inferweave.models.enums import DeploymentState, WorkloadType
+from inferweave.models.profile import ModelProfile
 
 __all__ = [
     "_REDACTED",
@@ -21,18 +30,74 @@ __all__ = [
     "_is_sensitive_key",
     "_redact_value",
     "is_sensitive_key",
+    "recover_profile_from_snapshot",
 ]
 
 
 def _redact_value(value: object) -> object:
     """Redacts a value stored under a sensitive key, recursing into containers."""
+    return redact_deep(value)
+
+
+def _validate_redacted_profile_dict(value: dict[str, Any]) -> ModelProfile | None:
+    """Validates a serialized ModelProfile dict whose sensitive env keys were redacted."""
+    cleaned = dict(value)
+    redacted_default_env: dict[str, str] = {}
+    if isinstance(cleaned.get("default_env"), dict):
+        new_default_env: dict[str, Any] = {}
+        for k, v in cleaned["default_env"].items():
+            if isinstance(k, str) and is_sensitive_key(k) and v == _REDACTED:
+                redacted_default_env[k] = _REDACTED
+            else:
+                new_default_env[k] = v
+        cleaned["default_env"] = new_default_env
+
+    redacted_container_env: dict[str, str] = {}
+    if isinstance(cleaned.get("container"), dict):
+        container_copy = dict(cleaned["container"])
+        if isinstance(container_copy.get("env"), dict):
+            new_c_env: dict[str, Any] = {}
+            for k, v in container_copy["env"].items():
+                if isinstance(k, str) and is_sensitive_key(k) and v == _REDACTED:
+                    redacted_container_env[k] = _REDACTED
+                else:
+                    new_c_env[k] = v
+            container_copy["env"] = new_c_env
+        cleaned["container"] = container_copy
+
+    if not redacted_default_env and not redacted_container_env:
+        return None
+
+    try:
+        prof = ModelProfile.model_validate(cleaned)
+    except Exception:  # noqa: BLE001
+        return None
+
+    prof.default_env.update(redacted_default_env)
+    if prof.container is not None and redacted_container_env:
+        prof.container.env.update(redacted_container_env)
+    return prof
+
+
+def _coerce_profile_snapshot(
+    value: Any,
+) -> ModelProfile | dict[str, Any] | None:
+    """Coerces raw snapshot data into a ModelProfile or an invalid-snapshot marker."""
+    if value is None:
+        return None
+    if isinstance(value, ModelProfile):
+        return value
     if isinstance(value, dict):
-        return {k: _REDACTED for k in value}
-    if isinstance(value, list | tuple):
-        return [_REDACTED for _ in value]
-    if isinstance(value, str):
-        return _REDACTED
-    return value
+        if value.get("__invalid_snapshot__") is True:
+            return {"__invalid_snapshot__": True}
+        try:
+            return ModelProfile.model_validate(value)
+        except (ValidationError, ValueError, TypeError):
+            redacted_prof = _validate_redacted_profile_dict(value)
+            if redacted_prof is not None:
+                return redacted_prof
+            return {"__invalid_snapshot__": True}
+    return {"__invalid_snapshot__": True}
 
 
 AMBIENT_ACCOUNT = "ambient"
@@ -131,6 +196,20 @@ class DeploymentRecord(BaseModel):
             "destroy timer survives process restarts. None for records written by older versions."
         ),
     )
+    profile_snapshot: ModelProfile | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Sanitized snapshot of the deployed ModelProfile so custom models can be "
+            "recovered across process restarts. None for records written by older versions."
+        ),
+    )
+
+    @field_validator("profile_snapshot", mode="before")
+    @classmethod
+    def _validate_profile_snapshot(
+        cls, value: Any
+    ) -> ModelProfile | dict[str, Any] | None:
+        return _coerce_profile_snapshot(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -210,9 +289,20 @@ class DeploymentRecord(BaseModel):
             DeploymentState.FAILED,
         }
 
-    def to_sanitized_record(self) -> "DeploymentRecord":
+    def to_sanitized_record(
+        self, secrets: Iterable[str] = ()
+    ) -> "DeploymentRecord":
         """Returns a copy of the record with sensitive credentials and tokens redacted for disk storage."""
+        secret_tuple = known_secret_values(secrets)
         sanitized = self.model_copy(deep=True)
+
+        if sanitized.profile_snapshot is not None:
+            coerced = _coerce_profile_snapshot(sanitized.profile_snapshot)
+            if isinstance(coerced, ModelProfile):
+                sanitized.profile_snapshot = coerced.to_sanitized(secret_tuple)
+            else:
+                sanitized.profile_snapshot = {"__invalid_snapshot__": True}
+
         if not sanitized.options:
             return sanitized
 
@@ -222,18 +312,20 @@ class DeploymentRecord(BaseModel):
             if "secrets" in extra_args:
                 sec = extra_args["secrets"]
                 if isinstance(sec, dict):
-                    extra_args["secrets"] = {k: "[REDACTED]" for k in sec}
+                    extra_args["secrets"] = {k: _REDACTED for k in sec}
                 elif isinstance(sec, list):
                     redacted_list = []
                     for item in sec:
                         if isinstance(item, str) and "=" in item:
                             k, _ = item.split("=", 1)
-                            redacted_list.append(f"{k}=[REDACTED]")
+                            redacted_list.append(f"{k}={_REDACTED}")
+                        elif isinstance(item, str):
+                            redacted_list.append(sanitize_text(item, secret_tuple))
                         else:
                             redacted_list.append(item)
                     extra_args["secrets"] = redacted_list
                 elif isinstance(sec, str):
-                    extra_args["secrets"] = "[REDACTED]"
+                    extra_args["secrets"] = _REDACTED
 
             for key in list(extra_args.keys()):
                 if key == "secrets":
@@ -242,18 +334,131 @@ class DeploymentRecord(BaseModel):
                     extra_args[key] = _redact_value(extra_args[key])
                 elif key.lower() == "headers" and isinstance(extra_args[key], dict):
                     extra_args[key] = {
-                        hk: (_REDACTED if _is_sensitive_key(str(hk)) else hv)
+                        hk: (
+                            _REDACTED
+                            if is_sensitive_header(str(hk))
+                            else (
+                                sanitize_text(hv, secret_tuple)
+                                if isinstance(hv, str)
+                                else sanitize_metadata(hv, secret_tuple)
+                            )
+                        )
                         for hk, hv in extra_args[key].items()
                     }
+                else:
+                    extra_args[key] = sanitize_metadata(
+                        extra_args[key], secret_tuple
+                    )
 
             sanitized.options.provider.extra_provider_args = extra_args
 
         # Sanitize runtime extra_env
         if sanitized.options.runtime and sanitized.options.runtime.extra_env:
             env_copy = dict(sanitized.options.runtime.extra_env)
-            for k in list(env_copy.keys()):
+            for k, v in list(env_copy.items()):
                 if is_sensitive_key(k):
                     env_copy[k] = _REDACTED
+                elif isinstance(v, str):
+                    env_copy[k] = sanitize_text(v, secret_tuple)
             sanitized.options.runtime.extra_env = env_copy
 
         return sanitized
+
+
+def recover_profile_from_snapshot(
+    record: DeploymentRecord, secrets: Iterable[str] = ()
+) -> ModelProfile:
+    """Validates and recovers a ModelProfile from a persisted DeploymentRecord snapshot.
+
+    Raises ``ModelNotFoundError`` when the record has no snapshot, when the snapshot is
+    structurally invalid or does not match the deployment record identity, or when
+    sensitive values had to be redacted and cannot be safely recovered without secrets.
+    """
+    snapshot = record.profile_snapshot
+    if snapshot is None:
+        raise ModelNotFoundError(record.model)
+
+    if isinstance(snapshot, dict):
+        if snapshot.get("__invalid_snapshot__") is True:
+            raise ModelNotFoundError(
+                record.model, reason="persisted profile snapshot is invalid"
+            )
+        raw_data = snapshot
+    elif isinstance(snapshot, ModelProfile):
+        raw_data = snapshot.model_dump()
+    else:
+        raise ModelNotFoundError(
+            record.model, reason="persisted profile snapshot is invalid"
+        )
+
+    snapshot_id = raw_data.get("id")
+    if isinstance(snapshot_id, str) and snapshot_id != record.model:
+        raise ModelNotFoundError(
+            record.model,
+            reason=(
+                f"persisted profile snapshot id '{snapshot_id}' does not match "
+                f"deployment model '{record.model}'"
+            ),
+        )
+
+    if contains_redacted(raw_data):
+        raise ModelNotFoundError(
+            record.model,
+            reason=(
+                "persisted profile snapshot had sensitive values redacted and cannot "
+                "be safely recovered without re-registering the model"
+            ),
+        )
+
+    try:
+        profile = ModelProfile.model_validate(raw_data)
+    except Exception:  # noqa: BLE001
+        raise ModelNotFoundError(
+            record.model, reason="persisted profile snapshot is invalid"
+        ) from None
+
+    if profile.id != record.model:
+        raise ModelNotFoundError(
+            record.model,
+            reason=(
+                f"persisted profile snapshot id '{profile.id}' does not match "
+                f"deployment model '{record.model}'"
+            ),
+        )
+
+    if (
+        record.workload_type is not None
+        and profile.workload_type != record.workload_type
+    ):
+        raise ModelNotFoundError(
+            record.model,
+            reason="persisted profile snapshot workload_type does not match deployment record",
+        )
+
+    sanitized = profile.to_sanitized(secrets)
+    if contains_redacted(sanitized.model_dump()) or (
+        sanitized.model_dump() != profile.model_dump()
+    ):
+        raise ModelNotFoundError(
+            record.model,
+            reason=(
+                "persisted profile snapshot contains sensitive values and cannot "
+                "be safely recovered"
+            ),
+        )
+
+    from inferweave.models.deployment import DeploymentRequest
+    from inferweave.runtimes.templates import get_runtime_template
+
+    try:
+        template = get_runtime_template(profile.default_runtime)
+        template.render(
+            profile, DeploymentRequest(model=profile.id, provider=record.provider)
+        )
+    except Exception:  # noqa: BLE001
+        raise ModelNotFoundError(
+            record.model,
+            reason="persisted profile snapshot failed runtime validation",
+        ) from None
+
+    return profile.model_copy(deep=True)

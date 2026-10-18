@@ -313,3 +313,428 @@ async def test_attach_fails_when_the_owning_account_is_no_longer_configured(db_p
     with pytest.raises(AccountUnavailableError, match="'b'"):
         await weave_b.attach(dep.id)
     assert weave_b.list_deployments() == []
+
+
+def _custom_container_profile(
+    model_id: str = "custom/vllm-container",
+    *,
+    port: int = 8088,
+    health_path: str = "/readyz",
+    args: list[str] | None = None,
+    setup_commands: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    metadata: dict | None = None,
+):
+    from inferweave.models.profile import HealthcheckConfig, ModelProfile
+
+    hc = HealthcheckConfig(
+        port=port,
+        path=health_path,
+        initial_delay_seconds=0.0,
+        timeout_seconds=0.2,
+        probe_interval_seconds=0.01,
+        headers=headers or {},
+    )
+    return ModelProfile.for_container(
+        id=model_id,
+        name="Custom Container Service",
+        image="vllm/vllm-openai:v0.6.0",
+        args=args if args is not None else ["--model", model_id, "--port", str(port)],
+        port=port,
+        setup_commands=setup_commands or ["echo warmup"],
+        env=env or {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+        healthcheck=hc,
+        min_vram_gb=16.0,
+        metadata=metadata or {"team": "inference", "tier": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_custom_container_deploy_persist_attach_refresh_healthcheck_stop(
+    db_path: Path,
+):
+    """Custom container deploy -> persist -> new SDK instance -> attach -> refresh/healthcheck/stop."""
+    weave_a = make_weave(db_path)
+    custom_profile = _custom_container_profile()
+    weave_a.register_model(custom_profile)
+
+    dep_a = await deploy_on_modal(weave_a, model=custom_profile.id)
+    persisted = await _read_record(db_path, dep_a.id)
+    assert persisted is not None
+    assert persisted.profile_snapshot is not None
+    assert persisted.profile_snapshot.id == custom_profile.id
+    assert persisted.profile_snapshot.container is not None
+    assert persisted.profile_snapshot.container.image == "vllm/vllm-openai:v0.6.0"
+    assert persisted.profile_snapshot.container.port == 8088
+    assert persisted.profile_snapshot.healthcheck.path == "/readyz"
+
+    # New SDK instance without registering the custom model
+    probe = MockHealthcheckProbeAdapter(default_healthy=True)
+    weave_b = make_weave(db_path, probe=probe)
+    with pytest.raises(ModelNotFoundError):
+        weave_b.registry.get(custom_profile.id)
+
+    attached = await weave_b.attach(dep_a.id)
+    assert attached.id == dep_a.id
+    assert attached.model == custom_profile.id
+    assert attached.workload_type == WorkloadType.CUSTOM
+    assert attached.endpoint_url == ENDPOINT
+
+    # Snapshot recovery must not mutate the global/instance registry
+    with pytest.raises(ModelNotFoundError):
+        weave_b.registry.get(custom_profile.id)
+
+    # Healthcheck uses recovered custom port/path
+    probe_res = await attached.check_health()
+    assert probe_res.is_healthy is True
+    assert probe.probed_urls[-1] == f"{ENDPOINT}/readyz"
+
+    ready_status = await attached.wait_for_ready()
+    assert ready_status.state == DeploymentState.HEALTHY
+
+    # Refresh and get_status use recovered profile healthcheck and preserve snapshot
+    with patched_modal() as mocks:
+        refreshed = await attached.refresh()
+        status_via_sdk = await weave_b.get_status(dep_a.id)
+    assert refreshed.state == DeploymentState.HEALTHY
+    assert status_via_sdk.state == DeploymentState.HEALTHY
+    assert mocks.lookup_app.await_count == 2
+
+    # Stop tears down remote resource and preserves snapshot on STOPPED record
+    with patched_modal() as mocks:
+        await attached.stop()
+    mocks.stop_app.assert_awaited_once()
+    stopped_rec = await _read_record(db_path, dep_a.id)
+    assert stopped_rec is not None
+    assert stopped_rec.state == DeploymentState.STOPPED
+    assert stopped_rec.profile_snapshot is not None
+    assert stopped_rec.profile_snapshot.id == custom_profile.id
+
+
+@pytest.mark.asyncio
+async def test_custom_container_recovery_via_find(db_path: Path):
+    """Custom container deploy -> persist -> new SDK instance -> find() -> healthcheck/refresh/stop."""
+    weave_a = make_weave(db_path)
+    custom_profile = _custom_container_profile("custom/find-model", port=9000, health_path="/ping")
+    weave_a.register_model(custom_profile)
+    dep_a = await deploy_on_modal(weave_a, model=custom_profile.id)
+
+    probe = MockHealthcheckProbeAdapter(default_healthy=True)
+    weave_b = make_weave(db_path, probe=probe)
+    found = await weave_b.find(model=custom_profile.id, provider="modal")
+    assert found is not None
+    assert found.id == dep_a.id
+    assert found.model == custom_profile.id
+    assert found.workload_type == WorkloadType.CUSTOM
+
+    res = await found.check_health()
+    assert res.is_healthy is True
+    assert probe.probed_urls[-1] == f"{ENDPOINT}/ping"
+
+    with patched_modal():
+        await found.stop()
+    assert found.state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_custom_container_recovery_with_json_repository(tmp_path: Path):
+    """Custom container deploy -> JSON persistence -> new SDK instance -> attach & find."""
+    from inferweave import InferWeave
+    from inferweave.accounts import AccountManager, AccountsConfig
+    from inferweave.adapters.lifecycle.json_repository import JsonDeploymentRepository
+    from inferweave.adapters.lifecycle.watchdog import MockWatchdogAdapter
+    from inferweave.providers.router import ProviderRouter
+    from inferweave.services.healthcheck_service import HealthcheckService
+    from inferweave.services.lifecycle_service import LifecycleService
+
+    json_path = tmp_path / "deployments.json"
+
+    def make_json_weave(probe: MockHealthcheckProbeAdapter | None = None) -> InferWeave:
+        probe_adapter = probe or MockHealthcheckProbeAdapter(default_healthy=True)
+        hc = HealthcheckService(probe_port=probe_adapter)
+        router = ProviderRouter()
+        accounts = AccountManager(AccountsConfig())
+        lifecycle = LifecycleService(
+            watchdog_port=MockWatchdogAdapter(),
+            repository=JsonDeploymentRepository(json_path),
+            healthcheck_service=hc,
+            provider_resolver=router.get,
+            accounts=accounts,
+        )
+        return InferWeave(
+            router=router,
+            healthcheck_service=hc,
+            lifecycle_service=lifecycle,
+            accounts=accounts,
+        )
+
+    weave_a = make_json_weave()
+    custom_profile = _custom_container_profile("custom/json-container", port=8123, health_path="/live")
+    weave_a.register_model(custom_profile)
+    dep_a = await deploy_on_modal(weave_a, model=custom_profile.id)
+
+    probe_b = MockHealthcheckProbeAdapter(default_healthy=True)
+    weave_b = make_json_weave(probe=probe_b)
+    found = await weave_b.find(model=custom_profile.id, provider="modal")
+    assert found is not None
+    assert found.id == dep_a.id
+    assert (await weave_b.attach(dep_a.id)) is found
+
+    await found.check_health()
+    assert probe_b.probed_urls[-1] == f"{ENDPOINT}/live"
+
+    with patched_modal():
+        await found.stop()
+    rec = await JsonDeploymentRepository(json_path).get(dep_a.id)
+    assert rec is not None and rec.state == DeploymentState.STOPPED
+    assert rec.profile_snapshot is not None
+    assert rec.profile_snapshot.id == custom_profile.id
+
+
+@pytest.mark.asyncio
+async def test_registered_profile_takes_precedence_over_snapshot(db_path: Path):
+    """An explicitly registered ModelProfile in the new SDK instance takes precedence over snapshot."""
+    weave_a = make_weave(db_path)
+    original_profile = _custom_container_profile(
+        "custom/precedence-model", port=8080, health_path="/v1/health"
+    )
+    weave_a.register_model(original_profile)
+    dep = await deploy_on_modal(weave_a, model=original_profile.id)
+
+    probe = MockHealthcheckProbeAdapter(default_healthy=True)
+    weave_b = make_weave(db_path, probe=probe)
+    updated_profile = _custom_container_profile(
+        "custom/precedence-model", port=8080, health_path="/v2/override-health"
+    )
+    weave_b.register_model(updated_profile)
+
+    attached = await weave_b.attach(dep.id)
+    await attached.check_health()
+    assert probe.probed_urls[-1] == f"{ENDPOINT}/v2/override-health"
+
+
+@pytest.mark.asyncio
+async def test_legacy_records_without_snapshot_preserve_behavior(db_path: Path):
+    """Old records without profile_snapshot work for built-in models and raise ModelNotFoundError for custom models."""
+    weave_a = make_weave(db_path)
+    builtin_dep = await deploy_on_modal(weave_a, model=AUDIO_MODEL)
+
+    custom_profile = _custom_container_profile("custom/legacy-no-snapshot")
+    weave_a.register_model(custom_profile)
+    custom_dep = await deploy_on_modal(weave_a, model=custom_profile.id)
+
+    repo = SqliteDeploymentRepository(db_path)
+    for dep_id in (builtin_dep.id, custom_dep.id):
+        rec = await repo.get(dep_id)
+        rec.profile_snapshot = None
+        await repo.save(rec)
+
+    weave_b = make_weave(db_path)
+    # Built-in model attaches via registry even without snapshot
+    attached_builtin = await weave_b.attach(builtin_dep.id)
+    assert attached_builtin.id == builtin_dep.id
+
+    # Custom model without snapshot raises ModelNotFoundError
+    with pytest.raises(ModelNotFoundError):
+        await weave_b.attach(custom_dep.id)
+    with pytest.raises(ModelNotFoundError):
+        await weave_b.find(model=custom_profile.id, provider="modal")
+
+
+@pytest.mark.asyncio
+async def test_invalid_or_mismatched_snapshots_raise_model_not_found(db_path: Path):
+    """Mismatched or structurally invalid snapshots never substitute a model or crash record loading."""
+    import json
+    import sqlite3
+
+    weave_a = make_weave(db_path)
+    custom_profile = _custom_container_profile("custom/target-model")
+    weave_a.register_model(custom_profile)
+    dep = await deploy_on_modal(weave_a, model=custom_profile.id)
+    repo = SqliteDeploymentRepository(db_path)
+
+    # 1. Snapshot ID does not match record.model
+    rec = await repo.get(dep.id)
+    other_profile = _custom_container_profile("custom/different-model")
+    rec.profile_snapshot = other_profile
+    await repo.save(rec)
+
+    weave_b = make_weave(db_path)
+    with pytest.raises(ModelNotFoundError, match="does not match"):
+        await weave_b.attach(dep.id)
+    with pytest.raises(ModelNotFoundError, match="does not match"):
+        await weave_b.find(model=custom_profile.id, provider="modal")
+
+    # 2. Snapshot workload_type conflicts with record.workload_type
+    rec = await repo.get(dep.id)
+    rec.profile_snapshot = custom_profile
+    rec.workload_type = WorkloadType.AUDIO
+    await repo.save(rec)
+    with pytest.raises(ModelNotFoundError, match="workload_type"):
+        await make_weave(db_path).attach(dep.id)
+
+    # 3. Corrupted raw JSON snapshot in SQLite (missing required fields, port mismatch, unknown runtime, primitive)
+    bad_snapshots = [
+        {"id": custom_profile.id},  # missing required fields
+        "not-a-dict-snapshot",
+        {
+            **custom_profile.model_dump(mode="json"),
+            "default_runtime": "unknown-runtime-xyz",
+        },
+        {
+            **custom_profile.model_dump(mode="json"),
+            "container": None,
+        },
+        {
+            **custom_profile.model_dump(mode="json"),
+            "healthcheck": {**custom_profile.healthcheck.model_dump(mode="json"), "port": 9999},
+        },
+    ]
+    for bad_snap in bad_snapshots:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT data_json FROM deployments WHERE id = ?", (dep.id,)
+            ).fetchone()
+            payload = json.loads(row[0])
+            payload["workload_type"] = WorkloadType.CUSTOM.value
+            payload["profile_snapshot"] = bad_snap
+            conn.execute(
+                "UPDATE deployments SET data_json = ? WHERE id = ?",
+                (json.dumps(payload), dep.id),
+            )
+
+        # Record is still readable for cleanup/reconcile
+        loaded = await repo.get(dep.id)
+        assert loaded is not None
+
+        # Attach refuses invalid snapshot with ModelNotFoundError
+        with pytest.raises(ModelNotFoundError):
+            await make_weave(db_path).attach(dep.id)
+
+        # Explicitly registering the valid model still allows attach() even when snapshot is corrupt
+        weave_registered = make_weave(db_path)
+        weave_registered.register_model(custom_profile)
+        attached = await weave_registered.attach(dep.id)
+        assert attached.id == dep.id
+
+    # Cleanup via stop() still works under the owning account despite corrupt snapshot
+    with patched_modal() as mocks:
+        await make_weave(db_path).stop(dep.id)
+    mocks.stop_app.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_sanitizes_secrets_and_fails_safely_on_unregistered_recovery(
+    db_path: Path,
+):
+    """Secrets in headers, argv, setup_commands, or metadata are redacted on disk and refuse unsafe recovery."""
+    import sqlite3
+
+    from inferweave.adapters.healthcheck.mock_probe import MockHealthcheckProbeAdapter
+
+    class HeaderRecordingProbe(MockHealthcheckProbeAdapter):
+        def __init__(self) -> None:
+            super().__init__(default_healthy=True)
+            self.last_headers: dict[str, str] = {}
+
+        async def probe(
+            self,
+            url: str,
+            method: str = "GET",
+            timeout_seconds: float = 5.0,
+            headers=None,
+            expected_status_codes=None,
+        ):
+            self.last_headers = dict(headers or {})
+            return await super().probe(
+                url, method, timeout_seconds, headers, expected_status_codes
+            )
+
+    probe_a = HeaderRecordingProbe()
+    weave_a = make_weave(db_path, probe=probe_a)
+    secret_profile = _custom_container_profile(
+        "custom/secret-bearing-model",
+        args=["--model", "my-model", "--hf-token", "hf_supersecretvalue123456"],
+        setup_commands=["export HF_TOKEN=hf_supersecretvalue123456"],
+        headers={"Authorization": "Bearer sk-live-health-secret-999999"},
+        metadata={"nested": {"api_key": "sk-nested-metadata-secret-111111"}},
+    )
+    weave_a.register_model(secret_profile)
+    dep_a = await deploy_on_modal(weave_a, model=secret_profile.id)
+
+    # 1. In-memory deployment in weave_a retains working unredacted configuration
+    await dep_a.check_health()
+    assert probe_a.last_headers.get("Authorization") == "Bearer sk-live-health-secret-999999"
+    assert secret_profile.healthcheck.headers["Authorization"] == "Bearer sk-live-health-secret-999999"
+    assert secret_profile.container.args == [
+        "--model",
+        "my-model",
+        "--hf-token",
+        "hf_supersecretvalue123456",
+    ]
+
+    # 2. Raw SQLite bytes contain no secrets
+    with sqlite3.connect(db_path) as conn:
+        raw_json = conn.execute(
+            "SELECT data_json FROM deployments WHERE id = ?", (dep_a.id,)
+        ).fetchone()[0]
+    assert "hf_supersecretvalue123456" not in raw_json
+    assert "sk-live-health-secret-999999" not in raw_json
+    assert "sk-nested-metadata-secret-111111" not in raw_json
+    assert "[REDACTED]" in raw_json
+
+    # 3. Recovery in a new SDK instance without registration fails safely (never uses [REDACTED])
+    weave_b = make_weave(db_path)
+    with pytest.raises(ModelNotFoundError, match="redacted"):
+        await weave_b.attach(dep_a.id)
+    with pytest.raises(ModelNotFoundError, match="redacted"):
+        await weave_b.find(model=secret_profile.id, provider="modal")
+
+    # 4. Re-registering the profile in weave_b allows attach() with full working config
+    probe_b = HeaderRecordingProbe()
+    weave_c = make_weave(db_path, probe=probe_b)
+    weave_c.register_model(secret_profile)
+    attached = await weave_c.attach(dep_a.id)
+    await attached.check_health()
+    assert probe_b.last_headers.get("Authorization") == "Bearer sk-live-health-secret-999999"
+
+
+@pytest.mark.asyncio
+async def test_write_ahead_and_lifecycle_preserve_snapshot(db_path: Path):
+    """The initial write-ahead record and subsequent lifecycle updates preserve profile_snapshot."""
+    from unittest.mock import patch
+
+    weave_a = make_weave(db_path, accounts=modal_pool("a"))
+    custom_profile = _custom_container_profile("custom/write-ahead-model")
+    weave_a.register_model(custom_profile)
+
+    write_ahead_snapshots = []
+    orig_provision = weave_a.router.get("modal").provision
+
+    async def spy_provision(record, request, profile, runtime, account):
+        persisted_before = await _read_record(db_path, record.id)
+        write_ahead_snapshots.append(
+            persisted_before.profile_snapshot if persisted_before else None
+        )
+        return await orig_provision(record, request, profile, runtime, account)
+
+    with patch.object(weave_a.router.get("modal"), "provision", side_effect=spy_provision):
+        dep = await deploy_on_modal(weave_a, model=custom_profile.id, account="a")
+
+    assert len(write_ahead_snapshots) == 1
+    assert write_ahead_snapshots[0] is not None
+    assert write_ahead_snapshots[0].id == custom_profile.id
+
+    # Preserved through wait_for_ready, touch_activity, refresh, and stop
+    await dep.wait_for_ready()
+    await weave_a.lifecycle_service.touch_activity(dep.id)
+    with patched_modal():
+        await dep.refresh()
+        await dep.stop()
+
+    final_rec = await _read_record(db_path, dep.id)
+    assert final_rec is not None
+    assert final_rec.state == DeploymentState.STOPPED
+    assert final_rec.profile_snapshot is not None
+    assert final_rec.profile_snapshot.id == custom_profile.id

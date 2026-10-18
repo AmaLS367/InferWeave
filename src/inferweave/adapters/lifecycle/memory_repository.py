@@ -14,12 +14,12 @@ class InMemoryDeploymentRepository(DeploymentRepositoryPort):
         self._lock = asyncio.Lock()
         if initial_records:
             for record in initial_records:
-                self._records[record.id] = record.model_copy(deep=True)
+                self._records[record.id] = record.to_sanitized_record()
 
     async def save(self, record: DeploymentRecord) -> None:
         """Saves or updates a deployment record in memory."""
         async with self._lock:
-            self._records[record.id] = record.model_copy(deep=True)
+            self._records[record.id] = record.to_sanitized_record()
 
     async def get(self, deployment_id: str) -> DeploymentRecord | None:
         """Retrieves a clone of the deployment record by ID, or None if not found."""
