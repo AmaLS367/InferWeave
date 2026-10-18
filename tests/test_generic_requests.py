@@ -581,3 +581,152 @@ async def test_transport_close_respects_client_ownership(transport_factory):
     client = owned._get_client()
     await owned.aclose()
     assert client.is_closed and owned._client is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_multi_account_shared_client_isolation():
+    recorded = []
+    lock = asyncio.Lock()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        async with lock:
+            recorded.append(request)
+        dep = "A" if "dep-a.test" in str(request.url) else "B"
+        return httpx.Response(
+            200,
+            json={"status": "ok", "dep": dep},
+            headers=[("set-cookie", f"stolen_from_{dep}=token_{dep}; Path=/; HttpOnly")],
+        )
+
+    shared_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        headers={
+            "Authorization": "Bearer hostile-client-token",
+            "X-Hostile-Header": "hostile-secret",
+            "Host": "evil.example",
+        },
+        params={"client_default_param": "hostile_param_val"},
+        cookies={"hostile_client_cookie": "hostile_cookie_val"},
+        auth=httpx.BasicAuth("hostile_user", "hostile_pass"),
+    )
+
+    t_a = InferenceTransport(
+        "dep-a",
+        endpoint_fn=lambda: "https://dep-a.test",
+        auth_headers_fn=lambda: {"Authorization": "Bearer dep-A-token", "X-Deploy-A": "secret-A"},
+        http_client=shared_client,
+    )
+    t_b = InferenceTransport(
+        "dep-b",
+        endpoint_fn=lambda: "https://dep-b.test",
+        auth_headers_fn=lambda: {"Authorization": "Bearer dep-B-token", "X-Deploy-B": "secret-B"},
+        http_client=shared_client,
+    )
+
+    # Concurrently run requests across A and B using both generic request() and legacy post()
+    coros = [
+        t_a.request("GET", "/infer_a", params={"caller_a": "1"}, headers={"X-Caller-A": "yes", "Cookie": "caller_cookie=a"}),
+        t_b.request("GET", "/infer_b", params={"caller_b": "2"}, headers={"X-Caller-B": "yes"}),
+        t_a.post("/post_a", json={"msg": "a"}, headers={"X-Caller-Post-A": "yes"}),
+        t_b.post("/post_b", content=b"msg_b", headers={"X-Caller-Post-B": "yes"}),
+        t_a.request("PUT", "/put_a", json={"put": "a"}),
+        t_b.request("DELETE", "/del_b"),
+    ]
+    responses = await asyncio.gather(*coros)
+    assert len(responses) == 6
+    assert all(r.is_success for r in responses)
+
+    for req in recorded:
+        is_a = "dep-a.test" in str(req.url)
+        headers = dict(req.headers)
+
+        # 1. No hostile client defaults leak into requests
+        assert "x-hostile-header" not in headers
+        assert "hostile-client-token" not in str(headers)
+        assert "Basic" not in headers.get("authorization", "")
+        assert "hostile_client_cookie" not in headers.get("cookie", "")
+        assert "client_default_param" not in req.url.params
+
+        # 2. Host header matches target origin, not hostile client default
+        expected_host = "dep-a.test" if is_a else "dep-b.test"
+        assert headers.get("host") == expected_host
+
+        # 3. Deployment isolation: account credentials and cookies do not leak across accounts
+        if is_a:
+            assert headers.get("authorization") == "Bearer dep-A-token"
+            assert headers.get("x-deploy-a") == "secret-A"
+            assert "x-deploy-b" not in headers
+            assert "dep-b-token" not in str(headers)
+            assert "stolen_from_b" not in headers.get("cookie", "")
+            if req.url.path == "/infer_a":
+                assert req.url.params.get("caller_a") == "1"
+                assert headers.get("x-caller-a") == "yes"
+                assert headers.get("cookie") == "caller_cookie=a"
+        else:
+            assert headers.get("authorization") == "Bearer dep-B-token"
+            assert headers.get("x-deploy-b") == "secret-B"
+            assert "x-deploy-a" not in headers
+            assert "dep-a-token" not in str(headers)
+            assert "stolen_from_a" not in headers.get("cookie", "")
+            assert "cookie" not in headers
+
+    # 4. Response Set-Cookie did not contaminate shared client state
+    assert "stolen_from_a" not in shared_client.cookies
+    assert "stolen_from_b" not in shared_client.cookies
+    assert shared_client.cookies.get("hostile_client_cookie") == "hostile_cookie_val"
+    assert shared_client.headers["x-hostile-header"] == "hostile-secret"
+    assert shared_client.params["client_default_param"] == "hostile_param_val"
+
+    # 5. Subsequent requests from either transport remain completely clean
+    resp_subsequent = await t_a.request("GET", "/infer_a_subsequent")
+    assert resp_subsequent.is_success
+    req_subsequent = recorded[-1]
+    assert "cookie" not in req_subsequent.headers
+    assert "stolen_from_a" not in req_subsequent.headers.get("cookie", "")
+    assert "stolen_from_b" not in req_subsequent.headers.get("cookie", "")
+
+    # Cleanup
+    await shared_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sdk_multi_deployment_shared_client_isolation(weave_factory):
+    recorded = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        return httpx.Response(
+            200,
+            json={"status": "ok"},
+            headers=[("set-cookie", "leaked_sid=stolen; Path=/")],
+        )
+
+    shared_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        headers={"X-Shared-Default": "hostile", "Authorization": "Bearer hostile-token"},
+        cookies={"shared_cookie": "hostile_cookie"},
+        params={"shared_query": "hostile_query"},
+    )
+
+    weave = weave_factory(accounts=modal_pool("a", "b"))
+    weave._inference_http_client = shared_client
+    dep_a = await custom_deployment(weave, account="a")
+    dep_b = await custom_deployment(weave, account="b")
+
+    resp_a, resp_b = await asyncio.gather(
+        dep_a.request("GET", "/status", params={"account": "a"}),
+        dep_b.request("POST", "/infer", json={"input": "b"}),
+    )
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+
+    for req in recorded:
+        assert "x-shared-default" not in req.headers
+        assert "hostile-token" not in str(req.headers)
+        assert "shared_cookie" not in req.headers.get("cookie", "")
+        assert "shared_query" not in req.url.params
+        assert "leaked_sid" not in req.headers.get("cookie", "")
+
+    assert "leaked_sid" not in shared_client.cookies
+    assert shared_client.cookies.get("shared_cookie") == "hostile_cookie"
+    await shared_client.aclose()

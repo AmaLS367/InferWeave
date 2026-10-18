@@ -6,9 +6,11 @@ an unauthenticated endpoint. It is deliberately usable on its own with ``httpx.M
 """
 
 import asyncio
+import datetime
 import logging
 import math
 import random
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -181,6 +183,35 @@ class InferenceTransport:
         text = response.content.decode("utf-8", errors="replace")
         return redact(text, secrets)[:_MAX_BODY_CHARS]
 
+    @staticmethod
+    async def _send_single_request(
+        client: httpx.AsyncClient,
+        request: httpx.Request,
+    ) -> httpx.Response:
+        """Dispatches an explicit Request through client's transport without mutating client state."""
+        if client.is_closed:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        transport = client._transport_for_url(request.url)
+        start = time.perf_counter()
+        try:
+            response = await transport.handle_async_request(request)
+        except httpx.RequestError as exc:
+            exc.request = request
+            raise
+        response.request = request
+        response.default_encoding = getattr(
+            client,
+            "default_encoding",
+            getattr(client, "_default_encoding", "utf-8"),
+        )
+        try:
+            await response.aread()
+        except BaseException:
+            await response.aclose()
+            raise
+        response.elapsed = datetime.timedelta(seconds=time.perf_counter() - start)
+        return response
+
     async def _send_following_redirects(
         self,
         method: str,
@@ -207,27 +238,27 @@ class InferenceTransport:
                     f"Deployment '{self.deployment_id}' has no endpoint URL yet.",
                     deployment_id=self.deployment_id,
                 )
-            # Disable client defaults that could bypass origin checks or replace account auth.
-            try:
-                response = await client.request(
-                    method, url, content=content, json=json_body, headers=headers,
-                    timeout=timeout, params=params, follow_redirects=False, auth=None,
-                )
-            except httpx.RemoteProtocolError as err:
-                # httpx builds next_request even with redirects disabled. An invalid
-                # Location can therefore fail before it returns the redirect response.
-                if isinstance(err.__context__, httpx.InvalidURL):
-                    raise InferenceError(
-                        "Invalid redirect from the inference endpoint.",
-                        deployment_id=self.deployment_id,
-                        endpoint=diagnostic_endpoint,
-                    ) from None
-                raise
+            request = httpx.Request(
+                method,
+                url,
+                content=content,
+                json=json_body,
+                headers=headers,
+                params=params,
+                extensions={"timeout": timeout.as_dict()},
+            )
+            response = await self._send_single_request(client, request)
             params = None  # Redirect queries belong to Location, not the original request.
             location = response.headers.get("location")
             if response.status_code not in _REDIRECT_STATUSES or not location:
                 return response
             await response.aclose()
+            if any(ord(char) < 32 or ord(char) == 127 for char in location):
+                raise InferenceError(
+                    "Invalid redirect from the inference endpoint.",
+                    deployment_id=self.deployment_id,
+                    endpoint=diagnostic_endpoint,
+                )
             try:
                 target = httpx.URL(urljoin(str(response.url), location))
             except (ValueError, httpx.InvalidURL):
@@ -241,7 +272,6 @@ class InferenceTransport:
                 (target.scheme, target.host, target.port) != origin
                 or target.userinfo
                 or "\\" in location
-                or any(ord(char) < 32 or ord(char) == 127 for char in location)
             ):
                 raise InferenceError(
                     "Refusing to follow a cross-origin redirect from the inference endpoint.",
