@@ -8,12 +8,18 @@ Validates:
 3. Missing configuration: raises ValueError when profile lacks container specification.
 4. Environment merging and validation: verifies precedence and rejection of sensitive credentials
    or non-string types.
-5. Argv boundaries and command hardening: verifies discrete argv token preservation and absence
-   of shell injection.
-6. Modal compatibility: ensures add_python is preserved and accessible on RuntimeSpec and metadata.
+5. Argv boundaries and command hardening: verifies discrete argv token preservation, authoritative
+   run_args, and execution without shell interpretation.
+6. Modal compatibility: ensures add_python is preserved as a typed field on RuntimeSpec.
+7. Avoid duplicating fields: ensures hardware, healthcheck, and add_python are not duplicated in metadata.
+8. Secret isolation: prevents sensitive HealthcheckConfig.headers from leaking through metadata,
+   serialization, dry-run output, or logs, while preserving functional healthcheck behavior.
 """
 
+import json
 import shlex
+import subprocess
+import sys
 
 import pytest
 
@@ -32,6 +38,8 @@ from inferweave.runtimes.templates import (
     ContainerTemplate,
     get_runtime_template,
 )
+from inferweave.services.healthcheck_service import HealthcheckService
+from inferweave.services.provisioning_service import guard_runtime
 
 # ---------------------------------------------------------------------------
 # 1. Template Registration
@@ -85,6 +93,10 @@ def test_render_minimal_container():
     assert spec.add_python is None
     assert spec.hardware == profile.hardware
     assert spec.healthcheck == profile.healthcheck
+    # Ensure fields are not duplicated in metadata
+    assert "hardware" not in spec.metadata
+    assert "healthcheck" not in spec.metadata
+    assert "add_python" not in spec.metadata
 
 
 def test_render_image_with_digest():
@@ -143,12 +155,13 @@ def test_render_full_container_configuration():
     assert spec.env_vars == {"MODEL_DIR": "/models", "LOG_LEVEL": "INFO"}
     assert spec.healthcheck_path == "/v1/status"
     assert spec.add_python == "3.12"
-    assert spec.metadata.get("add_python") == "3.12"
-    assert spec.metadata.get("custom_tag") == "prod-east"
     assert spec.hardware == hw
     assert spec.healthcheck == hc
-    assert spec.metadata.get("hardware") == hw.model_dump()
-    assert spec.metadata.get("healthcheck") == hc.model_dump()
+    assert spec.metadata.get("custom_tag") == "prod-east"
+    # Ensure fields are preserved on typed fields, NOT duplicated into metadata
+    assert "add_python" not in spec.metadata
+    assert "hardware" not in spec.metadata
+    assert "healthcheck" not in spec.metadata
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +326,7 @@ def test_render_rejects_non_string_env_values(bad_env_val):
 
 
 # ---------------------------------------------------------------------------
-# 5. Argv Boundaries and Shell Injection Prevention
+# 5. Argv Boundaries, Authority, and Shell Injection Prevention
 # ---------------------------------------------------------------------------
 
 
@@ -323,6 +336,7 @@ ADVERSARIAL_CONTAINER_ARGS = [
     ["`echo pwned`", "| cat /etc/passwd", "&& id"],
     ["payload 'with' \"quotes\" and 'special' characters", "> /tmp/out"],
     ["--option=key:value;dangerous", "newline\narg", "tab\targ"],
+    ["*", "*.py", "arg with $VARS and `backticks`"],
 ]
 
 
@@ -345,6 +359,30 @@ def test_argv_boundaries_preserved_without_shell_injection(args_payload):
     # 2. Parsing the shell run_command with shlex.split recovers the exact same tokens
     recovered = shlex.split(spec.run_command)
     assert recovered == args_payload
+
+
+@pytest.mark.parametrize("args_payload", ADVERSARIAL_CONTAINER_ARGS)
+def test_custom_container_argv_executed_without_shell_interpretation(args_payload):
+    """Verifies that run_args is authoritative and executed without shell expansion or interpretation."""
+    profile = ModelProfile.for_container(
+        id="adv-exec",
+        image="python:3.12-slim",
+        args=args_payload,
+    )
+    spec = ContainerTemplate().render(profile, DeploymentRequest(model="adv-exec"))
+
+    assert spec.run_args == args_payload
+
+    # Execute Python directly with shell=False, echoing received sys.argv[1:]
+    script = "import sys, json; print(json.dumps(sys.argv[1:]))"
+    proc = subprocess.run(
+        [sys.executable, "-c", script, *spec.run_args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    received = json.loads(proc.stdout.strip())
+    assert received == args_payload
 
 
 def test_runtime_options_extra_cli_args_appended_to_argv():
@@ -384,7 +422,7 @@ def test_runtime_options_extra_cli_args_appended_to_argv():
 
 @pytest.mark.parametrize("py_ver", ["3.10", "3.11", "3.12", "3.12.3"])
 def test_modal_add_python_preservation(py_ver):
-    """Ensures add_python is preserved and accessible for the later Modal integration."""
+    """Ensures add_python is preserved on RuntimeSpec directly without metadata duplication."""
     profile = ModelProfile.for_container(
         id="modal-py",
         image="nvidia/cuda:12.2.0-base-ubuntu22.04",
@@ -393,32 +431,32 @@ def test_modal_add_python_preservation(py_ver):
     template = ContainerTemplate()
     spec = template.render(profile, DeploymentRequest(model="modal-py"))
 
-    # Accessible on RuntimeSpec directly
+    # Accessible on RuntimeSpec directly as typed field
     assert spec.add_python == py_ver
-    # Accessible via metadata dictionary
-    assert spec.metadata.get("add_python") == py_ver
     # Accessible on ModelProfile.container
     assert profile.container.add_python == py_ver
+    # Avoid duplicating in metadata
+    assert "add_python" not in spec.metadata
 
 
 def test_modal_add_python_none_when_unspecified():
-    """add_python defaults to None when unspecified."""
+    """add_python defaults to None when unspecified and is not in metadata."""
     profile = ModelProfile.for_container(id="no-py", image="python:3.11-slim")
     template = ContainerTemplate()
     spec = template.render(profile, DeploymentRequest(model="no-py"))
 
     assert spec.add_python is None
-    assert spec.metadata.get("add_python") is None
+    assert "add_python" not in spec.metadata
     assert profile.container.add_python is None
 
 
 # ---------------------------------------------------------------------------
-# 7. Readiness Configuration (HealthcheckConfig)
+# 7. Readiness Configuration & Header Secret Isolation
 # ---------------------------------------------------------------------------
 
 
 def test_readiness_healthcheck_preservation():
-    """Verifies that custom HealthcheckConfig is fully preserved in RuntimeSpec."""
+    """Verifies that custom HealthcheckConfig is preserved as typed field on RuntimeSpec."""
     hc = HealthcheckConfig(
         enabled=True,
         path="/v2/health/ready",
@@ -430,7 +468,7 @@ def test_readiness_healthcheck_preservation():
         expected_status_codes=[200, 204],
         consecutive_successes=2,
         method="HEAD",
-        headers={"Authorization": "Bearer internal-health-key"},
+        headers={"Accept": "application/json"},
     )
     profile = ModelProfile.for_container(
         id="custom-hc",
@@ -444,10 +482,115 @@ def test_readiness_healthcheck_preservation():
     assert spec.port == 8080
     assert spec.healthcheck_path == "/v2/health/ready"
     assert spec.healthcheck == hc
-    assert spec.metadata.get("healthcheck") == hc.model_dump()
+    # Avoid duplicating in metadata
+    assert "healthcheck" not in spec.metadata
     assert spec.healthcheck.method == "HEAD"
     assert spec.healthcheck.consecutive_successes == 2
     assert spec.healthcheck.expected_status_codes == [200, 204]
+
+
+def test_healthcheck_headers_redacted_in_serialization_and_logs():
+    """Sensitive HealthcheckConfig.headers are redacted in serialization and logs."""
+    sensitive_token = "bearer-secret-token-12345"
+    sensitive_api_key = "apikey-value-67890"
+    cookie_val = "session=secret_session_token"
+
+    hc = HealthcheckConfig(
+        path="/health",
+        port=8000,
+        headers={
+            "Authorization": f"Bearer {sensitive_token}",
+            "X-Api-Key": sensitive_api_key,
+            "Cookie": cookie_val,
+            "Accept": "application/json",
+            "User-Agent": "InferWeave/0.3.0",
+        },
+    )
+    profile = ModelProfile.for_container(
+        id="sec-hc", image="alpine:latest", healthcheck=hc
+    )
+    template = ContainerTemplate()
+    spec = template.render(profile, DeploymentRequest(model="sec-hc"))
+
+    # 1. Metadata check: healthcheck must NOT be present in metadata
+    assert "healthcheck" not in spec.metadata
+
+    # 2. Serialization check: model_dump() must redact sensitive header values
+    dump = spec.model_dump()
+    hdrs = dump["healthcheck"]["headers"]
+    assert hdrs["Authorization"] == "[REDACTED]"
+    assert hdrs["X-Api-Key"] == "[REDACTED]"
+    assert hdrs["Cookie"] == "[REDACTED]"
+    assert hdrs["Accept"] == "application/json"
+    assert hdrs["User-Agent"] == "InferWeave/0.3.0"
+    dump_str = str(dump)
+    assert sensitive_token not in dump_str
+    assert sensitive_api_key not in dump_str
+    assert cookie_val not in dump_str
+
+    # 3. JSON serialization check: model_dump_json() must redact sensitive header values
+    json_dump = spec.model_dump_json()
+    assert sensitive_token not in json_dump
+    assert sensitive_api_key not in json_dump
+    assert cookie_val not in json_dump
+    assert '"Authorization":"[REDACTED]"' in json_dump
+
+    # 4. String and repr check (logs/console): secrets must not appear
+    repr_str = repr(spec)
+    assert sensitive_token not in repr_str
+    assert sensitive_api_key not in repr_str
+    assert cookie_val not in repr_str
+    assert "[REDACTED]" in repr_str
+
+    str_val = str(spec)
+    assert sensitive_token not in str_val
+    assert sensitive_api_key not in str_val
+    assert cookie_val not in str_val
+
+
+def test_functional_healthcheck_behavior_preserved():
+    """In-memory HealthcheckConfig.headers retains actual credentials for live HTTP probes."""
+    sensitive_token = "actual-working-bearer-token"
+    hc = HealthcheckConfig(
+        path="/v1/health",
+        port=8080,
+        headers={"Authorization": f"Bearer {sensitive_token}"},
+    )
+    profile = ModelProfile.for_container(
+        id="func-hc", image="alpine:latest", healthcheck=hc
+    )
+    spec = ContainerTemplate().render(profile, DeploymentRequest(model="func-hc"))
+
+    # In memory, the real token is preserved on spec.healthcheck.headers
+    assert spec.healthcheck is not None
+    assert spec.healthcheck.headers["Authorization"] == f"Bearer {sensitive_token}"
+
+    # HealthcheckService.merge_headers retains the real token for live probes
+    service = HealthcheckService()
+    merged = service.merge_headers(
+        spec.healthcheck, extra_headers={"X-Extra": "probe-call"}
+    )
+    assert merged["Authorization"] == f"Bearer {sensitive_token}"
+    assert merged["X-Extra"] == "probe-call"
+
+
+def test_dry_run_and_guard_runtime_with_healthcheck_headers():
+    """guard_runtime and dry-run do not trip on redacted healthcheck headers."""
+    secret_token = "IW_MODAL_TOKEN_123456"
+    hc = HealthcheckConfig(
+        path="/health",
+        port=8000,
+        headers={"Authorization": f"Bearer {secret_token}"},
+    )
+    profile = ModelProfile.for_container(
+        id="dry-hc", image="alpine:latest", healthcheck=hc
+    )
+    request = DeploymentRequest(model="dry-hc", dry_run=True)
+    spec = ContainerTemplate().render(profile, request)
+
+    # guard_runtime evaluates spec.model_dump() against secrets
+    # Since headers are serialized as [REDACTED], it does not leak or trip
+    guard_runtime(spec, request.options, secrets=(secret_token,))
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +599,7 @@ def test_readiness_healthcheck_preservation():
 
 
 def test_hardware_requirements_preservation():
-    """Verifies that HardwareRequirements is preserved in RuntimeSpec."""
+    """Verifies that HardwareRequirements is preserved in RuntimeSpec typed field."""
     hw = HardwareRequirements(
         min_vram_gb=80.0,
         gpu_count=4,
@@ -474,7 +617,8 @@ def test_hardware_requirements_preservation():
     spec = template.render(profile, DeploymentRequest(model="heavy-gpu"))
 
     assert spec.hardware == hw
-    assert spec.metadata.get("hardware") == hw.model_dump()
+    # Avoid duplicating in metadata
+    assert "hardware" not in spec.metadata
     assert spec.hardware.min_vram_gb == 80.0
     assert spec.hardware.gpu_count == 4
     assert spec.hardware.recommended_gpus == ["H100", "A100"]

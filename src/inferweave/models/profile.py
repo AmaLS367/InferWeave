@@ -3,9 +3,15 @@
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from inferweave.core.credentials import is_sensitive_key
+from inferweave.core.credentials import _REDACTED, is_sensitive_key
 from inferweave.models.enums import WorkloadType
 
 
@@ -25,6 +31,18 @@ class HardwareRequirements(BaseModel):
     min_cuda_version: str | None = Field(
         default="12.1", description="Minimum CUDA version"
     )
+
+
+def _is_sensitive_header(key: str) -> bool:
+    lower_k = key.lower()
+    return is_sensitive_key(key) or lower_k in ("cookie", "set-cookie")
+
+
+def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        k: (_REDACTED if _is_sensitive_header(k) else v)
+        for k, v in headers.items()
+    }
 
 
 class HealthcheckConfig(BaseModel):
@@ -72,6 +90,17 @@ class HealthcheckConfig(BaseModel):
         default_factory=dict,
         description="Custom HTTP headers sent with probe requests",
     )
+
+    @field_serializer("headers", when_used="always")
+    def _serialize_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        return _redact_headers(headers)
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        for k, v in super().__repr_args__():
+            if k == "headers" and isinstance(v, dict):
+                yield (k, _redact_headers(v))
+            else:
+                yield (k, v)
 
 
 class ContainerSpec(BaseModel):

@@ -398,12 +398,6 @@ class ContainerTemplate(RuntimeTemplate):
         add_python = container.add_python
 
         metadata = dict(profile.metadata)
-        if add_python is not None:
-            metadata["add_python"] = add_python
-        if hardware is not None:
-            metadata["hardware"] = hardware.model_dump()
-        if healthcheck is not None:
-            metadata["healthcheck"] = healthcheck.model_dump()
 
         return RuntimeSpec(
             name=self.name,
