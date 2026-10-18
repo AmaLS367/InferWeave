@@ -40,7 +40,11 @@ from inferweave.models.profile import (
     HealthcheckConfig,
     ModelProfile,
 )
-from inferweave.providers.skypilot import SkyPilotProvider, resolve_worker_workdir
+from inferweave.providers.skypilot import (
+    SkyPilotProvider,
+    _uses_inferweave_worker,
+    resolve_worker_workdir,
+)
 from inferweave.runtimes.base import RuntimeSpec
 from inferweave.services.provisioning_service import (
     ProvisionCandidate,
@@ -1067,11 +1071,30 @@ def test_skypilot_custom_container_respects_runtime_hardware_and_request_overrid
     assert payload_explicit["resources"]["accelerators"] == "A100:2"
 
 
-def test_skypilot_custom_container_with_inferweave_substring_in_args_does_not_stage_workdir(tmp_path):
-    """Arguments mentioning 'inferweave' (e.g. model repo or service tag) must not force workdir staging."""
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["/app/server", "--model", "inferweave/custom-model", "--tag", "inferweave-prod"],
+        ["/app/server", "--model", "inferweave.custom", "--config", "inferweave.yaml"],
+        ["/app/server", "inferweave", "inferweave.workers.flux"],
+        ["/app/server", "-m", "inferweave.custom"],
+        ["/app/server", "-m", "inferweave.workers.flux"],
+        ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model", "inferweave.custom"],
+        ["python3", "-m", "vllm.entrypoints.openai.api_server", "-m", "inferweave.workers.flux"],
+        ["python3", "serve.py", "--model", "inferweave.custom"],
+        ["python3", "serve.py", "-m", "inferweave.workers.flux"],
+        ["python3", "-c", "import sys", "-m", "inferweave.workers.flux"],
+        ["python3", "--", "-m", "inferweave.workers.flux"],
+    ],
+)
+def test_skypilot_custom_container_with_inferweave_substring_in_args_does_not_stage_workdir(
+    tmp_path, args: list[str]
+):
+    """Non-module arguments mentioning 'inferweave' or 'inferweave.*' must not force workdir staging."""
+    assert _uses_inferweave_worker(args) is False
     profile = _container_profile(
-        model_id="inferweave/custom-model",
-        args=["/app/server", "--model", "inferweave/custom-model", "--tag", "inferweave-prod"],
+        model_id="inferweave.custom",
+        args=args,
         port=8080,
     )
     request, runtime = _render_container(profile)
@@ -1082,6 +1105,33 @@ def test_skypilot_custom_container_with_inferweave_substring_in_args_does_not_st
 
     assert payload["workdir"] is None
     assert "PYTHONPATH" not in payload["envs"]
+
+
+@pytest.mark.parametrize(
+    ("run_args", "expected"),
+    [
+        (["python3", "-m", "inferweave.workers.flux", "--model", "flux", "--port", "8000"], True),
+        (["python", "-m", "inferweave.workers.wan", "--model", "wan", "--port", "8000"], True),
+        (["/usr/bin/python3.12", "-u", "-m", "inferweave.workers.flux"], True),
+        (["/app/.venv/bin/python", "-B", "-O", "-m", "inferweave.workers.wan"], True),
+        (["python3", "-W", "ignore", "-X", "utf8", "-m", "inferweave.workers.flux"], True),
+        (["python3", "-minferweave.workers.flux", "--port", "8000"], True),
+        (["python3", "-um", "inferweave.workers.flux"], True),
+        (["/usr/bin/env", "python3", "-m", "inferweave.workers.flux"], True),
+        (["env", "-u", "PYTHONHOME", "PYTHONUNBUFFERED=1", "python3", "-m", "inferweave"], True),
+        ([], False),
+        (["python3", "-m"], False),
+        (["python3", "-m", "inferweave."], False),
+        (["python3", "-m", "inferweave..flux"], False),
+        (["python3", "-m", "inferweave.custom-model"], False),
+        (["/usr/bin/env", "-u", "FOO"], False),
+    ],
+)
+def test_uses_inferweave_worker_detects_python_module_execution(
+    run_args: list[str], expected: bool
+):
+    """_uses_inferweave_worker matches only actual Python -m execution of valid inferweave modules."""
+    assert _uses_inferweave_worker(run_args) is expected
 
 
 @pytest.mark.parametrize(

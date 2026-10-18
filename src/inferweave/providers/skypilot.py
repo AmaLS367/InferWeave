@@ -57,12 +57,71 @@ class SkyPilotConfigurationError(DeploymentError, ValueError):
     """Raised when a runtime or container specification is invalid for SkyPilot."""
 
 
+_PYTHON_EXE_RE = re.compile(
+    r"^(?:python|pypy)(?:\d+(?:\.\d+)*[a-z]?)?(?:\.exe)?$",
+    re.IGNORECASE,
+)
+_PYTHON_SHORT_FLAGS_RE = re.compile(r"^-[bBdEiIOPqsSuvx]+$")
+_PYTHON_SHORT_M_RE = re.compile(r"^-[bBdEiIOPqsSuvx]*m(.*)$")
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_inferweave_module(module: str) -> bool:
+    """Whether ``module`` is ``inferweave`` or a valid dotted ``inferweave.*`` module path."""
+    parts = module.split(".")
+    return parts[0] == "inferweave" and all(part.isidentifier() for part in parts)
+
+
 def _uses_inferweave_worker(run_args: list[str]) -> bool:
     """Whether the launch argv invokes an in-tree inferweave Python module."""
-    return any(
-        arg == "inferweave" or arg.startswith("inferweave.")
-        for arg in run_args
-    )
+    if not run_args:
+        return False
+
+    idx = 0
+    first_exe = re.split(r"[\\/]", run_args[0].strip())[-1]
+    if first_exe.lower() in ("env", "env.exe"):
+        idx = 1
+        while idx < len(run_args):
+            tok = run_args[idx]
+            if tok == "--":
+                idx += 1
+                break
+            if tok in ("-u", "--unset", "-C", "--chdir"):
+                idx += 2
+                continue
+            if tok.startswith("-") or _ENV_ASSIGNMENT_RE.match(tok):
+                idx += 1
+                continue
+            break
+
+    if idx >= len(run_args):
+        return False
+
+    exe_name = re.split(r"[\\/]", run_args[idx].strip())[-1]
+    if not _PYTHON_EXE_RE.fullmatch(exe_name):
+        return False
+
+    idx += 1
+    while idx < len(run_args):
+        tok = run_args[idx]
+        m_match = _PYTHON_SHORT_M_RE.fullmatch(tok)
+        if m_match:
+            attached = m_match.group(1)
+            if attached:
+                return _is_inferweave_module(attached)
+            return idx + 1 < len(run_args) and _is_inferweave_module(run_args[idx + 1])
+        if tok in ("-W", "-X", "--check-hash-based-pycs"):
+            idx += 2
+            continue
+        if (
+            tok.startswith(("-W", "-X", "--check-hash-based-pycs="))
+            or _PYTHON_SHORT_FLAGS_RE.fullmatch(tok)
+        ):
+            idx += 1
+            continue
+        return False
+
+    return False
 
 
 def resolve_worker_workdir(
