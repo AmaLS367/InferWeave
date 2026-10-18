@@ -415,7 +415,9 @@ class InferWeave:
         if enable_inference:
             transport = InferenceTransport(
                 deployment_id=deployment.id,
-                endpoint_fn=lambda: deployment.endpoint_url,
+                endpoint_fn=lambda: (
+                    deployment.endpoint_url if deployment.state != DeploymentState.STOPPED else None
+                ),
                 auth_headers_fn=lambda: self._auth_headers_for(deployment),
                 config=self._inference_config,
                 http_client=self._inference_http_client,

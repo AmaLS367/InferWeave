@@ -1,9 +1,10 @@
 """Deployment request, status, and live deployment handle definitions."""
 
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from pydantic import BaseModel, Field, model_validator
 
 from inferweave.domain.options import DeploymentOptions
@@ -211,14 +212,14 @@ class Deployment:
             return self._status
         return self._status
 
-    def _inference(self, operation: str, expected: WorkloadType) -> "InferenceClient":
+    def _inference(self, operation: str, expected: WorkloadType | None = None) -> "InferenceClient":
         from inferweave.core.exceptions import (
             EndpointNotReadyError,
             InferenceError,
             UnsupportedWorkloadError,
         )
 
-        if self._workload_type is not None and self._workload_type != expected:
+        if expected is not None and self._workload_type is not None and self._workload_type != expected:
             raise UnsupportedWorkloadError(
                 f"{operation}() requires a '{expected.value}' deployment, but "
                 f"'{self.id}' has workload type '{self._workload_type.value}'.",
@@ -231,6 +232,13 @@ class Deployment:
                 f"Cannot call {operation}(): deployment '{self.id}' is stopped.",
                 deployment_id=self.id,
             )
+        if expected is None and self.state in {
+            DeploymentState.PENDING, DeploymentState.PROVISIONING, DeploymentState.FAILED,
+        }:
+            raise EndpointNotReadyError(
+                f"Cannot call {operation}(): deployment '{self.id}' is {self.state.value}.",
+                deployment_id=self.id,
+            )
         if self._inference_client is None:
             raise InferenceError(
                 f"Cannot call {operation}(): deployment '{self.id}' has no inference client "
@@ -238,6 +246,35 @@ class Deployment:
                 deployment_id=self.id,
             )
         return self._inference_client
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+        json: object | None = None,
+        content: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        """Sends an HTTP request to this deployment and returns a buffered 2xx response.
+
+        Works for any workload, including custom containers recovered by attach()/find().
+        Paths are relative to the deployment endpoint; external URLs and unsafe redirects
+        are refused. Provider authentication takes precedence over caller headers.
+        JSON and raw content are mutually exclusive. ``timeout`` overrides the configured
+        response timeout in seconds; the configured connection timeout still applies.
+
+        Idempotent methods retry cold-start failures with bounded backoff. POST/PATCH are
+        never automatically retried. HTTP failures raise InferenceError (including its
+        timeout/endpoint subclasses). Activity and in-flight tracking include failures
+        and cancellation, as for synthesize()/render().
+        """
+        return await self._inference("request").request(
+            method, path, params=params, json=json, content=content,
+            headers=headers, timeout=timeout,
+        )
 
     async def synthesize(
         self,

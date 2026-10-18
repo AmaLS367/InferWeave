@@ -9,8 +9,9 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 _MAX_BODY_CHARS = 500
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"})
+_HTTP_METHODS = _IDEMPOTENT_METHODS | {"POST", "PATCH"}
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,8 @@ class InferenceConfig:
     connections and HTTP 502/503 (Modal wakes a scaled-to-zero app while answering these).
     Read timeouts and every other status (including 4xx) are never retried, because replaying a
     slow or rejected generation would only duplicate cost. The defaults allow roughly a minute
-    of waiting for a container to start, then give up.
+    of waiting for a container to start, then give up. Generic ``request()`` additionally
+    disables retries for non-idempotent methods; ``post()`` retains the audio/image policy.
     """
 
     timeout_seconds: float = 300.0
@@ -65,7 +69,7 @@ class InferenceConfig:
 def redact(text: str, secrets: Mapping[str, str] | list[str] | tuple[str, ...]) -> str:
     """Replaces every known secret value in ``text`` with a placeholder."""
     values = secrets.values() if isinstance(secrets, Mapping) else secrets
-    for value in values:
+    for value in sorted(values, key=len, reverse=True):
         if value:
             text = text.replace(value, "[REDACTED]")
     return text
@@ -81,7 +85,7 @@ def safe_endpoint(url: str) -> str:
 
 
 class InferenceTransport:
-    """Sends authenticated POST requests to a deployment endpoint with bounded retries."""
+    """Sends deployment-bound HTTP requests with authentication and bounded retries."""
 
     def __init__(
         self,
@@ -128,6 +132,15 @@ class InferenceTransport:
 
     def build_url(self, path: str) -> str:
         """Joins the current deployment endpoint and an API path."""
+        if (
+            path != path.lstrip()
+            or "\\" in path
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        ):
+            raise ValueError("Inference path must be a relative API path.")
+        api = urlsplit(path)
+        if api.scheme or api.netloc or path.startswith("//") or "#" in path:
+            raise ValueError("Inference path must be relative, without an origin or fragment.")
         endpoint = (self._endpoint_fn() or "").strip()
         if not endpoint:
             raise EndpointNotReadyError(
@@ -137,12 +150,14 @@ class InferenceTransport:
         if "://" not in endpoint:
             endpoint = f"http://{endpoint}"
         parts = urlsplit(endpoint)
+        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username is not None:
+            raise ValueError("Inference endpoint must be an HTTP(S) URL without userinfo.")
         netloc = parts.netloc
         if parts.scheme == "http" and parts.port is None and self._default_port:
             netloc = f"{netloc}:{self._default_port}"
         base_path = parts.path.rstrip("/")
-        api_path = path if path.startswith("/") else f"/{path}"
-        return urlunsplit((parts.scheme, netloc, f"{base_path}{api_path}", "", ""))
+        api_path = api.path if api.path.startswith("/") else f"/{api.path}"
+        return urlunsplit((parts.scheme, netloc, f"{base_path}{api_path}", api.query, ""))
 
     def _backoff_delay(self, attempt: int, retry_after: float | None) -> float:
         cfg = self.config
@@ -163,16 +178,19 @@ class InferenceTransport:
             return None
 
     def _body_snippet(self, response: httpx.Response, secrets: Mapping[str, str]) -> str:
-        text = response.content[:_MAX_BODY_CHARS * 2].decode("utf-8", errors="replace")
+        text = response.content.decode("utf-8", errors="replace")
         return redact(text, secrets)[:_MAX_BODY_CHARS]
 
     async def _send_following_redirects(
         self,
+        method: str,
         url: str,
-        content: bytes | None,
+        content: bytes | str | None,
         json_body: object,
-        headers: dict[str, str],
+        headers: httpx.Headers,
         timeout: httpx.Timeout,
+        params: httpx.QueryParams | None,
+        diagnostic_endpoint: str,
     ) -> httpx.Response:
         """Sends one logical request, following only same-origin redirects.
 
@@ -181,36 +199,69 @@ class InferenceTransport:
         origin are refused instead of followed.
         """
         client = self._get_client()
-        method = "POST"
-        origin = urlsplit(url)[:2]
+        initial = httpx.URL(url)
+        origin = (initial.scheme, initial.host, initial.port)
         for _ in range(_MAX_REDIRECTS + 1):
-            kwargs: dict[str, object] = {"headers": headers, "timeout": timeout}
-            if method == "POST":
-                if json_body is not None:
-                    kwargs["json"] = json_body
-                elif content is not None:
-                    kwargs["content"] = content
-            response = await client.request(method, url, **kwargs)  # type: ignore[arg-type]
+            if not self._endpoint_fn():
+                raise EndpointNotReadyError(
+                    f"Deployment '{self.deployment_id}' has no endpoint URL yet.",
+                    deployment_id=self.deployment_id,
+                )
+            # Disable client defaults that could bypass origin checks or replace account auth.
+            try:
+                response = await client.request(
+                    method, url, content=content, json=json_body, headers=headers,
+                    timeout=timeout, params=params, follow_redirects=False, auth=None,
+                )
+            except httpx.RemoteProtocolError as err:
+                # httpx builds next_request even with redirects disabled. An invalid
+                # Location can therefore fail before it returns the redirect response.
+                if isinstance(err.__context__, httpx.InvalidURL):
+                    raise InferenceError(
+                        "Invalid redirect from the inference endpoint.",
+                        deployment_id=self.deployment_id,
+                        endpoint=diagnostic_endpoint,
+                    ) from None
+                raise
+            params = None  # Redirect queries belong to Location, not the original request.
             location = response.headers.get("location")
             if response.status_code not in _REDIRECT_STATUSES or not location:
                 return response
-            target = urljoin(url, location)
-            if urlsplit(target)[:2] != origin:
+            await response.aclose()
+            try:
+                target = httpx.URL(urljoin(str(response.url), location))
+            except (ValueError, httpx.InvalidURL):
+                raise InferenceError(
+                    "Invalid redirect from the inference endpoint.",
+                    deployment_id=self.deployment_id,
+                    status_code=response.status_code,
+                    endpoint=diagnostic_endpoint,
+                ) from None
+            if (
+                (target.scheme, target.host, target.port) != origin
+                or target.userinfo
+                or "\\" in location
+                or any(ord(char) < 32 or ord(char) == 127 for char in location)
+            ):
                 raise InferenceError(
                     "Refusing to follow a cross-origin redirect from the inference endpoint.",
                     deployment_id=self.deployment_id,
                     status_code=response.status_code,
-                    endpoint=safe_endpoint(url),
+                    endpoint=diagnostic_endpoint,
                 )
-            if response.status_code == 303 or (
+            if (response.status_code == 303 and method != "HEAD") or (
                 response.status_code in {301, 302} and method == "POST"
             ):
                 method = "GET"
-            url = target
+                content, json_body = None, None
+                headers = httpx.Headers(headers)
+                for key in ("content-type", "content-length", "transfer-encoding"):
+                    headers.pop(key, None)
+            url = str(target)
         raise InferenceError(
             "Too many redirects from the inference endpoint.",
             deployment_id=self.deployment_id,
-            endpoint=safe_endpoint(url),
+            endpoint=diagnostic_endpoint,
         )
 
     async def post(
@@ -230,6 +281,50 @@ class InferenceTransport:
             InferenceTimeoutError: the request timed out while waiting for a response.
             InferenceError: any other failure (including 4xx and refused redirects).
         """
+        return await self._request(
+            "POST", path, content=content if json is None else None, json=json,
+            headers=headers, timeout=timeout,
+            retry=True,
+        )
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+        json: object | None = None,
+        content: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        """Returns a buffered 2xx response; HTTP failures use the inference error types.
+
+        Only idempotent methods retry cold-start failures. POST/PATCH are attempted once.
+        Read/write timeouts are never retried. JSON and raw content are mutually exclusive.
+        """
+        method = method.upper()
+        if method not in _HTTP_METHODS:
+            raise ValueError("Unsupported inference HTTP method.")
+        if content is not None and json is not None:
+            raise ValueError("Pass either json or content, not both.")
+        return await self._request(
+            method, path, params=params, content=content, json=json, headers=headers,
+            timeout=timeout, retry=method in _IDEMPOTENT_METHODS,
+        )
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | str | None = None,
+        json: object | None = None,
+        params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        retry: bool,
+    ) -> httpx.Response:
         cfg = self.config
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("Inference timeout must be positive and finite.")
@@ -237,43 +332,59 @@ class InferenceTransport:
             timeout if timeout is not None else cfg.timeout_seconds,
             connect=cfg.connect_timeout_seconds,
         )
+        request_params = (
+            httpx.QueryParams(params if isinstance(params, Mapping) else list(params))
+            if params is not None else None
+        )
         last_failure = "no attempt made"
         last_status: int | None = None
         last_body: str | None = None
         url = ""
         secrets: dict[str, str] = {}
+        max_retries = cfg.max_retries if retry else 0
 
-        for attempt in range(cfg.max_retries + 1):
+        for attempt in range(max_retries + 1):
             url = self.build_url(path)
             auth = self._auth_headers()
-            secrets = auth
-            request_headers = {**(headers or {}), **auth}
+            request_headers = httpx.Headers(headers)
+            if "host" in request_headers:
+                raise ValueError("Overriding the inference Host header is not allowed.")
+            request_headers.update(auth)  # Case-insensitive; remove caller duplicates.
+            secrets = dict(request_headers)
+            for key in ("authorization", "proxy-authorization"):
+                if value := request_headers.get(key):
+                    # A server may echo the token without the Bearer/Basic scheme.
+                    secrets[f"{key}-credential"] = value.partition(" ")[2]
+            request_headers["Host"] = httpx.URL(url).netloc.decode("ascii")
+            diagnostic_endpoint = redact(safe_endpoint(url), secrets)
             retry_after: float | None = None
             try:
                 response = await self._send_following_redirects(
-                    url, content, json, request_headers, request_timeout
+                    method, url, content, json, request_headers, request_timeout,
+                    request_params, diagnostic_endpoint,
                 )
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as err:
                 last_failure = f"connection failed ({type(err).__name__})"
                 last_status, last_body = None, None
             except httpx.TimeoutException as err:
                 raise InferenceTimeoutError(
-                    f"Inference request to {safe_endpoint(url)} timed out "
+                    f"Inference request to {diagnostic_endpoint} timed out "
                     f"({type(err).__name__}).",
                     deployment_id=self.deployment_id,
-                    endpoint=safe_endpoint(url),
+                    endpoint=diagnostic_endpoint,
                 ) from None
             except httpx.HTTPError as err:
                 raise InferenceError(
-                    f"Inference request to {safe_endpoint(url)} failed "
+                    f"Inference request to {diagnostic_endpoint} failed "
                     f"({type(err).__name__}).",
                     deployment_id=self.deployment_id,
-                    endpoint=safe_endpoint(url),
+                    endpoint=diagnostic_endpoint,
                 ) from None
             else:
                 if response.is_success:
                     return response
                 body = self._body_snippet(response, secrets)
+                await response.aclose()
                 if response.status_code in cfg.retry_statuses:
                     last_failure = f"HTTP {response.status_code}"
                     last_status, last_body = response.status_code, body
@@ -286,15 +397,15 @@ class InferenceTransport:
                         else ""
                     )
                     raise InferenceError(
-                        f"Inference request to {safe_endpoint(url)} failed with "
+                        f"Inference request to {diagnostic_endpoint} failed with "
                         f"HTTP {response.status_code}.{hint}",
                         deployment_id=self.deployment_id,
                         status_code=response.status_code,
-                        endpoint=safe_endpoint(url),
+                        endpoint=diagnostic_endpoint,
                         response_body=body,
                     )
 
-            if attempt >= cfg.max_retries:
+            if attempt >= max_retries:
                 break
             delay = self._backoff_delay(attempt, retry_after)
             logger.info(
@@ -302,16 +413,16 @@ class InferenceTransport:
                 self.deployment_id,
                 last_failure,
                 attempt + 1,
-                cfg.max_retries,
+                max_retries,
                 delay,
             )
             await self._sleep(delay)
 
         raise EndpointNotReadyError(
-            f"Endpoint {safe_endpoint(url)} of deployment '{self.deployment_id}' was not "
-            f"ready after {cfg.max_retries} retries (last failure: {last_failure}).",
+            f"Endpoint {diagnostic_endpoint} of deployment '{self.deployment_id}' was not "
+            f"ready after {max_retries} retries (last failure: {last_failure}).",
             deployment_id=self.deployment_id,
             status_code=last_status,
-            endpoint=safe_endpoint(url),
+            endpoint=diagnostic_endpoint,
             response_body=last_body,
         )

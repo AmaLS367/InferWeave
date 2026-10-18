@@ -87,6 +87,13 @@ await deployment.render(
     steps: int | None = None, seed: int | None = None, n: int = 1, *,
     guidance_scale: float | None = None, timeout: float | None = None,
 ) -> list[bytes]
+
+await deployment.request(
+    method: str, path: str, *,
+    params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+    json: object | None = None, content: bytes | str | None = None,
+    headers: Mapping[str, str] | None = None, timeout: float | None = None,
+) -> httpx.Response
 ```
 
 Audio only: `ReferenceAudio(audio: bytes, text: str)` supplies in-context
@@ -98,6 +105,41 @@ Image only: dimensions/steps/seed/n map to FLUX JSON, returning decoded image
 bytes. Validation checks JSON/base64/count, not full image integrity. Wrong
 workloads fail before activity; other calls count at start/end, including failure,
 and protect local in-flight requests from idle shutdown.
+
+`request()` works on every workload, including `ModelProfile.for_container()`
+deployments recovered through `attach()` or `find()` without re-registering the
+profile. The response is fully buffered: use `.status_code`, `.headers`, `.json()`
+or `.content` for JSON and binary APIs. HTTP failures raise the existing inference
+errors. For example, using an active deployment handle:
+
+```python
+status = await deployment.request("GET", "/v1/status", params={"verbose": True})
+result = await deployment.request("POST", "/v1/predict", json={"inputs": [1, 2]})
+binary = await deployment.request(
+    "POST", "/v1/process", content=b"raw input",
+    headers={"Content-Type": "application/octet-stream"}, timeout=120,
+)
+output = binary.content
+```
+
+Paths are relative to the endpoint's base path, with or without a leading `/`;
+query strings are supported. Explicit `params` replace a query string in `path`,
+as in httpx; pass a sequence of pairs for repeated query keys. Absolute URLs,
+protocol-relative URLs, URL userinfo, backslashes and control characters are
+refused. Redirects are bounded and must retain the same scheme, host and port.
+Provider auth headers override caller headers regardless of case; `Host` cannot
+be overridden. JSON and raw `content` are mutually exclusive. Positive finite
+`timeout` overrides the response/write/pool timeout; the configured connection
+timeout still applies.
+
+Supported methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS and TRACE.
+GET/HEAD/PUT/DELETE/OPTIONS/TRACE retry configured cold-start conditions with
+bounded backoff; POST/PATCH are never automatically retried, including when a
+redirected result fetch fails. Read/write/pool timeouts are never retried.
+Existing audio/image retry behavior is unchanged. Stopped, failed, pending,
+provisioning, dry-run and endpoint-less handles cannot make generic requests.
+Requests count as activity at start and end, including failure and cancellation;
+in-flight requests prevent idle shutdown.
 
 | Handle method | Return / behavior |
 | --- | --- |
@@ -123,7 +165,9 @@ ImageGenerationClient(transport)
 ```
 
 Transport: `await post(path, *, content=None, json=None, headers=None, timeout=None)
--> httpx.Response`, `await aclose() -> None`. Audio/image clients have the handle
+-> httpx.Response`, `await request(method, path, *, params=None, json=None,
+content=None, headers=None, timeout=None) -> httpx.Response`,
+`await aclose() -> None`. Audio/image clients have the handle
 inference signatures. Unified client dispatches/tracks activity and has `aclose()`.
 
 `EndpointAuthPort.headers_for(provider: str, endpoint_url: str | None,

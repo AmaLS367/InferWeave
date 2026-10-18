@@ -2,8 +2,11 @@
 
 import inspect
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from typing import Any
+
+import httpx
 
 from inferweave.clients.audio import FishSpeechClient, ReferenceAudio
 from inferweave.clients.image import ImageGenerationClient
@@ -17,7 +20,7 @@ ActivityCallback = Callable[[], Awaitable[None] | None]
 
 
 class InferenceClient:
-    """Runs audio and image inference against one deployment.
+    """Runs generic HTTP, audio and image inference against one deployment.
 
     Activity semantics (the contract used by the idle/destroy policy):
 
@@ -126,6 +129,24 @@ class InferenceClient:
                 max_new_tokens=max_new_tokens,
                 normalize=normalize,
                 timeout=timeout,
+            )
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+        json: object | None = None,
+        content: bytes | str | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        """Sends a workload-independent HTTP request with lifecycle activity tracking."""
+        async with self._activity():
+            return await self._transport.request(
+                method, path, params=params, json=json, content=content,
+                headers=headers, timeout=timeout,
             )
 
     async def render(
