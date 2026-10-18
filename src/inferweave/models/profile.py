@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from inferweave.core.credentials import is_sensitive_key
 from inferweave.models.enums import WorkloadType
@@ -141,17 +141,13 @@ class ContainerSpec(BaseModel):
     @field_validator("port", mode="before")
     @classmethod
     def _validate_port(cls, value: Any) -> int:
-        if isinstance(value, bool):
-            raise TypeError("port must be an integer, not a boolean")
-        try:
-            port_val = int(value)
-        except (ValueError, TypeError) as err:
-            raise ValueError(f"Invalid port: {value}") from err
-        if isinstance(value, float) and not value.is_integer():
-            raise ValueError(f"port must be an integer, got {value}")
-        if port_val < 1 or port_val > 65535:
-            raise ValueError(f"port must be an integer from 1 to 65535, got {port_val}")
-        return port_val
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(
+                f"port must be an integer, got {type(value).__name__}: {value!r}"
+            )
+        if value < 1 or value > 65535:
+            raise ValueError(f"port must be an integer from 1 to 65535, got {value}")
+        return value
 
     @field_validator("setup_commands", mode="before")
     @classmethod
@@ -205,7 +201,7 @@ class ContainerSpec(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("add_python cannot be empty")
-        if not re.match(r"^\d+(\.\d+)*$", cleaned):
+        if not re.fullmatch(r"^\d+(\.\d+)*$", cleaned):
             raise ValueError(
                 f"Invalid Python version string '{value}'; expected format like '3.12'"
             )
@@ -244,17 +240,28 @@ class ModelProfile(BaseModel):
         description="Custom container configuration for container-backed workloads",
     )
 
-    @field_validator("default_env")
-    @classmethod
-    def _validate_default_env(cls, value: dict[str, str]) -> dict[str, str]:
-        if not isinstance(value, dict):
-            return value
-        for key in value:
-            if is_sensitive_key(key):
-                raise ValueError(
-                    f"Platform credentials and sensitive keys are forbidden in profile default_env: '{key}'"
-                )
-        return value
+    @model_validator(mode="after")
+    def _validate_container_profile(self) -> "ModelProfile":
+        is_container_profile = (
+            self.container is not None or self.default_runtime == "container"
+        )
+        if is_container_profile and self.default_env:
+            for key in self.default_env:
+                if is_sensitive_key(key):
+                    raise ValueError(
+                        f"Platform credentials and sensitive keys are forbidden in profile default_env: '{key}'"
+                    )
+
+        if (
+            self.container is not None
+            and self.healthcheck is not None
+            and self.container.port != self.healthcheck.port
+        ):
+            raise ValueError(
+                f"Inconsistent configuration: container.port ({self.container.port}) "
+                f"and healthcheck.port ({self.healthcheck.port}) must match."
+            )
+        return self
 
     @classmethod
     def for_container(
@@ -262,7 +269,7 @@ class ModelProfile(BaseModel):
         id: str,
         image: str,
         args: list[str] | None = None,
-        port: int = 8000,
+        port: int | None = None,
         health_path: str = "/health",
         min_vram_gb: float = 0.0,
         *,
@@ -283,12 +290,42 @@ class ModelProfile(BaseModel):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> "ModelProfile":
-        """Convenience factory to construct a ModelProfile for a containerized workload."""
+        """Convenience factory to construct a ModelProfile for a containerized workload.
+
+        Always produces a profile with ``workload_type=WorkloadType.CUSTOM`` and
+        ``default_runtime="container"``. These settings cannot be overridden through kwargs.
+
+        In container profiles, the container port and healthcheck port must be consistent.
+        If an explicit healthcheck is provided without a port argument, container.port inherits
+        healthcheck.port. Providing conflicting port and healthcheck.port values raises a ValueError.
+        """
+        if "workload_type" in kwargs:
+            val = kwargs.pop("workload_type")
+            if val != WorkloadType.CUSTOM:
+                raise ValueError(
+                    f"Cannot override workload_type in for_container(); must be {WorkloadType.CUSTOM}, got {val!r}"
+                )
+
+        if "default_runtime" in kwargs:
+            val = kwargs.pop("default_runtime")
+            if val != "container":
+                raise ValueError(
+                    f"Cannot override default_runtime in for_container(); must be 'container', got {val!r}"
+                )
+
+        if port is not None and healthcheck is not None and port != healthcheck.port:
+            raise ValueError(
+                f"Inconsistent configuration: container port ({port}) and "
+                f"healthcheck.port ({healthcheck.port}) must match."
+            )
+
+        resolved_port = port if port is not None else (healthcheck.port if healthcheck is not None else 8000)
+
         container_args = list(args) if args is not None else []
         container_spec = ContainerSpec(
             image=image,
             args=container_args,
-            port=port,
+            port=resolved_port,
             setup_commands=list(setup_commands) if setup_commands is not None else [],
             env=dict(env or {}),
             add_python=add_python,
@@ -311,20 +348,17 @@ class ModelProfile(BaseModel):
         if healthcheck is not None:
             hc = healthcheck
         else:
-            hc = HealthcheckConfig(port=port, path=health_path)
+            hc = HealthcheckConfig(port=resolved_port, path=health_path)
 
         profile_env = dict(env or {})
         if default_env:
             profile_env.update(default_env)
 
-        workload_type = kwargs.pop("workload_type", WorkloadType.CUSTOM)
-        default_runtime = kwargs.pop("default_runtime", "container")
-
         return cls(
             id=id,
             name=name or id,
-            workload_type=workload_type,
-            default_runtime=default_runtime,
+            workload_type=WorkloadType.CUSTOM,
+            default_runtime="container",
             source=source,
             artifact_id=artifact_id,
             hardware=hw,

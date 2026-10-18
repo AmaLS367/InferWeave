@@ -83,7 +83,7 @@ def test_container_spec_rejects_invalid_image(bad_image):
 
 
 @pytest.mark.parametrize(
-    "bad_port", [0, -1, 65536, 70000, "not-a-port", 8000.5, True, False]
+    "bad_port", [0, -1, 65536, 70000, "not-a-port", "8000", 8000.0, 8000.5, True, False]
 )
 def test_container_spec_rejects_invalid_port(bad_port):
     with pytest.raises((ValidationError, ValueError, TypeError)):
@@ -277,7 +277,7 @@ def test_for_container_explicit_hardware_and_healthcheck():
     )
     assert profile.hardware is hw
     assert profile.healthcheck is hc
-    assert profile.container.port == 8000
+    assert profile.container.port == 8888
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +351,145 @@ def test_round_trip_serialization_with_container():
     assert loaded.container.add_python == "3.12"
     assert loaded.healthcheck.port == 9999
     assert loaded.healthcheck.path == "/status"
+
+
+# ---------------------------------------------------------------------------
+# 6. Regression tests for T1.1 fixes
+# ---------------------------------------------------------------------------
+
+
+def test_for_container_always_produces_custom_workload_and_container_runtime():
+    profile = ModelProfile.for_container(
+        id="strict-profile",
+        image="alpine:latest",
+    )
+    assert profile.workload_type == WorkloadType.CUSTOM
+    assert profile.default_runtime == "container"
+
+
+def test_for_container_rejects_workload_type_override():
+    with pytest.raises(ValueError, match="Cannot override workload_type"):
+        ModelProfile.for_container(
+            id="override-workload",
+            image="alpine:latest",
+            workload_type=WorkloadType.LLM,
+        )
+
+
+def test_for_container_rejects_default_runtime_override():
+    with pytest.raises(ValueError, match="Cannot override default_runtime"):
+        ModelProfile.for_container(
+            id="override-runtime",
+            image="alpine:latest",
+            default_runtime="vllm",
+        )
+
+
+def test_for_container_allows_matching_workload_type_and_runtime_kwargs():
+    profile = ModelProfile.for_container(
+        id="redundant-kwargs",
+        image="alpine:latest",
+        workload_type=WorkloadType.CUSTOM,
+        default_runtime="container",
+    )
+    assert profile.workload_type == WorkloadType.CUSTOM
+    assert profile.default_runtime == "container"
+
+
+@pytest.mark.parametrize("cred_key", PLATFORM_CREDENTIAL_KEYS)
+def test_legacy_profile_permits_credentials_in_default_env(cred_key):
+    """Legacy profiles (container=None, non-container runtime) must allow credentials in default_env."""
+    profile = ModelProfile(
+        id="legacy-llm",
+        name="Legacy LLM",
+        workload_type=WorkloadType.LLM,
+        default_runtime="vllm",
+        hardware=HardwareRequirements(min_vram_gb=16),
+        default_env={cred_key: "legacy-token"},
+    )
+    assert profile.default_env[cred_key] == "legacy-token"
+
+
+@pytest.mark.parametrize("cred_key", PLATFORM_CREDENTIAL_KEYS)
+def test_container_profile_rejects_credentials_in_default_env(cred_key):
+    """Container profiles must reject platform credentials in default_env."""
+    with pytest.raises((ValidationError, ValueError)):
+        ModelProfile(
+            id="container-profile",
+            name="Container Profile",
+            workload_type=WorkloadType.CUSTOM,
+            default_runtime="container",
+            hardware=HardwareRequirements(min_vram_gb=16),
+            default_env={cred_key: "secret"},
+            container=ContainerSpec(image="alpine"),
+        )
+
+
+@pytest.mark.parametrize("invalid_port", ["8000", 8000.0, 8000.5, True, False, "80", 80.0])
+def test_container_spec_port_strict_rejects_strings_floats_booleans(invalid_port):
+    with pytest.raises((ValidationError, TypeError)):
+        ContainerSpec(image="alpine:latest", port=invalid_port)
+
+
+@pytest.mark.parametrize(
+    "invalid_py",
+    [
+        "3.12-rc1",
+        "python3.12",
+        "3.12.0.post1",
+        "3.12 extra",
+        "3.12a1",
+        "v3.12",
+        "3.12.dev0",
+    ],
+)
+def test_add_python_fullmatch_rejects_invalid_versions(invalid_py):
+    with pytest.raises((ValidationError, ValueError)):
+        ContainerSpec(image="alpine:latest", add_python=invalid_py)
+
+
+def test_for_container_rejects_mismatched_container_and_healthcheck_port():
+    hc = HealthcheckConfig(port=9000, path="/health")
+    with pytest.raises((ValidationError, ValueError), match="port"):
+        ModelProfile.for_container(
+            id="mismatch-for-container",
+            image="app:v1",
+            port=8000,
+            healthcheck=hc,
+        )
+
+
+def test_model_profile_rejects_mismatched_container_and_healthcheck_port():
+    with pytest.raises((ValidationError, ValueError), match="port"):
+        ModelProfile(
+            id="mismatch-profile",
+            name="Mismatch Profile",
+            workload_type=WorkloadType.CUSTOM,
+            default_runtime="container",
+            hardware=HardwareRequirements(min_vram_gb=16),
+            healthcheck=HealthcheckConfig(port=9000),
+            container=ContainerSpec(image="alpine", port=8000),
+        )
+
+
+def test_for_container_syncs_port_from_healthcheck_when_omitted():
+    hc = HealthcheckConfig(port=9090, path="/ping")
+    profile = ModelProfile.for_container(
+        id="sync-hc-port",
+        image="app:v1",
+        healthcheck=hc,
+    )
+    assert profile.healthcheck.port == 9090
+    assert profile.container.port == 9090
+
+
+def test_for_container_succeeds_with_matching_explicit_ports():
+    hc = HealthcheckConfig(port=9090, path="/ping")
+    profile = ModelProfile.for_container(
+        id="matching-ports",
+        image="app:v1",
+        port=9090,
+        healthcheck=hc,
+    )
+    assert profile.healthcheck.port == 9090
+    assert profile.container.port == 9090

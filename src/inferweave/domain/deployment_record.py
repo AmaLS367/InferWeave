@@ -217,10 +217,7 @@ class DeploymentRecord(BaseModel):
             return sanitized
 
         # Sanitize extra_provider_args
-        if (
-            sanitized.options.provider
-            and sanitized.options.provider.extra_provider_args
-        ):
+        if sanitized.options.provider and sanitized.options.provider.extra_provider_args:
             extra_args = dict(sanitized.options.provider.extra_provider_args)
             if "secrets" in extra_args:
                 sec = extra_args["secrets"]
