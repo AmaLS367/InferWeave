@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0
+
+- Add `ContainerSpec` / `RuntimeSpec` support for custom container workloads on Modal,
+  SkyPilot and Lightning AI, including configured images, ports, environment, healthchecks
+  and structured run arguments. Runtime serialization now preserves healthcheck settings
+  without duplicating them in provider metadata.
+- Persist sanitized model profile snapshots so deployments can be attached and recovered
+  without the original registry entry. Validation and lifecycle diagnostics sanitize
+  profile identifiers, generic keys and secret-bearing options.
+- Add generic deployment `request()` / `get()` / `post()` HTTP calls for custom services.
+  Each call isolates headers, cookies and other defaults from shared HTTPX clients.
+- Add durable logical request usage counters and catalog-based, indicative compute cost
+  scenarios. Usage survives lifecycle updates and recovery; unknown compute duration keeps
+  live cost unavailable instead of inferring it from deployment lifetime or request latency.
+
+Compatibility and limitations:
+
+- These additions preserve existing imports and deployments. Older persisted records load
+  with defaults for the new snapshot and usage fields. Custom repositories need atomic
+  `update()` and must preserve usage in `save()` to persist metering.
+- Provider integrations for custom containers are covered by mocked tests, but live custom
+  container deployments have not been verified against cloud accounts.
+- Actual provider GPU consumption and billed cost are unavailable; cost scenarios require
+  externally known compute duration and use indicative catalog pricing only. They are not
+  invoices, spend caps or real-time billing.
+- HTTPX support is `>=0.28.1,<1.0`; HTTPX 1.x is not supported. If supplying a shared
+  HTTPX client, use a version in that range.
+
 ## 0.3.0
 
 Multi-account provider credentials backed by CredWeave 0.1 (`credweave>=0.1.0,<0.2`).
