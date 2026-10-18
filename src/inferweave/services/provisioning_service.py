@@ -179,6 +179,13 @@ class ProvisioningService:
         placeholder = ProviderAccount.ambient(provider.name)
         provider.preflight(request, profile, runtime, placeholder)
         deployment_id = provider.new_deployment_id(profile)
+        try:
+            dry_snapshot: ModelProfile | dict[str, Any] = profile.to_sanitized(
+                self._accounts.secret_values()
+            )
+        except ValueError:
+            dry_snapshot = {"__invalid_snapshot__": True}
+
         record = DeploymentRecord(
             id=deployment_id,
             model=profile.id,
@@ -190,7 +197,7 @@ class ProvisioningService:
             options=(request.options or DeploymentOptions()).model_copy(deep=True),
             is_dry_run=True,
             workload_type=profile.workload_type,
-            profile_snapshot=profile.to_sanitized(self._accounts.secret_values()),
+            profile_snapshot=dry_snapshot,
         )
         await self._repository.save(record)
         return record
@@ -224,6 +231,13 @@ class ProvisioningService:
         options = (request.options or DeploymentOptions()).model_copy(deep=True)
         if provider.cleanup_failed_deployment:
             options.cleanup_on_failure = True
+        try:
+            live_snapshot: ModelProfile | dict[str, Any] = profile.to_sanitized(
+                (*self._accounts.secret_values(), *account.secret_values())
+            )
+        except ValueError:
+            live_snapshot = {"__invalid_snapshot__": True}
+
         record = DeploymentRecord(
             id=deployment_id,
             model=profile.id,
@@ -233,9 +247,7 @@ class ProvisioningService:
             state=DeploymentState.PROVISIONING,
             options=options,
             workload_type=profile.workload_type,
-            profile_snapshot=profile.to_sanitized(
-                (*self._accounts.secret_values(), *account.secret_values())
-            ),
+            profile_snapshot=live_snapshot,
             needs_reconciliation=True,
             owner_fingerprint=account.owner_fingerprint,
             creation_may_continue=True,

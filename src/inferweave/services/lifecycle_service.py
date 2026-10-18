@@ -159,9 +159,12 @@ class LifecycleService:
         if workload_type is not None:
             record.workload_type = workload_type
         if profile_snapshot is not None:
-            record.profile_snapshot = profile_snapshot.to_sanitized(
-                self._accounts.secret_values()
-            )
+            try:
+                record.profile_snapshot = profile_snapshot.to_sanitized(
+                    self._accounts.secret_values()
+                )
+            except ValueError:
+                record.profile_snapshot = {"__invalid_snapshot__": True}
         self._last_persisted_activity[deployment.id] = current_time
 
         # Synchronous write for fast in-memory availability

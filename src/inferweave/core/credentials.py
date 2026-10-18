@@ -91,13 +91,167 @@ _KNOWN_TOKEN_PREFIX_RE = re.compile(
 )
 
 
+_BENIGN_KEY_TERMS = frozenset(
+    {
+        "sort_key",
+        "sort-key",
+        "sortkey",
+        "sort_keys",
+        "cache_key",
+        "cache-key",
+        "cachekey",
+        "cache_keys",
+        "primary_key",
+        "primary-key",
+        "primarykey",
+        "primary_keys",
+        "partition_key",
+        "partition-key",
+        "partitionkey",
+        "partition_keys",
+        "foreign_key",
+        "foreign-key",
+        "foreignkey",
+        "foreign_keys",
+        "routing_key",
+        "routing-key",
+        "routingkey",
+        "routing_keys",
+        "cluster_key",
+        "cluster-key",
+        "clusterkey",
+        "cluster_keys",
+        "shard_key",
+        "shard-key",
+        "shardkey",
+        "shard_keys",
+        "id_key",
+        "id-key",
+        "idkey",
+        "id_keys",
+        "search_key",
+        "search_keys",
+        "group_key",
+        "group_keys",
+        "filter_key",
+        "filter_keys",
+        "unique_key",
+        "unique_keys",
+        "composite_key",
+        "surrogate_key",
+        "natural_key",
+        "dedup_key",
+        "idempotency_key",
+        "idempotency-key",
+        "key_name",
+        "key_type",
+        "key_column",
+        "key_field",
+        "key_format",
+        "key_algorithm",
+        "key_algo",
+        "key_id",
+        "key_ids",
+    }
+)
+
+_SENSITIVE_KEY_PREFIXES = frozenset(
+    {
+        "api",
+        "modal",
+        "private",
+        "priv",
+        "access",
+        "secret",
+        "sec",
+        "auth",
+        "client",
+        "service",
+        "signing",
+        "encryption",
+        "encrypt",
+        "master",
+        "license",
+        "ssh",
+        "token",
+        "cert",
+        "certificate",
+        "credential",
+    }
+)
+
+
 def is_sensitive_key(key: str) -> bool:
     """Returns True if the key represents a sensitive platform credential or secret."""
-    lower_k = key.lower()
-    return (
-        any(term in lower_k for term in _SENSITIVE_KEY_TERMS)
-        or key.upper() in PLATFORM_CREDENTIAL_ENV
-    )
+    cleaned = key.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned in _BENIGN_KEY_TERMS or cleaned in _BENIGN_TOKEN_FLAGS:
+        return False
+    if key.upper() in PLATFORM_CREDENTIAL_ENV:
+        return True
+
+    if cleaned in (
+        "key",
+        "keys",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "credential",
+        "credentials",
+        "password",
+        "passwords",
+        "passwd",
+        "pwd",
+    ):
+        return True
+
+    parts = [p for p in re.split(r"[-_.]", cleaned) if p]
+    if parts:
+        if parts[0] in (
+            "sort",
+            "cache",
+            "partition",
+            "primary",
+            "foreign",
+            "routing",
+            "cluster",
+            "shard",
+            "id",
+            "search",
+            "group",
+            "filter",
+            "unique",
+            "composite",
+            "surrogate",
+            "natural",
+            "dedup",
+            "idempotency",
+        ) and parts[-1] in ("key", "keys"):
+            return False
+        if parts[-1] in (
+            "name",
+            "type",
+            "column",
+            "field",
+            "format",
+            "algorithm",
+            "algo",
+            "id",
+            "ids",
+        ) and parts[0] in ("key", "keys"):
+            return False
+        if ("tokenizer" in parts or "tokens" in parts) and not any(
+            prefix in parts for prefix in _SENSITIVE_KEY_PREFIXES
+        ):
+            return False
+        if any(k_part in ("key", "keys") for k_part in parts) and any(
+            prefix in parts for prefix in _SENSITIVE_KEY_PREFIXES
+        ):
+            return True
+
+    return any(term in cleaned for term in _SENSITIVE_KEY_TERMS)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -284,13 +438,48 @@ def sanitize_metadata(value: Any, secrets: Iterable[str] = ()) -> Any:
     """Recursively sanitizes arbitrary metadata, redacting sensitive keys and secret-bearing values."""
     if isinstance(value, dict):
         sanitized_dict: dict[Any, Any] = {}
+
+        # Check if this dict represents an explicit key-value property pair, e.g. {"key": "env", "value": "prod"}
+        is_kv_pair = (
+            "key" in value
+            and ("value" in value or "val" in value)
+            and len(value) <= 3
+        )
+        if is_kv_pair:
+            k_val = value.get("key")
+            k_str = str(k_val) if k_val is not None else ""
+            val_key = "value" if "value" in value else "val"
+            if is_sensitive_key(k_str) or is_sensitive_header(k_str):
+                for k, v in value.items():
+                    if k == val_key:
+                        sanitized_dict[k] = redact_deep(v)
+                    elif k == "key":
+                        sanitized_dict[k] = (
+                            sanitize_text(str(v), secrets=secrets)
+                            if isinstance(v, str)
+                            else v
+                        )
+                    else:
+                        sanitized_dict[k] = sanitize_metadata(v, secrets=secrets)
+                return sanitized_dict
+            else:
+                for k, v in value.items():
+                    sanitized_dict[k] = sanitize_metadata(v, secrets=secrets)
+                return sanitized_dict
+
         for k, v in value.items():
             key_str = str(k)
-            if is_sensitive_header(key_str) or key_str.lower() in (
-                "secrets",
-                "credentials",
-                "tokens",
-                "passwords",
+            if (
+                is_sensitive_key(key_str)
+                or is_sensitive_header(key_str)
+                or key_str.lower()
+                in (
+                    "secrets",
+                    "credentials",
+                    "tokens",
+                    "passwords",
+                    "keys",
+                )
             ):
                 sanitized_dict[k] = redact_deep(v)
             elif key_str.lower() == "headers" and isinstance(v, dict):
@@ -308,7 +497,9 @@ def sanitize_metadata(value: Any, secrets: Iterable[str] = ()) -> Any:
     if isinstance(value, list):
         return [sanitize_metadata(item, secrets=secrets) for item in value]
     if isinstance(value, tuple):
-        return [sanitize_metadata(item, secrets=secrets) for item in value]
+        return tuple(sanitize_metadata(item, secrets=secrets) for item in value)
+    if isinstance(value, set):
+        return {sanitize_metadata(item, secrets=secrets) for item in value}
     if isinstance(value, str):
         return sanitize_text(value, secrets=secrets)
     return value

@@ -15,6 +15,7 @@ from inferweave.core.credentials import (
     is_sensitive_key,
     known_secret_values,
     redact_deep,
+    sanitize_args,
     sanitize_metadata,
     sanitize_text,
 )
@@ -37,6 +38,36 @@ __all__ = [
 def _redact_value(value: object) -> object:
     """Redacts a value stored under a sensitive key, recursing into containers."""
     return redact_deep(value)
+
+
+def _redact_secrets_entry(sec: Any) -> Any:
+    """Redacts every value under a secrets container, including opaque strings without '='."""
+    if isinstance(sec, dict):
+        return {k: _redact_secrets_entry(v) for k, v in sec.items()}
+    if isinstance(sec, list):
+        redacted_list: list[Any] = []
+        for item in sec:
+            if isinstance(item, str):
+                if "=" in item:
+                    k, _ = item.split("=", 1)
+                    redacted_list.append(f"{k}={_REDACTED}")
+                else:
+                    redacted_list.append(_REDACTED)
+            elif isinstance(item, (dict, list, tuple, set)):
+                redacted_list.append(_redact_secrets_entry(item))
+            else:
+                redacted_list.append(_REDACTED)
+        return redacted_list
+    if isinstance(sec, tuple):
+        return tuple(_redact_secrets_entry(list(sec)))
+    if isinstance(sec, set):
+        return set(_redact_secrets_entry(list(sec)))
+    if isinstance(sec, str):
+        if "=" in sec:
+            k, _ = sec.split("=", 1)
+            return f"{k}={_REDACTED}"
+        return _REDACTED
+    return _REDACTED
 
 
 def _validate_redacted_profile_dict(value: dict[str, Any]) -> ModelProfile | None:
@@ -289,6 +320,20 @@ class DeploymentRecord(BaseModel):
             DeploymentState.FAILED,
         }
 
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        sanitized = self.to_sanitized_record()
+        return [
+            (
+                k,
+                (
+                    getattr(sanitized, k)
+                    if k is not None and hasattr(sanitized, k)
+                    else v
+                ),
+            )
+            for k, v in super().__repr_args__()
+        ]
+
     def to_sanitized_record(
         self, secrets: Iterable[str] = ()
     ) -> "DeploymentRecord":
@@ -296,10 +341,35 @@ class DeploymentRecord(BaseModel):
         secret_tuple = known_secret_values(secrets)
         sanitized = self.model_copy(deep=True)
 
+        if sanitized.endpoint_url:
+            sanitized.endpoint_url = sanitize_text(sanitized.endpoint_url, secret_tuple)
+        if sanitized.error_message:
+            sanitized.error_message = sanitize_text(sanitized.error_message, secret_tuple)
+        if sanitized.model:
+            sanitized.model = sanitize_text(sanitized.model, secret_tuple)
+        if sanitized.provider:
+            sanitized.provider = sanitize_text(sanitized.provider, secret_tuple)
+        if sanitized.resource:
+            if sanitized.resource.name:
+                sanitized.resource.name = sanitize_text(
+                    sanitized.resource.name, secret_tuple
+                )
+            if sanitized.resource.scope:
+                sanitized.resource.scope = sanitize_text(
+                    sanitized.resource.scope, secret_tuple
+                )
+            if sanitized.resource.resource_id:
+                sanitized.resource.resource_id = sanitize_text(
+                    sanitized.resource.resource_id, secret_tuple
+                )
+
         if sanitized.profile_snapshot is not None:
             coerced = _coerce_profile_snapshot(sanitized.profile_snapshot)
             if isinstance(coerced, ModelProfile):
-                sanitized.profile_snapshot = coerced.to_sanitized(secret_tuple)
+                try:
+                    sanitized.profile_snapshot = coerced.to_sanitized(secret_tuple)
+                except ValueError:
+                    sanitized.profile_snapshot = {"__invalid_snapshot__": True}
             else:
                 sanitized.profile_snapshot = {"__invalid_snapshot__": True}
 
@@ -310,22 +380,7 @@ class DeploymentRecord(BaseModel):
         if sanitized.options.provider and sanitized.options.provider.extra_provider_args:
             extra_args = dict(sanitized.options.provider.extra_provider_args)
             if "secrets" in extra_args:
-                sec = extra_args["secrets"]
-                if isinstance(sec, dict):
-                    extra_args["secrets"] = {k: _REDACTED for k in sec}
-                elif isinstance(sec, list):
-                    redacted_list = []
-                    for item in sec:
-                        if isinstance(item, str) and "=" in item:
-                            k, _ = item.split("=", 1)
-                            redacted_list.append(f"{k}={_REDACTED}")
-                        elif isinstance(item, str):
-                            redacted_list.append(sanitize_text(item, secret_tuple))
-                        else:
-                            redacted_list.append(item)
-                    extra_args["secrets"] = redacted_list
-                elif isinstance(sec, str):
-                    extra_args["secrets"] = _REDACTED
+                extra_args["secrets"] = _redact_secrets_entry(extra_args["secrets"])
 
             for key in list(extra_args.keys()):
                 if key == "secrets":
@@ -352,15 +407,26 @@ class DeploymentRecord(BaseModel):
 
             sanitized.options.provider.extra_provider_args = extra_args
 
-        # Sanitize runtime extra_env
-        if sanitized.options.runtime and sanitized.options.runtime.extra_env:
-            env_copy = dict(sanitized.options.runtime.extra_env)
-            for k, v in list(env_copy.items()):
-                if is_sensitive_key(k):
-                    env_copy[k] = _REDACTED
-                elif isinstance(v, str):
-                    env_copy[k] = sanitize_text(v, secret_tuple)
-            sanitized.options.runtime.extra_env = env_copy
+        # Sanitize runtime options
+        if sanitized.options.runtime:
+            if sanitized.options.runtime.extra_env:
+                env_copy = dict(sanitized.options.runtime.extra_env)
+                for k, v in list(env_copy.items()):
+                    if is_sensitive_key(k):
+                        env_copy[k] = _REDACTED
+                    elif isinstance(v, str):
+                        env_copy[k] = sanitize_text(v, secret_tuple)
+                    else:
+                        env_copy[k] = sanitize_metadata(v, secret_tuple)
+                sanitized.options.runtime.extra_env = env_copy
+            if sanitized.options.runtime.extra_cli_args:
+                sanitized.options.runtime.extra_cli_args = sanitize_args(
+                    sanitized.options.runtime.extra_cli_args, secret_tuple
+                )
+            if sanitized.options.runtime.engine_args:
+                sanitized.options.runtime.engine_args = sanitize_metadata(
+                    sanitized.options.runtime.engine_args, secret_tuple
+                )
 
         return sanitized
 
@@ -396,8 +462,8 @@ def recover_profile_from_snapshot(
         raise ModelNotFoundError(
             record.model,
             reason=(
-                f"persisted profile snapshot id '{snapshot_id}' does not match "
-                f"deployment model '{record.model}'"
+                f"persisted profile snapshot id '{sanitize_text(snapshot_id)}' does not match "
+                f"deployment model '{sanitize_text(record.model)}'"
             ),
         )
 
@@ -421,8 +487,8 @@ def recover_profile_from_snapshot(
         raise ModelNotFoundError(
             record.model,
             reason=(
-                f"persisted profile snapshot id '{profile.id}' does not match "
-                f"deployment model '{record.model}'"
+                f"persisted profile snapshot id '{sanitize_text(profile.id)}' does not match "
+                f"deployment model '{sanitize_text(record.model)}'"
             ),
         )
 

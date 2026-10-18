@@ -15,6 +15,7 @@ from pydantic import (
 
 from inferweave.core.credentials import (
     _REDACTED,
+    contains_redacted,
     is_sensitive_header,
     is_sensitive_key,
     known_secret_values,
@@ -41,6 +42,34 @@ class HardwareRequirements(BaseModel):
     min_cuda_version: str | None = Field(
         default="12.1", description="Minimum CUDA version"
     )
+
+    def to_sanitized(self, secrets: Iterable[str] = ()) -> "HardwareRequirements":
+        """Returns a copy of the hardware requirements with sensitive strings redacted."""
+        secret_tuple = known_secret_values(secrets)
+        copy_hw = self.model_copy(deep=True)
+        copy_hw.recommended_gpus = [
+            sanitize_text(gpu, secret_tuple) for gpu in copy_hw.recommended_gpus
+        ]
+        if copy_hw.min_cuda_version is not None:
+            copy_hw.min_cuda_version = sanitize_text(
+                copy_hw.min_cuda_version, secret_tuple
+            )
+        return copy_hw
+
+    def to_sanitized_dict(self, secrets: Iterable[str] = ()) -> dict[str, Any]:
+        """Returns a dict representation with sensitive strings redacted."""
+        return self.to_sanitized(secrets).model_dump()
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        sanitized = self.to_sanitized()
+        return [
+            ("min_vram_gb", sanitized.min_vram_gb),
+            ("recommended_gpus", sanitized.recommended_gpus),
+            ("gpu_count", sanitized.gpu_count),
+            ("min_cpu_cores", sanitized.min_cpu_cores),
+            ("min_ram_gb", sanitized.min_ram_gb),
+            ("min_cuda_version", sanitized.min_cuda_version),
+        ]
 
 
 def _is_sensitive_header(key: str) -> bool:
@@ -273,8 +302,10 @@ class ContainerSpec(BaseModel):
         sanitized_map: dict[str | None, Any] = {
             "image": sanitized.image,
             "args": sanitized.args,
+            "port": self.port,
             "setup_commands": sanitized.setup_commands,
             "env": sanitized.env,
+            "add_python": sanitized.add_python,
         }
         return [
             (k, sanitized_map.get(k, v))
@@ -294,6 +325,8 @@ class ContainerSpec(BaseModel):
             k: (_REDACTED if is_sensitive_key(k) else sanitize_text(v, secret_tuple))
             for k, v in copy_spec.env.items()
         }
+        if copy_spec.add_python is not None:
+            copy_spec.add_python = sanitize_text(copy_spec.add_python, secret_tuple)
         return copy_spec
 
     def to_sanitized_dict(self, secrets: Iterable[str] = ()) -> dict[str, Any]:
@@ -333,6 +366,22 @@ class ModelProfile(BaseModel):
         description="Custom container configuration for container-backed workloads",
     )
 
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError("id must be a string")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ModelProfile id cannot be empty")
+        if contains_redacted(stripped):
+            raise ValueError("ModelProfile id cannot contain redaction markers")
+        if sanitize_text(stripped) != stripped:
+            raise ValueError(
+                f"ModelProfile id contains sensitive credentials or patterns: {value!r}"
+            )
+        return stripped
+
     @model_validator(mode="after")
     def _validate_container_profile(self) -> "ModelProfile":
         is_container_profile = (
@@ -357,13 +406,48 @@ class ModelProfile(BaseModel):
         return self
 
     def __repr_args__(self) -> list[tuple[str | None, Any]]:
-        sanitized = self.to_sanitized()
+        secret_tuple = known_secret_values(())
+        safe_id = sanitize_text(self.id, secret_tuple)
+        safe_name = sanitize_text(self.name, secret_tuple)
+        safe_source = sanitize_text(self.source, secret_tuple)
+        safe_runtime = sanitize_text(self.default_runtime, secret_tuple)
+        safe_artifact_id = (
+            sanitize_text(self.artifact_id, secret_tuple)
+            if self.artifact_id is not None
+            else None
+        )
+        safe_hardware = (
+            self.hardware.to_sanitized(secret_tuple)
+            if self.hardware is not None
+            else None
+        )
+        safe_healthcheck = (
+            self.healthcheck.to_sanitized(secret_tuple)
+            if self.healthcheck is not None
+            else None
+        )
+        safe_default_env = {
+            k: (_REDACTED if is_sensitive_key(k) else sanitize_text(v, secret_tuple))
+            for k, v in self.default_env.items()
+        }
+        safe_metadata = sanitize_metadata(self.metadata, secret_tuple)
+        safe_container = (
+            self.container.to_sanitized(secret_tuple)
+            if self.container is not None
+            else None
+        )
         sanitized_map: dict[str | None, Any] = {
-            "artifact_id": sanitized.artifact_id,
-            "healthcheck": sanitized.healthcheck,
-            "default_env": sanitized.default_env,
-            "metadata": sanitized.metadata,
-            "container": sanitized.container,
+            "id": safe_id,
+            "name": safe_name,
+            "workload_type": self.workload_type,
+            "default_runtime": safe_runtime,
+            "source": safe_source,
+            "artifact_id": safe_artifact_id,
+            "hardware": safe_hardware,
+            "healthcheck": safe_healthcheck,
+            "default_env": safe_default_env,
+            "metadata": safe_metadata,
+            "container": safe_container,
         }
         return [
             (k, sanitized_map.get(k, v))
@@ -373,9 +457,22 @@ class ModelProfile(BaseModel):
     def to_sanitized(self, secrets: Iterable[str] = ()) -> "ModelProfile":
         """Returns a deep copy of the profile with all sensitive fields redacted."""
         secret_tuple = known_secret_values(secrets)
+        if sanitize_text(self.id, secret_tuple) != self.id:
+            raise ValueError(
+                f"ModelProfile id '{self.id}' contains sensitive credentials and cannot "
+                "be safely sanitized without breaking required identity."
+            )
         copy_prof = self.model_copy(deep=True)
+        copy_prof.name = sanitize_text(copy_prof.name, secret_tuple)
+        copy_prof.source = sanitize_text(copy_prof.source, secret_tuple)
+        if copy_prof.default_runtime:
+            copy_prof.default_runtime = sanitize_text(
+                copy_prof.default_runtime, secret_tuple
+            )
         if copy_prof.artifact_id is not None:
             copy_prof.artifact_id = sanitize_text(copy_prof.artifact_id, secret_tuple)
+        if copy_prof.hardware is not None:
+            copy_prof.hardware = copy_prof.hardware.to_sanitized(secret_tuple)
         if copy_prof.healthcheck is not None:
             copy_prof.healthcheck = copy_prof.healthcheck.to_sanitized(secret_tuple)
         if copy_prof.default_env:
