@@ -35,6 +35,7 @@ from inferweave.core.exceptions import (
 from inferweave.core.failures import FailureKind
 from inferweave.domain.options import DeploymentOptions, ProviderOptions
 from inferweave.models.deployment import DeploymentRequest
+from inferweave.models.profile import HealthcheckConfig
 from inferweave.providers.lightning_provider import LightningProvider
 from inferweave.providers.skypilot import SkyPilotProvider
 from inferweave.registry.base import ModelRegistry
@@ -225,6 +226,11 @@ async def test_guard_rejects_platform_credential_names(env_name: str) -> None:
     lower, _ = _runtime(env={env_name.lower(): "x"})
     with pytest.raises(ProviderAuthError):
         guard_runtime(lower, None, ())
+    in_hc = runtime.model_copy(
+        update={"healthcheck": HealthcheckConfig(headers={env_name: "val"})}
+    )
+    with pytest.raises(ProviderAuthError):
+        guard_runtime(in_hc, None, ())
 
 
 async def test_guard_rejects_known_secret_values_anywhere() -> None:
@@ -243,6 +249,16 @@ async def test_guard_rejects_known_secret_values_anywhere() -> None:
     )
     with pytest.raises(ProviderAuthError):
         guard_runtime(in_args, None, secrets)
+
+    in_healthcheck = clean.model_copy(
+        update={
+            "healthcheck": HealthcheckConfig(
+                headers={"Authorization": f"Bearer {secret}"}
+            )
+        }
+    )
+    with pytest.raises(ProviderAuthError):
+        guard_runtime(in_healthcheck, None, secrets)
 
     options = DeploymentOptions(
         provider=ProviderOptions(extra_provider_args={"note": secret})

@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import (
     BaseModel,
     Field,
+    FieldSerializationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -91,16 +92,32 @@ class HealthcheckConfig(BaseModel):
         description="Custom HTTP headers sent with probe requests",
     )
 
-    @field_serializer("headers", when_used="always")
-    def _serialize_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        return _redact_headers(headers)
+    @field_serializer("headers")
+    def _serialize_headers(
+        self, headers: dict[str, str], info: FieldSerializationInfo
+    ) -> dict[str, str]:
+        if info.context and info.context.get("redact_sensitive", False):
+            return _redact_headers(headers)
+        return headers
 
     def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        args: list[tuple[str | None, Any]] = []
         for k, v in super().__repr_args__():
             if k == "headers" and isinstance(v, dict):
-                yield (k, _redact_headers(v))
+                args.append((k, _redact_headers(v)))
             else:
-                yield (k, v)
+                args.append((k, v))
+        return args
+
+    def to_sanitized(self) -> "HealthcheckConfig":
+        """Returns a copy of the healthcheck config with sensitive headers redacted."""
+        copy_cfg = self.model_copy(deep=True)
+        copy_cfg.headers = _redact_headers(copy_cfg.headers)
+        return copy_cfg
+
+    def to_sanitized_dict(self) -> dict[str, Any]:
+        """Returns a dict representation with sensitive headers redacted."""
+        return self.to_sanitized().model_dump()
 
 
 class ContainerSpec(BaseModel):

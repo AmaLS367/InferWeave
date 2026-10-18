@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from inferweave.core.credentials import _REDACTED, is_sensitive_key
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import (
     HardwareRequirements,
@@ -62,6 +63,26 @@ class RuntimeSpec(BaseModel):
                 except ValueError:
                     data["run_args"] = [str(cmd)]
         return data
+
+    def to_sanitized_spec(self) -> "RuntimeSpec":
+        """Returns a copy of RuntimeSpec with sensitive headers and env variables redacted."""
+        copy_spec = self.model_copy(deep=True)
+        if copy_spec.healthcheck is not None:
+            copy_spec.healthcheck = copy_spec.healthcheck.to_sanitized()
+        if copy_spec.env_vars:
+            copy_spec.env_vars = {
+                k: (_REDACTED if is_sensitive_key(k) else v)
+                for k, v in copy_spec.env_vars.items()
+            }
+        return copy_spec
+
+    def to_sanitized_dict(self) -> dict[str, Any]:
+        """Returns a dictionary representation of RuntimeSpec with sensitive values redacted."""
+        return self.to_sanitized_spec().model_dump()
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Returns a dictionary representation of RuntimeSpec suitable for public consumption."""
+        return self.to_sanitized_dict()
 
 
 class RuntimeTemplate(ABC):

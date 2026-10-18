@@ -23,6 +23,7 @@ import sys
 
 import pytest
 
+from inferweave.core.exceptions import ProviderAuthError
 from inferweave.domain.options import DeploymentOptions, RuntimeOptions
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.enums import WorkloadType
@@ -489,8 +490,8 @@ def test_readiness_healthcheck_preservation():
     assert spec.healthcheck.expected_status_codes == [200, 204]
 
 
-def test_healthcheck_headers_redacted_in_serialization_and_logs():
-    """Sensitive HealthcheckConfig.headers are redacted in serialization and logs."""
+def test_healthcheck_headers_serialization_compatibility_and_sanitization():
+    """Validates serialization compatibility, round-trips, and representation sanitization."""
     sensitive_token = "bearer-secret-token-12345"
     sensitive_api_key = "apikey-value-67890"
     cookie_val = "session=secret_session_token"
@@ -515,27 +516,52 @@ def test_healthcheck_headers_redacted_in_serialization_and_logs():
     # 1. Metadata check: healthcheck must NOT be present in metadata
     assert "healthcheck" not in spec.metadata
 
-    # 2. Serialization check: model_dump() must redact sensitive header values
+    # 2. Compatibility check: standard model_dump() retains unredacted headers for round-trips
     dump = spec.model_dump()
     hdrs = dump["healthcheck"]["headers"]
-    assert hdrs["Authorization"] == "[REDACTED]"
-    assert hdrs["X-Api-Key"] == "[REDACTED]"
-    assert hdrs["Cookie"] == "[REDACTED]"
+    assert hdrs["Authorization"] == f"Bearer {sensitive_token}"
+    assert hdrs["X-Api-Key"] == sensitive_api_key
+    assert hdrs["Cookie"] == cookie_val
     assert hdrs["Accept"] == "application/json"
     assert hdrs["User-Agent"] == "InferWeave/0.3.0"
-    dump_str = str(dump)
-    assert sensitive_token not in dump_str
-    assert sensitive_api_key not in dump_str
-    assert cookie_val not in dump_str
 
-    # 3. JSON serialization check: model_dump_json() must redact sensitive header values
-    json_dump = spec.model_dump_json()
-    assert sensitive_token not in json_dump
-    assert sensitive_api_key not in json_dump
-    assert cookie_val not in json_dump
-    assert '"Authorization":"[REDACTED]"' in json_dump
+    # Configuration round-trips succeed without losing credentials
+    restored_hc = HealthcheckConfig(**dump["healthcheck"])
+    assert restored_hc == hc
+    restored_spec = RuntimeSpec(**dump)
+    assert restored_spec == spec
+    assert HealthcheckConfig.model_validate_json(hc.model_dump_json()) == hc
+    assert RuntimeSpec.model_validate_json(spec.model_dump_json()) == spec
 
-    # 4. String and repr check (logs/console): secrets must not appear
+    # 3. Persisted/public RuntimeSpec representations: sensitive headers are redacted
+    sanitized_spec = spec.to_sanitized_spec()
+    assert sanitized_spec.healthcheck is not None
+    s_hdrs = sanitized_spec.healthcheck.headers
+    assert s_hdrs["Authorization"] == "[REDACTED]"
+    assert s_hdrs["X-Api-Key"] == "[REDACTED]"
+    assert s_hdrs["Cookie"] == "[REDACTED]"
+    assert s_hdrs["Accept"] == "application/json"
+    assert s_hdrs["User-Agent"] == "InferWeave/0.3.0"
+
+    sanitized_dict = spec.to_sanitized_dict()
+    assert sensitive_token not in str(sanitized_dict)
+    assert sensitive_api_key not in str(sanitized_dict)
+    assert cookie_val not in str(sanitized_dict)
+    assert spec.to_public_dict() == sanitized_dict
+
+    assert hc.to_sanitized().headers["Authorization"] == "[REDACTED]"
+    assert hc.to_sanitized_dict()["headers"]["Authorization"] == "[REDACTED]"
+
+    # Context-aware serialization: redact_sensitive=True redacts sensitive headers
+    context_dump = spec.model_dump(context={"redact_sensitive": True})
+    assert context_dump["healthcheck"]["headers"]["Authorization"] == "[REDACTED]"
+    context_json = spec.model_dump_json(context={"redact_sensitive": True})
+    assert sensitive_token not in context_json
+    assert sensitive_api_key not in context_json
+    assert cookie_val not in context_json
+    assert '"Authorization":"[REDACTED]"' in context_json
+
+    # 4. Diagnostic string and repr check (logs/console): secrets must not appear
     repr_str = repr(spec)
     assert sensitive_token not in repr_str
     assert sensitive_api_key not in repr_str
@@ -546,6 +572,9 @@ def test_healthcheck_headers_redacted_in_serialization_and_logs():
     assert sensitive_token not in str_val
     assert sensitive_api_key not in str_val
     assert cookie_val not in str_val
+
+    assert sensitive_token not in repr(hc)
+    assert sensitive_token not in str(hc)
 
 
 def test_functional_healthcheck_behavior_preserved():
@@ -574,8 +603,10 @@ def test_functional_healthcheck_behavior_preserved():
     assert merged["X-Extra"] == "probe-call"
 
 
-def test_dry_run_and_guard_runtime_with_healthcheck_headers():
-    """guard_runtime and dry-run do not trip on redacted healthcheck headers."""
+def test_guard_runtime_inspects_actual_healthcheck_headers_and_protects_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """guard_runtime inspects actual header values to enforce platform credential restrictions."""
     secret_token = "IW_MODAL_TOKEN_123456"
     hc = HealthcheckConfig(
         path="/health",
@@ -583,14 +614,75 @@ def test_dry_run_and_guard_runtime_with_healthcheck_headers():
         headers={"Authorization": f"Bearer {secret_token}"},
     )
     profile = ModelProfile.for_container(
-        id="dry-hc", image="alpine:latest", healthcheck=hc
+        id="guard-hc", image="alpine:latest", healthcheck=hc
     )
-    request = DeploymentRequest(model="dry-hc", dry_run=True)
+    request = DeploymentRequest(model="guard-hc", dry_run=True)
     spec = ContainerTemplate().render(profile, request)
 
-    # guard_runtime evaluates spec.model_dump() against secrets
-    # Since headers are serialized as [REDACTED], it does not leak or trip
-    guard_runtime(spec, request.options, secrets=(secret_token,))
+    # 1. Known secret injected into healthcheck headers is detected and rejected
+    with pytest.raises(ProviderAuthError, match="must not be injected"):
+        guard_runtime(spec, request.options, secrets=(secret_token,))
+
+    # 2. Ambient platform credential value injected into healthcheck headers is rejected
+    ambient_secret = "SENTINEL-ambient-runpod-secret-token"
+    monkeypatch.setenv("RUNPOD_API_KEY", ambient_secret)
+    hc_ambient = HealthcheckConfig(
+        headers={"X-Custom-Auth": f"prefix-{ambient_secret}"}
+    )
+    spec_ambient = ContainerTemplate().render(
+        ModelProfile.for_container(
+            id="amb-hc", image="alpine:latest", healthcheck=hc_ambient
+        ),
+        request,
+    )
+    with pytest.raises(ProviderAuthError, match="must not be injected"):
+        guard_runtime(spec_ambient, request.options, secrets=())
+
+    # 3. Platform credential key names in healthcheck headers are rejected
+    hc_key = HealthcheckConfig(headers={"MODAL_TOKEN_ID": "any-token-id"})
+    spec_key = ContainerTemplate().render(
+        ModelProfile.for_container(
+            id="key-hc", image="alpine:latest", healthcheck=hc_key
+        ),
+        request,
+    )
+    with pytest.raises(ProviderAuthError, match="must not be injected"):
+        guard_runtime(spec_key, request.options, secrets=())
+
+    # 4. Safe application-specific credentials do not trip guard_runtime
+    safe_hc = HealthcheckConfig(
+        headers={
+            "Authorization": "Bearer safe-custom-app-token",
+            "Accept": "application/json",
+        }
+    )
+    safe_spec = ContainerTemplate().render(
+        ModelProfile.for_container(
+            id="safe-hc", image="alpine:latest", healthcheck=safe_hc
+        ),
+        request,
+    )
+    guard_runtime(safe_spec, request.options, secrets=(secret_token,))
+
+
+def test_sanitized_spec_redacts_sensitive_env_and_headers():
+    """to_sanitized_spec redacts both sensitive env_vars and healthcheck headers."""
+    hc = HealthcheckConfig(headers={"Authorization": "Bearer token123"})
+    spec = RuntimeSpec(
+        name="test",
+        docker_image="python:3.12",
+        run_command="server",
+        healthcheck=hc,
+        env_vars={"HF_TOKEN": "hf_secret_123", "SAFE_VAR": "safe_val"},
+    )
+    sanitized = spec.to_sanitized_spec()
+    assert sanitized.healthcheck is not None
+    assert sanitized.healthcheck.headers["Authorization"] == "[REDACTED]"
+    assert sanitized.env_vars["HF_TOKEN"] == "[REDACTED]"
+    assert sanitized.env_vars["SAFE_VAR"] == "safe_val"
+    # Original spec remains unmutated
+    assert spec.healthcheck.headers["Authorization"] == "Bearer token123"
+    assert spec.env_vars["HF_TOKEN"] == "hf_secret_123"
 
 
 # ---------------------------------------------------------------------------
