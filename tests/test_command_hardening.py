@@ -264,7 +264,10 @@ def test_builtin_templates_run_command_is_exactly_joined_run_args(payload):
     from inferweave.runtimes.templates import _BUILTIN_TEMPLATES
 
     for name, template in _BUILTIN_TEMPLATES.items():
-        profile = _make_profile("adv", payload, WorkloadType.LLM, name)
+        if name == "container":
+            profile = ModelProfile.for_container(id="adv", image="alpine:latest", args=[payload])
+        else:
+            profile = _make_profile("adv", payload, WorkloadType.LLM, name)
         request = DeploymentRequest(
             model="adv",
             custom_args={"extra_cli_args": [payload], "runtime_args": {"extra_cli_args": f"--n {shlex.quote(payload)}"}},

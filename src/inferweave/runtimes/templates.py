@@ -8,6 +8,7 @@ arbitrary container images or mutable versions if desired.
 import re
 import shlex
 
+from inferweave.core.credentials import is_sensitive_key
 from inferweave.models.deployment import DeploymentRequest
 from inferweave.models.profile import ModelProfile
 from inferweave.runtimes.base import RuntimeSpec, RuntimeTemplate
@@ -337,12 +338,96 @@ class WanVideoTemplate(RuntimeTemplate):
         )
 
 
+class ContainerTemplate(RuntimeTemplate):
+    """Runtime template for generic and custom container-backed workloads."""
+
+    @property
+    def name(self) -> str:
+        return "container"
+
+    def render(self, profile: ModelProfile, request: DeploymentRequest) -> RuntimeSpec:
+        if profile.container is None:
+            raise ValueError(
+                f"Model profile '{profile.id}' has runtime 'container' but is missing a 'container' specification."
+            )
+
+        container = profile.container
+        cmd_parts = list(container.args)
+        runtime_opts = request.options.runtime if request.options else None
+        extra_env: dict[str, str] = {}
+        if runtime_opts:
+            cmd_parts.extend(runtime_opts.to_cli_args())
+            extra_env = runtime_opts.extra_env
+
+        run_command = shlex.join(cmd_parts) if cmd_parts else ""
+        run_args = list(cmd_parts)
+
+        # Merge environment variables: container.env -> profile.default_env -> request.env -> extra_env
+        merged_env: dict[str, str] = {}
+        for source_name, env_dict in (
+            ("container.env", container.env),
+            ("profile.default_env", profile.default_env),
+            ("request.env", request.env),
+            ("extra_env", extra_env),
+        ):
+            if not isinstance(env_dict, dict):
+                raise TypeError(
+                    f"Expected dictionary for {source_name}, got {type(env_dict).__name__}"
+                )
+            for k, v in env_dict.items():
+                if not isinstance(k, str):
+                    raise TypeError(
+                        f"Environment variable key in {source_name} must be a string, got {type(k).__name__}"
+                    )
+                if not isinstance(v, str):
+                    raise TypeError(
+                        f"Environment variable value for '{k}' in {source_name} must be a string, got {type(v).__name__}"
+                    )
+                if is_sensitive_key(k):
+                    raise ValueError(
+                        f"Platform credentials and sensitive keys are forbidden in {source_name}: '{k}'"
+                    )
+                merged_env[k] = v
+
+        port = container.port
+        healthcheck = profile.healthcheck
+        healthcheck_path = (
+            healthcheck.path if healthcheck and healthcheck.path else "/health"
+        )
+        hardware = profile.hardware
+        add_python = container.add_python
+
+        metadata = dict(profile.metadata)
+        if add_python is not None:
+            metadata["add_python"] = add_python
+        if hardware is not None:
+            metadata["hardware"] = hardware.model_dump()
+        if healthcheck is not None:
+            metadata["healthcheck"] = healthcheck.model_dump()
+
+        return RuntimeSpec(
+            name=self.name,
+            docker_image=container.image,
+            setup_commands=list(container.setup_commands),
+            run_command=run_command,
+            run_args=run_args,
+            port=port,
+            env_vars=merged_env,
+            healthcheck_path=healthcheck_path,
+            metadata=metadata,
+            hardware=hardware,
+            healthcheck=healthcheck,
+            add_python=add_python,
+        )
+
+
 _BUILTIN_TEMPLATES: dict[str, RuntimeTemplate] = {
     "vllm": VLLMTemplate(),
     "fish-speech": FishSpeechTemplate(),
     "fish-speech-s2": FishSpeechS2Template(),
     "flux-diffusers": FluxDiffusersTemplate(),
     "wan-video": WanVideoTemplate(),
+    "container": ContainerTemplate(),
 }
 
 
@@ -353,3 +438,4 @@ def get_runtime_template(name: str) -> RuntimeTemplate:
             f"Runtime template '{name}' not found. Available: {list(_BUILTIN_TEMPLATES.keys())}"
         )
     return _BUILTIN_TEMPLATES[name]
+

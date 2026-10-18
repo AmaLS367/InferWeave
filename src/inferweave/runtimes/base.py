@@ -7,7 +7,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from inferweave.models.deployment import DeploymentRequest
-from inferweave.models.profile import ModelProfile
+from inferweave.models.profile import (
+    HardwareRequirements,
+    HealthcheckConfig,
+    ModelProfile,
+)
 
 
 class RuntimeSpec(BaseModel):
@@ -31,6 +35,18 @@ class RuntimeSpec(BaseModel):
         default="/health", description="HTTP endpoint for health monitoring"
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+    hardware: HardwareRequirements | None = Field(
+        default=None,
+        description="Hardware requirements preserved from model profile",
+    )
+    healthcheck: HealthcheckConfig | None = Field(
+        default=None,
+        description="Readiness healthcheck configuration preserved from model profile",
+    )
+    add_python: str | None = Field(
+        default=None,
+        description="Optional Python version string to install in runtime",
+    )
 
     @model_validator(mode="before")
     @classmethod

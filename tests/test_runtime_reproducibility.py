@@ -63,6 +63,9 @@ def test_builtin_templates_use_immutable_image_digests():
     request = DeploymentRequest(model="test-model")
     pinned = {getattr(manifest, n) for n in _MANIFEST_IMAGE_NAMES}
     for name, template in _BUILTIN_TEMPLATES.items():
+        if name == "container":
+            # Generic container workloads use arbitrary user-supplied images, not manifest pins.
+            continue
         profile = _make_dummy_profile(WorkloadType.LLM, name)
         spec = template.render(profile, request)
 
@@ -79,6 +82,9 @@ def test_builtin_templates_have_no_unconstrained_pip_upgrade():
     """Built-in templates must not execute 'pip install -U' without bounded versions."""
     request = DeploymentRequest(model="test-model")
     for name, template in _BUILTIN_TEMPLATES.items():
+        if name == "container":
+            # Generic container workloads execute user-supplied setup commands, not InferWeave model setup.
+            continue
         profile = _make_dummy_profile(WorkloadType.LLM, name)
         spec = template.render(profile, request)
 
