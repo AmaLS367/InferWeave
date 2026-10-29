@@ -4,6 +4,9 @@ Messages never contain credential values: provider SDK error text is withheld or
 it reaches an exception, and exceptions raised from SDK errors suppress the chained traceback.
 """
 
+import difflib
+from collections.abc import Sequence
+
 from inferweave.core.failures import FailureKind
 
 
@@ -14,14 +17,26 @@ class InferWeaveError(Exception):
 class ModelNotFoundError(InferWeaveError):
     """Raised when a requested model is not found in the registry."""
 
-    def __init__(self, model_id: str, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        reason: str | None = None,
+        available: Sequence[str] | None = None,
+    ) -> None:
         detail = f" ({reason})" if reason else ""
-        super().__init__(
+        message = (
             f"Model '{model_id}' was not found in the InferWeave registry{detail}. "
             f"You can register it using weave.register_model(...)."
         )
+        if available:
+            close = difflib.get_close_matches(model_id, available, n=3, cutoff=0.4)
+            if close:
+                message += f" Did you mean: {', '.join(close)}?"
+            message += f" Registered models: {', '.join(available)}."
+        super().__init__(message)
         self.model_id = model_id
         self.reason = reason
+        self.available = list(available) if available else []
 
 
 class ProviderNotFoundError(InferWeaveError):

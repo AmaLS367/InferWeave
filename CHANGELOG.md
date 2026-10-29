@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+- Add open, ungated vLLM chat profiles to the built-in registry (Qwen2.5 0.5B/1.5B/7B/Coder 7B,
+  Mistral 7B Instruct v0.3, SmolLM2 1.7B, Phi-3.5 mini, Llama 3.2 1B/3B via ungated re-uploads).
+- Add case-insensitive model lookup, short aliases (`flux`, `wan2.1`, `llama-3.2-3b`, ...) and
+  unique bare-name matching; `ModelRegistry.register_alias()` / `aliases()`. Deployments record
+  the canonical model id.
+- `ModelNotFoundError` now lists registered models and close matches (new optional `available`).
+- vLLM template honours `metadata["vllm_engine_args"]` profile defaults; request engine args win.
+
 ## 0.4.0
 
 - Add `ContainerSpec` / `RuntimeSpec` support for custom container workloads on Modal,

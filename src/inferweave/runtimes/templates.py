@@ -7,6 +7,7 @@ arbitrary container images or mutable versions if desired.
 
 import re
 import shlex
+from typing import Any
 
 from inferweave.core.credentials import is_sensitive_key
 from inferweave.models.deployment import DeploymentRequest
@@ -56,32 +57,36 @@ class VLLMTemplate(RuntimeTemplate):
             "0.0.0.0",
         ]
 
+        # Profile-level defaults (e.g. a context cap) sit under the request's engine args.
+        engine_args: dict[str, Any] = {
+            **(profile.metadata.get("vllm_engine_args") or {}),
+            **(runtime_opts.engine_args if runtime_opts else {}),
+        }
+
         # Resolve tensor parallel size
-        tp_size = None
-        if runtime_opts and "tensor_parallel_size" in runtime_opts.engine_args:
-            tp_size = runtime_opts.engine_args.get("tensor_parallel_size")
+        tp_size = engine_args.get("tensor_parallel_size")
         if tp_size is None:
             tp_size = gpu_count
         cmd_parts.extend(["--tensor-parallel-size", str(tp_size)])
 
         # Trust remote code flag
         trust_remote = True
-        if runtime_opts and "trust_remote_code" in runtime_opts.engine_args:
-            trust_remote = bool(runtime_opts.engine_args.get("trust_remote_code"))
+        if "trust_remote_code" in engine_args:
+            trust_remote = bool(engine_args.get("trust_remote_code"))
         if trust_remote:
             cmd_parts.append("--trust-remote-code")
 
         # Append additional structured engine arguments and CLI flags
+        handled = {"tensor_parallel_size", "trust_remote_code"}
+        for key, val in engine_args.items():
+            if key in handled or val is None or val is False:
+                continue
+            flag_name = key if key.startswith("-") else f"--{key.replace('_', '-')}"
+            if val is True:
+                cmd_parts.append(flag_name)
+            else:
+                cmd_parts.extend([flag_name, str(val)])
         if runtime_opts:
-            handled = {"tensor_parallel_size", "trust_remote_code"}
-            for key, val in runtime_opts.engine_args.items():
-                if key in handled or val is None or val is False:
-                    continue
-                flag_name = key if key.startswith("-") else f"--{key.replace('_', '-')}"
-                if val is True:
-                    cmd_parts.append(flag_name)
-                else:
-                    cmd_parts.extend([flag_name, str(val)])
             cmd_parts.extend(runtime_opts.extra_cli_args)
 
         cmd = shlex.join(cmd_parts)

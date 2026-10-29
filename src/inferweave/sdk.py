@@ -206,6 +206,9 @@ class InferWeave:
 
         # 1. Resolve model profile
         profile = self.registry.get(model)
+        if profile.id != request.model:
+            # Persist the canonical id so records resolve even where aliases differ.
+            request = request.model_copy(update={"model": profile.id})
 
         # 2. Pre-flight hardware validation if explicit GPU is requested
         if request.gpu_type:
