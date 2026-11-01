@@ -1053,3 +1053,15 @@ def test_main_launch_rejects_empty_or_invalid_run_command_before_sky_launch(
     assert message["error"]["resource_may_exist"] is False
     assert sky.tasks == []
     assert sky.calls == []
+
+
+def test_sitecustomize_patches_fastapi_prefix_when_is_skypilot_server(monkeypatch):
+    import fastapi
+
+    from inferweave.isolation import sitecustomize
+
+    monkeypatch.setenv("IS_SKYPILOT_SERVER", "true")
+    sitecustomize._patch_fastapi_prefix_for_skypilot()
+
+    app = fastapi.FastAPI(prefix="/api/v1", title="test")
+    assert app.title == "test"
