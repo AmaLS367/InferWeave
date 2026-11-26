@@ -7,6 +7,14 @@ TEST_PROXY_TOKEN_SECRET = "ws-test-proxy-secret-1111"
 
 
 @pytest.fixture(autouse=True)
+def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Keeps the default accounts ``state_dir`` (and its owner key) out of the real home."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
+@pytest.fixture(autouse=True)
 def modal_proxy_tokens(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Gives every test deterministic Modal proxy-auth tokens.
 

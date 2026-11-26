@@ -20,6 +20,7 @@ from credweave import (
 
 from inferweave.accounts.config import AccountsConfig, ProviderAccounts
 from inferweave.accounts.models import AMBIENT_ACCOUNT_ID, ProviderAccount
+from inferweave.accounts.owner_key import OwnerKey, is_persistent_owner_fingerprint
 from inferweave.accounts.schema import schema_for
 from inferweave.accounts.sources import ProviderAccountSource
 from inferweave.accounts.strategy import (
@@ -123,6 +124,7 @@ class AccountManager:
         environ: Mapping[str, str] | None = None,
     ) -> None:
         self.config = config or AccountsConfig()
+        self._owner_key = OwnerKey(self.config.state_dir)
         self._pools: dict[str, _Pool] = {}
         for provider, settings in self.config.providers.items():
             schema = schema_for(provider)
@@ -211,7 +213,9 @@ class AccountManager:
                 "rate limited, revoked, at capacity or already tried).",
                 retry_after=self._earliest_recovery(entry),
             ) from None
-        return AccountLease(self, ProviderAccount(name, lease.credential_id, lease.credential), lease)
+        return AccountLease(self, ProviderAccount(
+            name, lease.credential_id, lease.credential, self._owner_key
+        ), lease)
 
     def resolve(
         self, provider: str, account_id: str | None, deployment_id: str | None = None
@@ -227,13 +231,34 @@ class AccountManager:
         state = entry.pool.get_record(account_id) if entry is not None else None
         if state is not None and state.state is CredentialState.REVOKED:
             raise AccountUnavailableError(name, account_id, deployment_id)
-        return ProviderAccount(name, credential.id, credential)
+        return ProviderAccount(name, credential.id, credential, self._owner_key)
 
     def resolve_owner(self, record: DeploymentRecord) -> ProviderAccount:
+        """Returns the account that owns ``record``, checked against its owner fingerprint.
+
+        A fingerprint written by InferWeave < 0.4.2 was signed with a key that existed only in
+        the process that created the deployment, so it can never be verified again. Such a
+        record is bound to the configured account of the same id: ``record.owner_fingerprint``
+        is replaced with a verifiable one, which the next save of the record persists.
+        """
         account = self.resolve(record.provider, record.account, record.id)
-        if record.owner_fingerprint is not None and account.owner_fingerprint != record.owner_fingerprint:
-            raise AccountUnavailableError(record.provider, str(record.account), record.id)
-        return account
+        recorded = record.owner_fingerprint
+        if recorded is None:
+            return account
+        current = account.owner_fingerprint
+        if current == recorded:
+            return account
+        if current is not None and not is_persistent_owner_fingerprint(recorded):
+            logger.warning(
+                "Deployment '%s' has an owner fingerprint from InferWeave < 0.4.2 that cannot "
+                "be verified after a restart; binding it to the configured %s account '%s'.",
+                record.id,
+                record.provider,
+                account.id,
+            )
+            record.owner_fingerprint = current
+            return account
+        raise AccountUnavailableError(record.provider, str(record.account), record.id)
 
     def outcome_for(self, provider: str, error: ProviderOperationError) -> Outcome:
         """Maps a classified provider failure to the CredWeave outcome for its account.

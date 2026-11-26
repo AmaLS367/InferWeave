@@ -642,7 +642,7 @@ async def test_pooled_account_runs_in_private_home_with_secret_only_in_secrets(
     assert call.payload["mode"] == "account"
     assert call.payload["cloud"] == cloud
     assert call.payload["server_port"] == provider.account_port(account)
-    assert call.payload["fingerprint"] == account.secret_fingerprint
+    assert call.payload["fingerprint"] == account.owner_fingerprint
     assert call.payload["fingerprint"]
     assert secret not in call.payload["fingerprint"]
 

@@ -218,6 +218,14 @@ Until identity verification is available in the provider adapters, changed contr
 or clean them up in the provider console. Modal endpoint proxy tokens are separate and can
 rotate without changing this ownership digest.
 
+The digest is signed with a key that InferWeave creates on first use at
+`<state_dir>/owner-fingerprint.key` (owner read/write only), so it stays valid across
+restarts. Keep `state_dir` on persistent storage and back up this file together with the
+deployment database: without it, existing pooled deployments raise `AccountUnavailableError`.
+Records written by InferWeave < 0.4.2 carry a digest that cannot be verified after a restart;
+they are bound to the configured account with the same id on first use, with a warning, and
+then held to the normal check.
+
 Missing, removed or CredWeave-revoked owners fail explicitly; no other account is substituted.
 Legacy and no-config `ambient` records retain native SDK credential resolution and do not have
 this credential-generation binding. Keep the native cloud identity stable when managing them.

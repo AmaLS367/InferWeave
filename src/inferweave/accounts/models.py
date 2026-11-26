@@ -6,11 +6,12 @@ in ``repr``/``str``) and never renders secrets itself.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from credweave import Credential
 
+from inferweave.accounts.owner_key import OwnerKey
 from inferweave.accounts.schema import schema_for
 from inferweave.core.exceptions import ProviderAuthError
 from inferweave.domain.deployment_record import AMBIENT_ACCOUNT
@@ -34,6 +35,7 @@ class ProviderAccount:
     provider: str
     id: str
     credential: Credential | None = None
+    owner_key: OwnerKey | None = field(default=None, compare=False)
 
     @classmethod
     def ambient(cls, provider: str) -> "ProviderAccount":
@@ -58,14 +60,17 @@ class ProviderAccount:
 
         A new cloud key is not proof of the same identity. Until a provider offers a verified
         identity migration, existing resources require their original control-plane keys.
-        Uses CredWeave's public fingerprint API, without persisting secret material.
+
+        With an ``owner_key`` (always set by :class:`AccountManager`) the digest is signed with a
+        persistent key and stays comparable after a restart. Without one it falls back to
+        CredWeave's process-local fingerprint, which is only comparable within this process.
         """
         if self.is_ambient:
             return None
-        return Credential(
-            id=self.id,
-            secrets={name: self.secret(name) for name in schema_for(self.provider).required},
-        ).secret_fingerprint
+        control = {name: self.secret(name) for name in schema_for(self.provider).required}
+        if self.owner_key is not None:
+            return self.owner_key.fingerprint(self.provider, self.id, control)
+        return Credential(id=self.id, secrets=control).secret_fingerprint
 
     def secret(self, name: str) -> str:
         """Returns a required secret; raises a secret-safe error when it is missing."""

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.2
+
+- Fix: pooled deployments could not be stopped, attached or reconciled after a process
+  restart. The persisted owner fingerprint was a CredWeave digest whose key is random per
+  process, so it never matched again (`AccountUnavailableError`). Owner fingerprints are now
+  signed with a persistent key at `<state_dir>/owner-fingerprint.key` (created on first use,
+  mode 0600) and prefixed `v2:`. Changed control-plane keys are still refused.
+- Records from InferWeave < 0.4.2 are bound to the configured account with the same id on
+  first use (a warning is logged) and re-stamped with a `v2:` fingerprint on their next save.
+- SkyPilot account homes, API-server ports and server fingerprints are keyed by the owner
+  fingerprint and are now stable across restarts. Each pooled account gets a new home and
+  API server once after upgrading.
+- Keep `state_dir` on persistent storage and back up the owner key with the deployment
+  database.
+
 ## 0.4.1
 
 - Add open, ungated vLLM chat profiles to the built-in registry (Qwen2.5 0.5B/1.5B/7B/Coder 7B,

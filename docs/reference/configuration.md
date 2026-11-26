@@ -31,7 +31,7 @@ Recovery does not load secrets from SQLite. See [security](../how-to/secure-your
 | Field | Default / behavior |
 | --- | --- |
 | `max_attempts` | `3`; provisioning attempts per deploy across accounts and (`auto`) providers |
-| `state_dir` | `~/.inferweave/accounts`; private per-account homes for Lightning/SkyPilot workers |
+| `state_dir` | `~/.inferweave/accounts`; private per-account homes for Lightning/SkyPilot workers and the owner-fingerprint key (keep it persistent) |
 | `providers.<name>.strategy` | `round_robin`; also `weighted`, `failover`, `least_used`, `least_recently_used`, `random` |
 | `providers.<name>.accounts[]` | `id`, `env` (`secret field: VARIABLE_NAME`), `weight`, `priority`, `max_concurrency`, `metadata` and provider metadata keys (`teamspace`, `environment`) |
 | `providers.<name>.credentials_file` | CredWeave JSON credentials file, hot-reloaded; relative to the config file |
